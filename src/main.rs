@@ -19,10 +19,7 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use qr::PairingQr;
-use scrcpy::{
-    DEFAULT_SCREEN_OFF_TIMEOUT_SECONDS, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, Scrcpy,
-    ScrcpyOptions, ScrcpyRunMode,
-};
+use scrcpy::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, Scrcpy, ScrcpyOptions, ScrcpyRunMode};
 
 const BINARY_NAME: &str = "airadb";
 const ALIAS_NAME: &str = "aw";
@@ -105,14 +102,6 @@ struct Args {
         help = "Initial scrcpy window height; use 0 for scrcpy's automatic size"
     )]
     window_height: u32,
-
-    #[arg(
-        long,
-        default_value_t = DEFAULT_SCREEN_OFF_TIMEOUT_SECONDS,
-        value_name = "SECONDS",
-        help = "Screen-off timeout scrcpy applies while mirroring; use 0 for scrcpy's default"
-    )]
-    screen_off_timeout: u32,
 
     #[arg(
         long,
@@ -270,7 +259,6 @@ impl Args {
             window_title: self.window_title.clone(),
             window_width: self.window_width,
             window_height: self.window_height,
-            screen_off_timeout: self.screen_off_timeout,
             ..ScrcpyOptions::default()
         }
     }
@@ -1724,8 +1712,6 @@ mod tests {
             "443",
             "--window-height",
             "989",
-            "--screen-off-timeout",
-            "3600",
         ])
         .unwrap();
 
@@ -1737,7 +1723,6 @@ mod tests {
                 window_title: "Ovi Pixel".to_string(),
                 window_width: 443,
                 window_height: 989,
-                screen_off_timeout: 3600,
                 ..ScrcpyOptions::default()
             }
         );

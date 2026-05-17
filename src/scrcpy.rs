@@ -6,7 +6,6 @@ use anyhow::{Context, Result, bail};
 
 use crate::command_path::resolve_program;
 
-pub const DEFAULT_SCREEN_OFF_TIMEOUT_SECONDS: u32 = 86_400;
 pub const DEFAULT_WINDOW_WIDTH: u32 = 480;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
 
@@ -77,7 +76,6 @@ impl Scrcpy {
 pub struct ScrcpyOptions {
     pub no_audio: bool,
     pub stay_awake: bool,
-    pub screen_off_timeout: u32,
     pub borderless: bool,
     pub always_on_top: bool,
     pub window_title: String,
@@ -90,7 +88,6 @@ impl Default for ScrcpyOptions {
         Self {
             no_audio: true,
             stay_awake: true,
-            screen_off_timeout: DEFAULT_SCREEN_OFF_TIMEOUT_SECONDS,
             borderless: true,
             always_on_top: false,
             window_title: "Pixel 10 Pro".to_string(),
@@ -109,11 +106,6 @@ pub fn default_args(serial: &str, options: &ScrcpyOptions) -> Vec<OsString> {
 
     if options.stay_awake {
         args.push(OsString::from("--stay-awake"));
-    }
-
-    if options.screen_off_timeout > 0 {
-        args.push(OsString::from("--screen-off-timeout"));
-        args.push(OsString::from(options.screen_off_timeout.to_string()));
     }
 
     if options.borderless {
@@ -161,8 +153,6 @@ mod tests {
                 "192.168.1.23:40233",
                 "--no-audio",
                 "--stay-awake",
-                "--screen-off-timeout",
-                "86400",
                 "--window-borderless",
                 "--window-title",
                 "Pixel 10 Pro",
@@ -195,8 +185,6 @@ mod tests {
                 "device",
                 "--no-audio",
                 "--stay-awake",
-                "--screen-off-timeout",
-                "86400",
                 "--always-on-top",
                 "--window-title",
                 "Ovi Pixel",
@@ -209,9 +197,8 @@ mod tests {
     }
 
     #[test]
-    fn zero_values_leave_scrcpy_window_and_timeout_defaults() {
+    fn zero_window_values_leave_scrcpy_window_defaults() {
         let options = ScrcpyOptions {
-            screen_off_timeout: 0,
             window_width: 0,
             window_height: 0,
             ..ScrcpyOptions::default()
@@ -222,7 +209,6 @@ mod tests {
             .map(|arg| arg.to_string_lossy().to_string())
             .collect();
 
-        assert!(!args.contains(&"--screen-off-timeout".to_string()));
         assert!(!args.contains(&"--window-width".to_string()));
         assert!(!args.contains(&"--window-height".to_string()));
     }
