@@ -6,6 +6,10 @@ use anyhow::{Context, Result, bail};
 
 use crate::command_path::resolve_program;
 
+pub const DEFAULT_SCREEN_OFF_TIMEOUT_SECONDS: u32 = 86_400;
+pub const DEFAULT_WINDOW_WIDTH: u32 = 480;
+pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
+
 #[derive(Debug, Clone)]
 pub struct Scrcpy {
     path: PathBuf,
@@ -73,9 +77,12 @@ impl Scrcpy {
 pub struct ScrcpyOptions {
     pub no_audio: bool,
     pub stay_awake: bool,
+    pub screen_off_timeout: u32,
     pub borderless: bool,
     pub always_on_top: bool,
     pub window_title: String,
+    pub window_width: u32,
+    pub window_height: u32,
 }
 
 impl Default for ScrcpyOptions {
@@ -83,9 +90,12 @@ impl Default for ScrcpyOptions {
         Self {
             no_audio: true,
             stay_awake: true,
+            screen_off_timeout: DEFAULT_SCREEN_OFF_TIMEOUT_SECONDS,
             borderless: true,
             always_on_top: false,
             window_title: "Pixel 10 Pro".to_string(),
+            window_width: DEFAULT_WINDOW_WIDTH,
+            window_height: DEFAULT_WINDOW_HEIGHT,
         }
     }
 }
@@ -101,6 +111,11 @@ pub fn default_args(serial: &str, options: &ScrcpyOptions) -> Vec<OsString> {
         args.push(OsString::from("--stay-awake"));
     }
 
+    if options.screen_off_timeout > 0 {
+        args.push(OsString::from("--screen-off-timeout"));
+        args.push(OsString::from(options.screen_off_timeout.to_string()));
+    }
+
     if options.borderless {
         args.push(OsString::from("--window-borderless"));
     }
@@ -112,6 +127,16 @@ pub fn default_args(serial: &str, options: &ScrcpyOptions) -> Vec<OsString> {
     if !options.window_title.is_empty() {
         args.push(OsString::from("--window-title"));
         args.push(OsString::from(&options.window_title));
+    }
+
+    if options.window_width > 0 {
+        args.push(OsString::from("--window-width"));
+        args.push(OsString::from(options.window_width.to_string()));
+    }
+
+    if options.window_height > 0 {
+        args.push(OsString::from("--window-height"));
+        args.push(OsString::from(options.window_height.to_string()));
     }
 
     args
@@ -136,9 +161,15 @@ mod tests {
                 "192.168.1.23:40233",
                 "--no-audio",
                 "--stay-awake",
+                "--screen-off-timeout",
+                "86400",
                 "--window-borderless",
                 "--window-title",
                 "Pixel 10 Pro",
+                "--window-width",
+                "480",
+                "--window-height",
+                "1071",
             ]
         );
     }
@@ -164,10 +195,35 @@ mod tests {
                 "device",
                 "--no-audio",
                 "--stay-awake",
+                "--screen-off-timeout",
+                "86400",
                 "--always-on-top",
                 "--window-title",
                 "Ovi Pixel",
+                "--window-width",
+                "480",
+                "--window-height",
+                "1071",
             ]
         );
+    }
+
+    #[test]
+    fn zero_values_leave_scrcpy_window_and_timeout_defaults() {
+        let options = ScrcpyOptions {
+            screen_off_timeout: 0,
+            window_width: 0,
+            window_height: 0,
+            ..ScrcpyOptions::default()
+        };
+        let args = default_args("device", &options);
+        let args: Vec<_> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+
+        assert!(!args.contains(&"--screen-off-timeout".to_string()));
+        assert!(!args.contains(&"--window-width".to_string()));
+        assert!(!args.contains(&"--window-height".to_string()));
     }
 }
