@@ -62,14 +62,14 @@ struct Args {
     #[arg(
         long,
         conflicts_with = "foreground",
-        help = "Start scrcpy in the background once connected and skip the menu"
+        help = "Start scrcpy without waiting for it and skip the menu"
     )]
     background: bool,
 
     #[arg(
         long,
         conflicts_with = "background",
-        help = "Start scrcpy in the foreground once connected and skip the menu"
+        help = "Start scrcpy and wait until it exits, then skip the menu"
     )]
     foreground: bool,
 
@@ -122,7 +122,7 @@ struct Args {
 
     #[arg(
         long,
-        help = "Convenience mode: background scrcpy, watch reconnect, keep awake and Wi-Fi diagnostics"
+        help = "Convenience mode: start scrcpy, watch reconnect, keep awake and Wi-Fi diagnostics"
     )]
     stable: bool,
 
@@ -637,12 +637,12 @@ fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
     }
 
     let background_label = if args.watch_enabled() {
-        "Start scrcpy in background and watch"
+        "Start scrcpy and keep watching ADB"
     } else {
-        "Start scrcpy in background and close"
+        "Start scrcpy and close airadb"
     };
 
-    match ui::menu(&[background_label, "Start scrcpy", "Close"])? {
+    match ui::menu(&[background_label, "Start scrcpy and wait", "Close"])? {
         1 => Ok(ConnectedAction::StartBackground),
         2 => Ok(ConnectedAction::StartForeground),
         3 => Ok(ConnectedAction::Close),
@@ -653,7 +653,7 @@ fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
 fn start_scrcpy_background(phone: &ConnectedPhone, args: &Args) -> Result<()> {
     let scrcpy = resolve_scrcpy(args)?;
     let pid = scrcpy.launch_background(&phone.serial, &args.scrcpy_options())?;
-    ui::success(format!("Started scrcpy in the background (pid {pid})."));
+    ui::success(format!("Started scrcpy (pid {pid}); airadb can close now."));
     Ok(())
 }
 
