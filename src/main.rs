@@ -693,7 +693,11 @@ fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
         "Start scrcpy and close airadb"
     };
 
-    match ui::menu(&[background_label, "Start scrcpy and wait", "Close"])? {
+    match ui::menu_with_default(
+        &[background_label, "Start scrcpy and wait", "Close"],
+        1,
+        Duration::from_secs(5),
+    )? {
         1 => Ok(ConnectedAction::StartBackground),
         2 => Ok(ConnectedAction::StartForeground),
         3 => Ok(ConnectedAction::Close),

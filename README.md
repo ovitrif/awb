@@ -16,7 +16,7 @@ Pin a release or install somewhere else:
 
 ```sh
 curl -fsSL https://github.com/ovitrif/airadb/releases/latest/download/install.sh | \
-  AIRADB_INSTALL_TAG=v0.1.11 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
+  AIRADB_INSTALL_TAG=v0.1.12 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 Or build from source:
@@ -56,7 +56,7 @@ On your Android phone:
 2. Tap Pair device with QR code.
 3. Scan the QR code shown by `airadb`.
 
-Once ADB is connected, `airadb` shows options to start `scrcpy` and close the CLI, start `scrcpy` and wait until it exits, or close without launching anything. Use `--background` or `--foreground` to skip that final menu. If a device is already connected through ADB, `airadb` skips pairing and offers the `scrcpy` options immediately unless a launch flag was provided.
+Once ADB is connected, `airadb` shows options to start `scrcpy` and close the CLI, start `scrcpy` and wait until it exits, or close without launching anything. The first option auto-starts after 5 seconds unless you interact with the menu. Use `--background` or `--foreground` to skip that final menu. If a device is already connected through ADB, `airadb` skips pairing and offers the `scrcpy` options immediately unless a launch flag was provided.
 
 Useful options:
 
