@@ -267,7 +267,7 @@ fn interactive_menu_inner(
         .as_ref()
         .map(|default| default.selection)
         .unwrap_or(0);
-    let mut last_prompt_seconds = None;
+    let mut last_auto_default_tick = None;
 
     render_interactive_menu(&mut stdout, options, selected, &auto_default)?;
 
@@ -286,10 +286,16 @@ fn interactive_menu_inner(
                     return Ok(default.selection + 1);
                 }
 
-                let seconds = default.remaining_seconds();
-                if last_prompt_seconds != Some(seconds) {
-                    rerender_interactive_menu(&mut stdout, options, selected, &auto_default)?;
-                    last_prompt_seconds = Some(seconds);
+                let tick = default.elapsed_seconds();
+                if last_auto_default_tick != Some(tick) {
+                    rerender_interactive_menu_option(
+                        &mut stdout,
+                        options,
+                        selected,
+                        default.selection,
+                        &auto_default,
+                    )?;
+                    last_auto_default_tick = Some(tick);
                 }
             }
 
@@ -384,10 +390,6 @@ impl AutoDefault {
         )
     }
 
-    fn remaining_seconds(&self) -> u64 {
-        display_seconds(self.deadline.saturating_duration_since(Instant::now()))
-    }
-
     fn elapsed_seconds(&self) -> u64 {
         Instant::now()
             .saturating_duration_since(self.started_at)
@@ -420,27 +422,39 @@ fn render_interactive_menu<W: Write>(
     auto_default: &Option<AutoDefault>,
 ) -> Result<()> {
     for (index, option) in options.iter().enumerate() {
-        let option = option_with_auto_default_suffix(option, index, auto_default);
-        execute!(
-            writer,
-            cursor::MoveToColumn(0),
-            Clear(ClearType::CurrentLine)
-        )?;
-
-        if index == selected {
-            execute!(
-                writer,
-                SetAttribute(Attribute::Reverse),
-                Print(format!("› {}. {}", index + 1, option)),
-                SetAttribute(Attribute::Reset),
-                Print("\r\n")
-            )?;
-        } else {
-            execute!(writer, Print(format!("  {}. {}\r\n", index + 1, option)))?;
-        }
+        render_interactive_menu_option(writer, option, index, selected, auto_default)?;
     }
 
     render_interactive_menu_prompt(writer, auto_default)
+}
+
+fn render_interactive_menu_option<W: Write>(
+    writer: &mut W,
+    option: &str,
+    index: usize,
+    selected: usize,
+    auto_default: &Option<AutoDefault>,
+) -> Result<()> {
+    let option = option_with_auto_default_suffix(option, index, auto_default);
+    execute!(
+        writer,
+        cursor::MoveToColumn(0),
+        Clear(ClearType::CurrentLine)
+    )?;
+
+    if index == selected {
+        execute!(
+            writer,
+            SetAttribute(Attribute::Reverse),
+            Print(format!("› {}. {}", index + 1, option)),
+            SetAttribute(Attribute::Reset),
+            Print("\r\n")
+        )?;
+    } else {
+        execute!(writer, Print(format!("  {}. {}\r\n", index + 1, option)))?;
+    }
+
+    Ok(())
 }
 
 fn option_with_auto_default_suffix(
@@ -480,15 +494,37 @@ fn render_interactive_menu_prompt<W: Write>(
     Ok(())
 }
 
-fn interactive_menu_prompt(auto_default: &Option<AutoDefault>) -> String {
-    match auto_default {
-        Some(default) if default.active => format!(
-            "Auto-selects {} in {}s. Use ↑↓ + Enter, number key, or ESC to cancel: ",
-            default.selection + 1,
-            default.remaining_seconds()
-        ),
-        _ => "Use ↑↓ + Enter, number key, or ESC to cancel: ".to_string(),
-    }
+fn interactive_menu_prompt(_auto_default: &Option<AutoDefault>) -> String {
+    "Use ↑↓ + Enter, number key, or ESC to cancel: ".to_string()
+}
+
+fn rerender_interactive_menu_option<W: Write>(
+    writer: &mut W,
+    options: &[&str],
+    selected: usize,
+    option_index: usize,
+    auto_default: &Option<AutoDefault>,
+) -> Result<()> {
+    execute!(
+        writer,
+        cursor::SavePosition,
+        cursor::MoveUp(rerender_menu_option_line_offset(
+            options.len(),
+            option_index
+        )),
+        cursor::MoveToColumn(0)
+    )?;
+    render_interactive_menu_option(
+        writer,
+        options[option_index],
+        option_index,
+        selected,
+        auto_default,
+    )?;
+    execute!(writer, cursor::RestorePosition)?;
+    writer.flush().context("failed to flush stdout")?;
+
+    Ok(())
 }
 
 fn rerender_interactive_menu<W: Write>(
@@ -507,6 +543,10 @@ fn rerender_interactive_menu<W: Write>(
 
 fn rerender_menu_line_count(option_count: usize) -> u16 {
     option_count.saturating_add(1) as u16
+}
+
+fn rerender_menu_option_line_offset(option_count: usize, option_index: usize) -> u16 {
+    option_count.saturating_sub(option_index) as u16
 }
 
 fn line_menu(options: &[&str]) -> Result<usize> {
@@ -636,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_auto_default_prompt() {
+    fn renders_auto_default_prompt_without_countdown() {
         let auto_default = Some(AutoDefault {
             selection: 0,
             started_at: Instant::now(),
@@ -644,10 +684,10 @@ mod tests {
             active: true,
         });
 
-        let prompt = interactive_menu_prompt(&auto_default);
-
-        assert!(prompt.contains("Auto-selects 1 in"));
-        assert!(prompt.contains("Use ↑↓ + Enter"));
+        assert_eq!(
+            interactive_menu_prompt(&auto_default),
+            "Use ↑↓ + Enter, number key, or ESC to cancel: "
+        );
     }
 
     #[test]
@@ -687,6 +727,13 @@ mod tests {
     #[test]
     fn rerender_includes_prompt_line() {
         assert_eq!(rerender_menu_line_count(3), 4);
+    }
+
+    #[test]
+    fn option_rerender_offset_starts_from_prompt_line() {
+        assert_eq!(rerender_menu_option_line_offset(3, 0), 3);
+        assert_eq!(rerender_menu_option_line_offset(3, 1), 2);
+        assert_eq!(rerender_menu_option_line_offset(3, 2), 1);
     }
 
     #[test]
