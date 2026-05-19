@@ -16,7 +16,7 @@ Pin a release or install somewhere else:
 
 ```sh
 curl -fsSL https://github.com/ovitrif/airadb/releases/latest/download/install.sh | \
-  AIRADB_INSTALL_TAG=v0.1.10 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
+  AIRADB_INSTALL_TAG=v0.1.11 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 Or build from source:
@@ -48,7 +48,7 @@ Or from a source checkout:
 cargo run
 ```
 
-`airadb` expects `adb` to be installed and available on your `PATH`. If ADB stops responding, startup checks time out and airadb attempts one server restart instead of waiting forever. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu or with `--background` / `--foreground`. The default wait time for pairing and connection discovery is 60 seconds. By default, scrcpy launches with a borderless Pixel-style window title, a 480x1071 window, and `--stay-awake`; pass `--plain-window` to use scrcpy's regular decorated window.
+`airadb` expects `adb` to be installed and available on your `PATH`. If ADB stops responding, startup checks, the ADB mDNS probe, and device scans time out and airadb attempts one server restart instead of waiting forever. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu or with `--background` / `--foreground`. The default wait time for pairing and connection discovery is 60 seconds. By default, scrcpy launches with a borderless Pixel-style window title, a 480x1071 window, and `--stay-awake`; pass `--plain-window` to use scrcpy's regular decorated window.
 
 On your Android phone:
 

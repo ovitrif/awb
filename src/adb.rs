@@ -14,6 +14,7 @@ const CONNECT_SERVICE_TYPE: &str = "_adb-tls-connect._tcp";
 const ADB_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const ADB_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const ADB_DEVICES_TIMEOUT: Duration = Duration::from_secs(5);
+const ADB_MDNS_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const ADB_PAIR_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const ADB_SHELL_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -108,6 +109,10 @@ impl Adb {
     pub fn version(&self) -> Result<CommandResult> {
         let output = self.run_with_timeout(["version"], ADB_STARTUP_TIMEOUT)?;
         ensure_success("adb version", output)
+    }
+
+    pub fn mdns_check(&self) -> Result<CommandResult> {
+        self.run_with_timeout(["mdns", "check"], ADB_MDNS_CHECK_TIMEOUT)
     }
 
     pub fn reset_server(&self) -> Result<()> {

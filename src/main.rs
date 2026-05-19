@@ -316,6 +316,8 @@ fn run() -> Result<()> {
         ensure_adb_ready(&adb)?;
     }
 
+    ensure_adb_mdns_ready(&adb)?;
+
     let phone = match startup_device_choice(&adb)? {
         StartupDeviceChoice::Connected(phone) => phone,
         StartupDeviceChoice::PairNew => retrying_pairing_flow(&adb, timeout)?,
@@ -338,6 +340,53 @@ fn ensure_adb_ready(adb: &Adb) -> Result<()> {
                 .context("ADB still did not answer after restarting the server")?;
             Ok(())
         }
+    }
+}
+
+fn ensure_adb_mdns_ready(adb: &Adb) -> Result<()> {
+    ui::status("Checking ADB mDNS...");
+    match check_adb_mdns(adb) {
+        Ok(()) => Ok(()),
+        Err(error) if adb::error_is_timeout(&error) => {
+            ui::warn(format!(
+                "ADB mDNS check timed out: {error:#}. Restarting ADB server once..."
+            ));
+            reset_adb_server(adb)?;
+
+            match check_adb_mdns(adb) {
+                Ok(()) => Ok(()),
+                Err(error) if adb::error_is_timeout(&error) => {
+                    ui::warn(format!(
+                        "ADB mDNS still timed out after restart: {error:#}. Continuing with manual and Bonjour fallbacks."
+                    ));
+                    Ok(())
+                }
+                Err(error) => {
+                    ui::warn(format!(
+                        "could not run adb mdns check after restart: {error:#}"
+                    ));
+                    Ok(())
+                }
+            }
+        }
+        Err(error) => {
+            ui::warn(format!("could not run adb mdns check: {error:#}"));
+            Ok(())
+        }
+    }
+}
+
+fn check_adb_mdns(adb: &Adb) -> Result<()> {
+    match adb.mdns_check() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            ui::warn(format!(
+                "adb mdns check reported a problem: {}",
+                output.combined_output()
+            ));
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 
