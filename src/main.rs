@@ -316,8 +316,6 @@ fn run() -> Result<()> {
         ensure_adb_ready(&adb)?;
     }
 
-    warn_if_mdns_check_fails(&adb);
-
     let phone = match startup_device_choice(&adb)? {
         StartupDeviceChoice::Connected(phone) => phone,
         StartupDeviceChoice::PairNew => retrying_pairing_flow(&adb, timeout)?,
@@ -865,6 +863,22 @@ fn resolve_scrcpy(args: &Args) -> Result<Scrcpy> {
 }
 
 fn startup_device_choice(adb: &Adb) -> Result<StartupDeviceChoice> {
+    ui::status("Checking for already-connected phones...");
+    match startup_device_choice_once(adb) {
+        Ok(choice) => Ok(choice),
+        Err(error) if adb::error_is_timeout(&error) => {
+            ui::warn(format!(
+                "ADB device listing timed out: {error:#}. Restarting ADB server once..."
+            ));
+            reset_adb_server(adb)?;
+            startup_device_choice_once(adb)
+                .context("ADB devices still did not answer after restarting the server")
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn startup_device_choice_once(adb: &Adb) -> Result<StartupDeviceChoice> {
     let ready_phones = wait_for_startup_connected_phones(adb, Duration::from_secs(2))?;
 
     match ready_phones.len() {
@@ -933,17 +947,6 @@ fn ready_connected_phones(adb: &Adb) -> Result<Vec<ConnectedPhone>> {
     Ok(phones)
 }
 
-fn warn_if_mdns_check_fails(adb: &Adb) {
-    match adb.mdns_check() {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => ui::warn(format!(
-            "adb mdns check reported a problem: {}",
-            output.combined_output()
-        )),
-        Err(error) => ui::warn(format!("could not run adb mdns check: {error:#}")),
-    }
-}
-
 fn reset_adb_server(adb: &Adb) -> Result<()> {
     ui::status("Resetting local ADB server...");
     adb.reset_server()?;
@@ -980,7 +983,6 @@ fn retrying_pairing_flow(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone>
                     },
                     3 => {
                         reset_adb_server(adb)?;
-                        warn_if_mdns_check_fails(adb);
                         continue;
                     }
                     4 => match pairing_code_flow(adb, timeout) {

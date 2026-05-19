@@ -13,6 +13,7 @@ const PAIRING_SERVICE_TYPE: &str = "_adb-tls-pairing._tcp";
 const CONNECT_SERVICE_TYPE: &str = "_adb-tls-connect._tcp";
 const ADB_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const ADB_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const ADB_DEVICES_TIMEOUT: Duration = Duration::from_secs(5);
 const ADB_PAIR_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const ADB_SHELL_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -109,10 +110,6 @@ impl Adb {
         ensure_success("adb version", output)
     }
 
-    pub fn mdns_check(&self) -> Result<CommandResult> {
-        self.run(["mdns", "check"])
-    }
-
     pub fn reset_server(&self) -> Result<()> {
         let _kill_output = self.run(["kill-server"])?;
         thread::sleep(Duration::from_secs(1));
@@ -124,7 +121,10 @@ impl Adb {
     }
 
     pub fn devices(&self) -> Result<Vec<AdbDevice>> {
-        let output = ensure_success("adb devices -l", self.run(["devices", "-l"])?)?;
+        let output = ensure_success(
+            "adb devices -l",
+            self.run_with_timeout(["devices", "-l"], ADB_DEVICES_TIMEOUT)?,
+        )?;
         Ok(parse_devices(&output.stdout))
     }
 
@@ -434,6 +434,12 @@ pub fn connect_services(services: &[MdnsService]) -> HashSet<MdnsService> {
         .collect()
 }
 
+pub fn error_is_timeout(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains(" timed out after "))
+}
+
 pub fn ready_device_serials(devices: &[AdbDevice]) -> HashSet<String> {
     devices
         .iter()
@@ -625,6 +631,15 @@ ZY22 unauthorized
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("timed out"));
+    }
+
+    #[test]
+    fn detects_timeout_errors_in_context_chain() {
+        let error = anyhow::anyhow!("adb devices -l timed out after 10 seconds")
+            .context("checking connected phones");
+
+        assert!(error_is_timeout(&error));
+        assert!(!error_is_timeout(&anyhow::anyhow!("adb devices failed")));
     }
 
     #[test]
