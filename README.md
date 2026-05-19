@@ -16,7 +16,7 @@ Pin a release or install somewhere else:
 
 ```sh
 curl -fsSL https://github.com/ovitrif/airadb/releases/latest/download/install.sh | \
-  AIRADB_INSTALL_TAG=v0.1.13 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
+  AIRADB_INSTALL_TAG=v0.1.14 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 Or build from source:

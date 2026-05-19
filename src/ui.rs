@@ -421,7 +421,11 @@ fn render_interactive_menu<W: Write>(
 ) -> Result<()> {
     for (index, option) in options.iter().enumerate() {
         let option = option_with_auto_default_suffix(option, index, auto_default);
-        execute!(writer, Clear(ClearType::CurrentLine))?;
+        execute!(
+            writer,
+            cursor::MoveToColumn(0),
+            Clear(ClearType::CurrentLine)
+        )?;
 
         if index == selected {
             execute!(
@@ -495,10 +499,14 @@ fn rerender_interactive_menu<W: Write>(
 ) -> Result<()> {
     execute!(
         writer,
-        cursor::MoveUp(options.len() as u16),
+        cursor::MoveUp(rerender_menu_line_count(options.len())),
         cursor::MoveToColumn(0)
     )?;
     render_interactive_menu(writer, options, selected, auto_default)
+}
+
+fn rerender_menu_line_count(option_count: usize) -> u16 {
+    option_count.saturating_add(1) as u16
 }
 
 fn line_menu(options: &[&str]) -> Result<usize> {
@@ -674,6 +682,11 @@ mod tests {
             option_with_auto_default_suffix("Start scrcpy and wait", 1, &auto_default),
             "Start scrcpy and wait"
         );
+    }
+
+    #[test]
+    fn rerender_includes_prompt_line() {
+        assert_eq!(rerender_menu_line_count(3), 4);
     }
 
     #[test]
