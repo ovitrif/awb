@@ -244,9 +244,11 @@ fn interactive_menu_with_default(
     let auto_default = if timeout.is_zero() {
         None
     } else {
+        let started_at = Instant::now();
         Some(AutoDefault {
             selection: default_selection - 1,
-            deadline: Instant::now() + timeout,
+            started_at,
+            deadline: started_at + timeout,
             active: true,
         })
     };
@@ -286,7 +288,7 @@ fn interactive_menu_inner(
 
                 let seconds = default.remaining_seconds();
                 if last_prompt_seconds != Some(seconds) {
-                    render_interactive_menu_prompt(&mut stdout, &auto_default)?;
+                    rerender_interactive_menu(&mut stdout, options, selected, &auto_default)?;
                     last_prompt_seconds = Some(seconds);
                 }
             }
@@ -360,6 +362,7 @@ fn interactive_menu_inner(
 
 struct AutoDefault {
     selection: usize,
+    started_at: Instant,
     deadline: Instant,
     active: bool,
 }
@@ -383,6 +386,12 @@ impl AutoDefault {
 
     fn remaining_seconds(&self) -> u64 {
         display_seconds(self.deadline.saturating_duration_since(Instant::now()))
+    }
+
+    fn elapsed_seconds(&self) -> u64 {
+        Instant::now()
+            .saturating_duration_since(self.started_at)
+            .as_secs()
     }
 }
 
@@ -411,22 +420,45 @@ fn render_interactive_menu<W: Write>(
     auto_default: &Option<AutoDefault>,
 ) -> Result<()> {
     for (index, option) in options.iter().enumerate() {
+        let option = option_with_auto_default_suffix(option, index, auto_default);
         execute!(writer, Clear(ClearType::CurrentLine))?;
 
         if index == selected {
             execute!(
                 writer,
                 SetAttribute(Attribute::Reverse),
-                Print(format!("› {}. {option}", index + 1)),
+                Print(format!("› {}. {}", index + 1, option)),
                 SetAttribute(Attribute::Reset),
                 Print("\r\n")
             )?;
         } else {
-            execute!(writer, Print(format!("  {}. {option}\r\n", index + 1)))?;
+            execute!(writer, Print(format!("  {}. {}\r\n", index + 1, option)))?;
         }
     }
 
     render_interactive_menu_prompt(writer, auto_default)
+}
+
+fn option_with_auto_default_suffix(
+    option: &str,
+    index: usize,
+    auto_default: &Option<AutoDefault>,
+) -> String {
+    let Some(default) = auto_default else {
+        return option.to_string();
+    };
+
+    if !default.active || index != default.selection {
+        return option.to_string();
+    }
+
+    let dot_count = default.elapsed_seconds() as usize;
+
+    if dot_count == 0 {
+        option.to_string()
+    } else {
+        format!("{}{}", option, ".".repeat(dot_count))
+    }
 }
 
 fn render_interactive_menu_prompt<W: Write>(
@@ -599,6 +631,7 @@ mod tests {
     fn renders_auto_default_prompt() {
         let auto_default = Some(AutoDefault {
             selection: 0,
+            started_at: Instant::now(),
             deadline: Instant::now() + Duration::from_secs(5),
             active: true,
         });
@@ -613,6 +646,7 @@ mod tests {
     fn renders_regular_prompt_when_auto_default_is_inactive() {
         let auto_default = Some(AutoDefault {
             selection: 0,
+            started_at: Instant::now(),
             deadline: Instant::now() + Duration::from_secs(5),
             active: false,
         });
@@ -620,6 +654,25 @@ mod tests {
         assert_eq!(
             interactive_menu_prompt(&auto_default),
             "Use ↑↓ + Enter, number key, or ESC to cancel: "
+        );
+    }
+
+    #[test]
+    fn appends_dots_to_active_default_option() {
+        let auto_default = Some(AutoDefault {
+            selection: 0,
+            started_at: Instant::now() - Duration::from_secs(3),
+            deadline: Instant::now() + Duration::from_secs(2),
+            active: true,
+        });
+
+        assert_eq!(
+            option_with_auto_default_suffix("Start scrcpy and close airadb", 0, &auto_default),
+            "Start scrcpy and close airadb..."
+        );
+        assert_eq!(
+            option_with_auto_default_suffix("Start scrcpy and wait", 1, &auto_default),
+            "Start scrcpy and wait"
         );
     }
 
