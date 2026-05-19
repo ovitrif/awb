@@ -307,10 +307,13 @@ fn run() -> Result<()> {
     ui::title("airadb", "Android wireless debugging companion");
     ui::status("Checking ADB...");
     let adb = Adb::resolve(args.adb.clone())?;
-    adb.version()?;
 
     if args.reset_adb {
         reset_adb_server(&adb)?;
+        adb.version()
+            .context("ADB still did not answer after restarting the server")?;
+    } else {
+        ensure_adb_ready(&adb)?;
     }
 
     warn_if_mdns_check_fails(&adb);
@@ -325,6 +328,19 @@ fn run() -> Result<()> {
     let action = connected_phone_action(&args)?;
     prepare_connected_phone(&adb, &phone, &args, action);
     handle_connected_phone(&adb, &phone, &args, action)
+}
+
+fn ensure_adb_ready(adb: &Adb) -> Result<()> {
+    match adb.version() {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            ui::warn(format!("ADB did not answer cleanly: {error:#}"));
+            reset_adb_server(adb)?;
+            adb.version()
+                .context("ADB still did not answer after restarting the server")?;
+            Ok(())
+        }
+    }
 }
 
 fn handle_cli_command(command: &CliCommand) -> Result<()> {

@@ -1,9 +1,9 @@
 use std::collections::HashSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -11,6 +11,10 @@ use crate::command_path::resolve_program;
 
 const PAIRING_SERVICE_TYPE: &str = "_adb-tls-pairing._tcp";
 const CONNECT_SERVICE_TYPE: &str = "_adb-tls-connect._tcp";
+const ADB_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const ADB_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const ADB_PAIR_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const ADB_SHELL_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone)]
 pub struct Adb {
@@ -101,7 +105,7 @@ impl Adb {
     }
 
     pub fn version(&self) -> Result<CommandResult> {
-        let output = self.run(["version"])?;
+        let output = self.run_with_timeout(["version"], ADB_STARTUP_TIMEOUT)?;
         ensure_success("adb version", output)
     }
 
@@ -130,7 +134,7 @@ impl Adb {
     }
 
     pub fn pair(&self, endpoint: &str, secret: &str) -> Result<CommandResult> {
-        let output = self.run(["pair", endpoint, secret])?;
+        let output = self.run_with_timeout(["pair", endpoint, secret], ADB_PAIR_CONNECT_TIMEOUT)?;
         let combined = output.combined_output();
 
         if !output.status.success() {
@@ -145,7 +149,7 @@ impl Adb {
     }
 
     pub fn connect(&self, endpoint: &str) -> Result<CommandResult> {
-        let output = self.run(["connect", endpoint])?;
+        let output = self.run_with_timeout(["connect", endpoint], ADB_PAIR_CONNECT_TIMEOUT)?;
         let combined = output.combined_output();
 
         if !output.status.success() {
@@ -164,7 +168,10 @@ impl Adb {
     }
 
     pub fn keepalive(&self, serial: &str) -> Result<()> {
-        ensure_success("adb shell true", self.run(["-s", serial, "shell", "true"])?)?;
+        ensure_success(
+            "adb shell true",
+            self.run_with_timeout(["-s", serial, "shell", "true"], ADB_SHELL_TIMEOUT)?,
+        )?;
 
         Ok(())
     }
@@ -172,7 +179,10 @@ impl Adb {
     pub fn stay_awake(&self, serial: &str) -> Result<()> {
         ensure_success(
             "adb shell svc power stayon true",
-            self.run(["-s", serial, "shell", "svc", "power", "stayon", "true"])?,
+            self.run_with_timeout(
+                ["-s", serial, "shell", "svc", "power", "stayon", "true"],
+                ADB_SHELL_TIMEOUT,
+            )?,
         )?;
 
         Ok(())
@@ -228,16 +238,80 @@ impl Adb {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = Command::new(&self.path)
-            .args(args)
-            .output()
+        self.run_with_timeout(args, ADB_DEFAULT_TIMEOUT)
+    }
+
+    fn run_with_timeout<I, S>(&self, args: I, timeout: Duration) -> Result<CommandResult>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args: Vec<OsString> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_os_string())
+            .collect();
+        let command_display = command_display(&self.path, &args);
+        let mut child = Command::new(&self.path)
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .with_context(|| format!("failed to run {}", self.path.display()))?;
 
-        Ok(CommandResult {
-            status: output.status,
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if child
+                .try_wait()
+                .with_context(|| format!("failed to poll {command_display}"))?
+                .is_some()
+            {
+                let output = child
+                    .wait_with_output()
+                    .with_context(|| format!("failed to read {command_display} output"))?;
+
+                return Ok(CommandResult {
+                    status: output.status,
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                });
+            }
+
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let output = child
+                    .wait_with_output()
+                    .with_context(|| format!("failed to stop timed-out {command_display}"))?;
+                let combined = String::from_utf8_lossy(&output.stderr);
+
+                bail!(
+                    "{command_display} timed out after {} seconds{}",
+                    timeout.as_secs(),
+                    timeout_hint(&combined)
+                );
+            }
+
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
+fn command_display(path: &std::path::Path, args: &[OsString]) -> String {
+    let mut parts = vec![path.display().to_string()];
+    parts.extend(args.iter().map(|arg| arg.to_string_lossy().to_string()));
+    parts.join(" ")
+}
+
+fn timeout_hint(stderr: &str) -> String {
+    let stderr = stderr.trim();
+
+    if stderr.is_empty() {
+        ". Try `airadb --reset-adb` or `adb kill-server` if ADB is wedged.".to_string()
+    } else {
+        format!(
+            ": {}. Try `airadb --reset-adb` or `adb kill-server` if ADB is wedged.",
+            fallback_message(stderr)
+        )
     }
 }
 
@@ -526,6 +600,31 @@ ZY22 unauthorized
         assert_eq!(devices[1].serial, "192.168.1.50:42131");
         assert_eq!(devices[2].state, DeviceState::Offline);
         assert_eq!(devices[3].state, DeviceState::Unauthorized);
+    }
+
+    #[test]
+    fn run_with_timeout_captures_command_output() {
+        let adb = Adb {
+            path: PathBuf::from("sh"),
+        };
+        let output = adb
+            .run_with_timeout(["-c", "printf ok"], Duration::from_secs(2))
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, "ok");
+    }
+
+    #[test]
+    fn run_with_timeout_stops_stuck_command() {
+        let adb = Adb {
+            path: PathBuf::from("sh"),
+        };
+        let error = adb
+            .run_with_timeout(["-c", "sleep 2"], Duration::from_millis(50))
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("timed out"));
     }
 
     #[test]
