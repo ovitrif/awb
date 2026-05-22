@@ -6,6 +6,9 @@ use anyhow::{Context, Result, bail};
 
 use crate::command_path::resolve_program;
 
+pub const DEFAULT_WINDOW_WIDTH: u32 = 480;
+pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
+
 #[derive(Debug, Clone)]
 pub struct Scrcpy {
     path: PathBuf,
@@ -76,6 +79,8 @@ pub struct ScrcpyOptions {
     pub borderless: bool,
     pub always_on_top: bool,
     pub window_title: String,
+    pub window_width: u32,
+    pub window_height: u32,
 }
 
 impl Default for ScrcpyOptions {
@@ -86,6 +91,8 @@ impl Default for ScrcpyOptions {
             borderless: true,
             always_on_top: false,
             window_title: "Pixel 10 Pro".to_string(),
+            window_width: DEFAULT_WINDOW_WIDTH,
+            window_height: DEFAULT_WINDOW_HEIGHT,
         }
     }
 }
@@ -114,6 +121,16 @@ pub fn default_args(serial: &str, options: &ScrcpyOptions) -> Vec<OsString> {
         args.push(OsString::from(&options.window_title));
     }
 
+    if options.window_width > 0 {
+        args.push(OsString::from("--window-width"));
+        args.push(OsString::from(options.window_width.to_string()));
+    }
+
+    if options.window_height > 0 {
+        args.push(OsString::from("--window-height"));
+        args.push(OsString::from(options.window_height.to_string()));
+    }
+
     args
 }
 
@@ -139,6 +156,10 @@ mod tests {
                 "--window-borderless",
                 "--window-title",
                 "Pixel 10 Pro",
+                "--window-width",
+                "480",
+                "--window-height",
+                "1071",
             ]
         );
     }
@@ -167,7 +188,28 @@ mod tests {
                 "--always-on-top",
                 "--window-title",
                 "Ovi Pixel",
+                "--window-width",
+                "480",
+                "--window-height",
+                "1071",
             ]
         );
+    }
+
+    #[test]
+    fn zero_window_values_leave_scrcpy_window_defaults() {
+        let options = ScrcpyOptions {
+            window_width: 0,
+            window_height: 0,
+            ..ScrcpyOptions::default()
+        };
+        let args = default_args("device", &options);
+        let args: Vec<_> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+
+        assert!(!args.contains(&"--window-width".to_string()));
+        assert!(!args.contains(&"--window-height".to_string()));
     }
 }

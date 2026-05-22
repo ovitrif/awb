@@ -203,15 +203,105 @@ pub fn menu(options: &[&str]) -> Result<usize> {
     line_menu(options)
 }
 
+pub fn menu_with_default(
+    options: &[&str],
+    default_selection: usize,
+    timeout: Duration,
+) -> Result<usize> {
+    if options.is_empty() {
+        bail!("menu cannot be shown without options");
+    }
+
+    if !(1..=options.len()).contains(&default_selection) {
+        bail!("default menu selection must be one of the numbered options");
+    }
+
+    blank_line();
+    status("Choose an action");
+
+    if options.len() <= 9 {
+        match interactive_menu_with_default(options, default_selection, timeout) {
+            Ok(value) => return Ok(value),
+            Err(error) if is_raw_mode_error(&error) => {
+                warn("interactive input is unavailable; press a number and Enter.");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    line_menu(options)
+}
+
 fn interactive_menu(options: &[&str]) -> Result<usize> {
+    interactive_menu_inner(options, None)
+}
+
+fn interactive_menu_with_default(
+    options: &[&str],
+    default_selection: usize,
+    timeout: Duration,
+) -> Result<usize> {
+    let auto_default = if timeout.is_zero() {
+        None
+    } else {
+        let started_at = Instant::now();
+        Some(AutoDefault {
+            selection: default_selection - 1,
+            started_at,
+            deadline: started_at + timeout,
+            active: true,
+        })
+    };
+
+    interactive_menu_inner(options, auto_default)
+}
+
+fn interactive_menu_inner(
+    options: &[&str],
+    mut auto_default: Option<AutoDefault>,
+) -> Result<usize> {
     terminal::enable_raw_mode().context("failed to enable raw terminal input")?;
     let raw_mode = RawModeGuard;
     let mut stdout = io::stdout();
-    let mut selected = 0;
+    let mut selected = auto_default
+        .as_ref()
+        .map(|default| default.selection)
+        .unwrap_or(0);
+    let mut last_auto_default_tick = None;
 
-    render_interactive_menu(&mut stdout, options, selected)?;
+    render_interactive_menu(&mut stdout, options, selected, &auto_default)?;
 
     loop {
+        let poll_timeout = auto_default
+            .as_ref()
+            .and_then(AutoDefault::poll_timeout)
+            .unwrap_or_else(|| Duration::from_millis(250));
+
+        if !event::poll(poll_timeout).context("failed to poll keypress")? {
+            if let Some(default) = auto_default.as_ref() {
+                if default.expired() {
+                    let option = options[default.selection];
+                    drop(raw_mode);
+                    confirm_selection(&mut stdout, option)?;
+                    return Ok(default.selection + 1);
+                }
+
+                let tick = default.elapsed_seconds();
+                if last_auto_default_tick != Some(tick) {
+                    rerender_interactive_menu_option(
+                        &mut stdout,
+                        options,
+                        selected,
+                        default.selection,
+                        &auto_default,
+                    )?;
+                    last_auto_default_tick = Some(tick);
+                }
+            }
+
+            continue;
+        }
+
         match event::read().context("failed to read keypress")? {
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -225,20 +315,24 @@ fn interactive_menu(options: &[&str]) -> Result<usize> {
                     return Err(cancelled());
                 }
                 KeyCode::Up => {
+                    disable_auto_default(&mut auto_default);
                     selected = previous_selection(selected, options.len());
-                    rerender_interactive_menu(&mut stdout, options, selected)?;
+                    rerender_interactive_menu(&mut stdout, options, selected, &auto_default)?;
                 }
                 KeyCode::Down => {
+                    disable_auto_default(&mut auto_default);
                     selected = next_selection(selected, options.len());
-                    rerender_interactive_menu(&mut stdout, options, selected)?;
+                    rerender_interactive_menu(&mut stdout, options, selected, &auto_default)?;
                 }
                 KeyCode::Home => {
+                    disable_auto_default(&mut auto_default);
                     selected = 0;
-                    rerender_interactive_menu(&mut stdout, options, selected)?;
+                    rerender_interactive_menu(&mut stdout, options, selected, &auto_default)?;
                 }
                 KeyCode::End => {
+                    disable_auto_default(&mut auto_default);
                     selected = options.len() - 1;
-                    rerender_interactive_menu(&mut stdout, options, selected)?;
+                    rerender_interactive_menu(&mut stdout, options, selected, &auto_default)?;
                 }
                 KeyCode::Enter => {
                     let value = selected + 1;
@@ -255,16 +349,57 @@ fn interactive_menu(options: &[&str]) -> Result<usize> {
                         return Ok(value);
                     }
 
+                    disable_auto_default(&mut auto_default);
+                    render_interactive_menu_prompt(&mut stdout, &auto_default)?;
                     print!("\x07");
                     io::stdout().flush().context("failed to flush stdout")?;
                 }
                 _ => {
+                    disable_auto_default(&mut auto_default);
+                    render_interactive_menu_prompt(&mut stdout, &auto_default)?;
                     print!("\x07");
                     io::stdout().flush().context("failed to flush stdout")?;
                 }
             },
             _ => {}
         }
+    }
+}
+
+struct AutoDefault {
+    selection: usize,
+    started_at: Instant,
+    deadline: Instant,
+    active: bool,
+}
+
+impl AutoDefault {
+    fn expired(&self) -> bool {
+        self.active && Instant::now() >= self.deadline
+    }
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        if !self.active {
+            return None;
+        }
+
+        Some(
+            self.deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(250)),
+        )
+    }
+
+    fn elapsed_seconds(&self) -> u64 {
+        Instant::now()
+            .saturating_duration_since(self.started_at)
+            .as_secs()
+    }
+}
+
+fn disable_auto_default(auto_default: &mut Option<AutoDefault>) {
+    if let Some(default) = auto_default.as_mut() {
+        default.active = false;
     }
 }
 
@@ -284,28 +419,109 @@ fn render_interactive_menu<W: Write>(
     writer: &mut W,
     options: &[&str],
     selected: usize,
+    auto_default: &Option<AutoDefault>,
 ) -> Result<()> {
     for (index, option) in options.iter().enumerate() {
-        execute!(writer, Clear(ClearType::CurrentLine))?;
-
-        if index == selected {
-            execute!(
-                writer,
-                SetAttribute(Attribute::Reverse),
-                Print(format!("› {}. {option}", index + 1)),
-                SetAttribute(Attribute::Reset),
-                Print("\r\n")
-            )?;
-        } else {
-            execute!(writer, Print(format!("  {}. {option}\r\n", index + 1)))?;
-        }
+        render_interactive_menu_option(writer, option, index, selected, auto_default)?;
     }
 
+    render_interactive_menu_prompt(writer, auto_default)
+}
+
+fn render_interactive_menu_option<W: Write>(
+    writer: &mut W,
+    option: &str,
+    index: usize,
+    selected: usize,
+    auto_default: &Option<AutoDefault>,
+) -> Result<()> {
+    let option = option_with_auto_default_suffix(option, index, auto_default);
     execute!(
         writer,
-        Clear(ClearType::CurrentLine),
-        Print("Use ↑↓ + Enter, number key, or ESC to cancel: ")
+        cursor::MoveToColumn(0),
+        Clear(ClearType::CurrentLine)
     )?;
+
+    if index == selected {
+        execute!(
+            writer,
+            SetAttribute(Attribute::Reverse),
+            Print(format!("› {}. {}", index + 1, option)),
+            SetAttribute(Attribute::Reset),
+            Print("\r\n")
+        )?;
+    } else {
+        execute!(writer, Print(format!("  {}. {}\r\n", index + 1, option)))?;
+    }
+
+    Ok(())
+}
+
+fn option_with_auto_default_suffix(
+    option: &str,
+    index: usize,
+    auto_default: &Option<AutoDefault>,
+) -> String {
+    let Some(default) = auto_default else {
+        return option.to_string();
+    };
+
+    if !default.active || index != default.selection {
+        return option.to_string();
+    }
+
+    let dot_count = default.elapsed_seconds() as usize;
+
+    if dot_count == 0 {
+        option.to_string()
+    } else {
+        format!("{}{}", option, ".".repeat(dot_count))
+    }
+}
+
+fn render_interactive_menu_prompt<W: Write>(
+    writer: &mut W,
+    auto_default: &Option<AutoDefault>,
+) -> Result<()> {
+    execute!(
+        writer,
+        cursor::MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        Print(interactive_menu_prompt(auto_default))
+    )?;
+    writer.flush().context("failed to flush stdout")?;
+
+    Ok(())
+}
+
+fn interactive_menu_prompt(_auto_default: &Option<AutoDefault>) -> String {
+    "Use ↑↓ + Enter, number key, or ESC to cancel: ".to_string()
+}
+
+fn rerender_interactive_menu_option<W: Write>(
+    writer: &mut W,
+    options: &[&str],
+    selected: usize,
+    option_index: usize,
+    auto_default: &Option<AutoDefault>,
+) -> Result<()> {
+    execute!(
+        writer,
+        cursor::SavePosition,
+        cursor::MoveUp(rerender_menu_option_line_offset(
+            options.len(),
+            option_index
+        )),
+        cursor::MoveToColumn(0)
+    )?;
+    render_interactive_menu_option(
+        writer,
+        options[option_index],
+        option_index,
+        selected,
+        auto_default,
+    )?;
+    execute!(writer, cursor::RestorePosition)?;
     writer.flush().context("failed to flush stdout")?;
 
     Ok(())
@@ -315,13 +531,22 @@ fn rerender_interactive_menu<W: Write>(
     writer: &mut W,
     options: &[&str],
     selected: usize,
+    auto_default: &Option<AutoDefault>,
 ) -> Result<()> {
     execute!(
         writer,
-        cursor::MoveUp(options.len() as u16),
+        cursor::MoveUp(rerender_menu_line_count(options.len())),
         cursor::MoveToColumn(0)
     )?;
-    render_interactive_menu(writer, options, selected)
+    render_interactive_menu(writer, options, selected, auto_default)
+}
+
+fn rerender_menu_line_count(option_count: usize) -> u16 {
+    option_count.saturating_add(1) as u16
+}
+
+fn rerender_menu_option_line_offset(option_count: usize, option_index: usize) -> u16 {
+    option_count.saturating_sub(option_index) as u16
 }
 
 fn line_menu(options: &[&str]) -> Result<usize> {
@@ -448,6 +673,67 @@ mod tests {
         assert_eq!(display_seconds(Duration::from_millis(1)), 1);
         assert_eq!(display_seconds(Duration::from_millis(1_001)), 2);
         assert_eq!(display_seconds(Duration::from_secs(2)), 2);
+    }
+
+    #[test]
+    fn renders_auto_default_prompt_without_countdown() {
+        let auto_default = Some(AutoDefault {
+            selection: 0,
+            started_at: Instant::now(),
+            deadline: Instant::now() + Duration::from_secs(5),
+            active: true,
+        });
+
+        assert_eq!(
+            interactive_menu_prompt(&auto_default),
+            "Use ↑↓ + Enter, number key, or ESC to cancel: "
+        );
+    }
+
+    #[test]
+    fn renders_regular_prompt_when_auto_default_is_inactive() {
+        let auto_default = Some(AutoDefault {
+            selection: 0,
+            started_at: Instant::now(),
+            deadline: Instant::now() + Duration::from_secs(5),
+            active: false,
+        });
+
+        assert_eq!(
+            interactive_menu_prompt(&auto_default),
+            "Use ↑↓ + Enter, number key, or ESC to cancel: "
+        );
+    }
+
+    #[test]
+    fn appends_dots_to_active_default_option() {
+        let auto_default = Some(AutoDefault {
+            selection: 0,
+            started_at: Instant::now() - Duration::from_secs(3),
+            deadline: Instant::now() + Duration::from_secs(2),
+            active: true,
+        });
+
+        assert_eq!(
+            option_with_auto_default_suffix("Start scrcpy and close airadb", 0, &auto_default),
+            "Start scrcpy and close airadb..."
+        );
+        assert_eq!(
+            option_with_auto_default_suffix("Start scrcpy and wait", 1, &auto_default),
+            "Start scrcpy and wait"
+        );
+    }
+
+    #[test]
+    fn rerender_includes_prompt_line() {
+        assert_eq!(rerender_menu_line_count(3), 4);
+    }
+
+    #[test]
+    fn option_rerender_offset_starts_from_prompt_line() {
+        assert_eq!(rerender_menu_option_line_offset(3, 0), 3);
+        assert_eq!(rerender_menu_option_line_offset(3, 1), 2);
+        assert_eq!(rerender_menu_option_line_offset(3, 2), 1);
     }
 
     #[test]

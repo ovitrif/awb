@@ -16,7 +16,7 @@ Pin a release or install somewhere else:
 
 ```sh
 curl -fsSL https://github.com/ovitrif/airadb/releases/latest/download/install.sh | \
-  AIRADB_INSTALL_TAG=v0.1.5 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
+  AIRADB_INSTALL_TAG=v0.1.15 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 Or build from source:
@@ -48,7 +48,7 @@ Or from a source checkout:
 cargo run
 ```
 
-`airadb` expects `adb` to be installed and available on your `PATH`. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu or with `--background` / `--foreground`. The default wait time for pairing and connection discovery is 60 seconds. By default, scrcpy launches with a borderless Pixel-style window title; pass `--plain-window` to use scrcpy's regular decorated window.
+`airadb` expects `adb` to be installed and available on your `PATH`. If ADB stops responding, startup checks, the ADB mDNS probe, and device scans time out and airadb attempts one server restart instead of waiting forever. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu or with `--background` / `--foreground`. The default wait time for pairing and connection discovery is 60 seconds. By default, scrcpy launches with a borderless Pixel-style window title, a 480x1071 window, and `--stay-awake`; pass `--plain-window` to use scrcpy's regular decorated window.
 
 On your Android phone:
 
@@ -56,17 +56,18 @@ On your Android phone:
 2. Tap Pair device with QR code.
 3. Scan the QR code shown by `airadb`.
 
-Once ADB is connected, `airadb` shows options to start `scrcpy` in the background and close the CLI, start `scrcpy`, or close without launching anything. Use `--background` or `--foreground` to skip that final menu. If a device is already connected through ADB, `airadb` skips pairing and offers the `scrcpy` options immediately unless a launch flag was provided.
+Once ADB is connected, `airadb` shows options to start `scrcpy` and close the CLI, start `scrcpy` and wait until it exits, or close without launching anything. The first option auto-starts after 5 seconds unless you interact with the menu. Use `--background` or `--foreground` to skip that final menu. If a device is already connected through ADB, `airadb` skips pairing and offers the `scrcpy` options immediately unless a launch flag was provided.
 
 Useful options:
 
 ```sh
 airadb --reset-adb
 airadb --timeout 120 # wait longer than the 60-second default
-airadb --background # start scrcpy in the background and close
-airadb --foreground # start scrcpy in the foreground
-airadb --stable # background scrcpy, ADB keepalive, reconnects, stay-awake and Wi-Fi diagnostics
+airadb --background # start scrcpy without waiting for it
+airadb --foreground # start scrcpy and wait until it exits
+airadb --stable # start scrcpy, ADB keepalive, reconnects, stay-awake and Wi-Fi diagnostics
 airadb --watch --wifi-doctor # supervise wireless ADB and print Wi-Fi changes
+airadb --window-width 480 --window-height 1071
 airadb --plain-window --always-on-top --window-title "Pixel 10 Pro"
 airadb --adb /path/to/adb --scrcpy /path/to/scrcpy
 airadb install-shell # install the aw alias and zsh completions

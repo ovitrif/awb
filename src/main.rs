@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use qr::PairingQr;
-use scrcpy::{Scrcpy, ScrcpyOptions, ScrcpyRunMode};
+use scrcpy::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, Scrcpy, ScrcpyOptions, ScrcpyRunMode};
 
 const BINARY_NAME: &str = "airadb";
 const ALIAS_NAME: &str = "aw";
@@ -59,14 +59,14 @@ struct Args {
     #[arg(
         long,
         conflicts_with = "foreground",
-        help = "Start scrcpy in the background once connected and skip the menu"
+        help = "Start scrcpy without waiting for it and skip the menu"
     )]
     background: bool,
 
     #[arg(
         long,
         conflicts_with = "background",
-        help = "Start scrcpy in the foreground once connected and skip the menu"
+        help = "Start scrcpy and wait until it exits, then skip the menu"
     )]
     foreground: bool,
 
@@ -89,13 +89,29 @@ struct Args {
 
     #[arg(
         long,
+        default_value_t = DEFAULT_WINDOW_WIDTH,
+        value_name = "POINTS",
+        help = "Initial scrcpy window width; use 0 for scrcpy's automatic size"
+    )]
+    window_width: u32,
+
+    #[arg(
+        long,
+        default_value_t = DEFAULT_WINDOW_HEIGHT,
+        value_name = "POINTS",
+        help = "Initial scrcpy window height; use 0 for scrcpy's automatic size"
+    )]
+    window_height: u32,
+
+    #[arg(
+        long,
         help = "Keep supervising wireless ADB and reconnect when the transport drops"
     )]
     watch: bool,
 
     #[arg(
         long,
-        help = "Convenience mode: background scrcpy, watch reconnect, keep awake and Wi-Fi diagnostics"
+        help = "Convenience mode: start scrcpy, watch reconnect, keep awake and Wi-Fi diagnostics"
     )]
     stable: bool,
 
@@ -241,6 +257,8 @@ impl Args {
             borderless: !self.plain_window,
             always_on_top: self.always_on_top,
             window_title: self.window_title.clone(),
+            window_width: self.window_width,
+            window_height: self.window_height,
             ..ScrcpyOptions::default()
         }
     }
@@ -289,13 +307,16 @@ fn run() -> Result<()> {
     ui::title("airadb", "Android wireless debugging companion");
     ui::status("Checking ADB...");
     let adb = Adb::resolve(args.adb.clone())?;
-    adb.version()?;
 
     if args.reset_adb {
         reset_adb_server(&adb)?;
+        adb.version()
+            .context("ADB still did not answer after restarting the server")?;
+    } else {
+        ensure_adb_ready(&adb)?;
     }
 
-    warn_if_mdns_check_fails(&adb);
+    ensure_adb_mdns_ready(&adb)?;
 
     let phone = match startup_device_choice(&adb)? {
         StartupDeviceChoice::Connected(phone) => phone,
@@ -307,6 +328,66 @@ fn run() -> Result<()> {
     let action = connected_phone_action(&args)?;
     prepare_connected_phone(&adb, &phone, &args, action);
     handle_connected_phone(&adb, &phone, &args, action)
+}
+
+fn ensure_adb_ready(adb: &Adb) -> Result<()> {
+    match adb.version() {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            ui::warn(format!("ADB did not answer cleanly: {error:#}"));
+            reset_adb_server(adb)?;
+            adb.version()
+                .context("ADB still did not answer after restarting the server")?;
+            Ok(())
+        }
+    }
+}
+
+fn ensure_adb_mdns_ready(adb: &Adb) -> Result<()> {
+    ui::status("Checking ADB mDNS...");
+    match check_adb_mdns(adb) {
+        Ok(()) => Ok(()),
+        Err(error) if adb::error_is_timeout(&error) => {
+            ui::warn(format!(
+                "ADB mDNS check timed out: {error:#}. Restarting ADB server once..."
+            ));
+            reset_adb_server(adb)?;
+
+            match check_adb_mdns(adb) {
+                Ok(()) => Ok(()),
+                Err(error) if adb::error_is_timeout(&error) => {
+                    ui::warn(format!(
+                        "ADB mDNS still timed out after restart: {error:#}. Continuing with manual and Bonjour fallbacks."
+                    ));
+                    Ok(())
+                }
+                Err(error) => {
+                    ui::warn(format!(
+                        "could not run adb mdns check after restart: {error:#}"
+                    ));
+                    Ok(())
+                }
+            }
+        }
+        Err(error) => {
+            ui::warn(format!("could not run adb mdns check: {error:#}"));
+            Ok(())
+        }
+    }
+}
+
+fn check_adb_mdns(adb: &Adb) -> Result<()> {
+    match adb.mdns_check() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            ui::warn(format!(
+                "adb mdns check reported a problem: {}",
+                output.combined_output()
+            ));
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn handle_cli_command(command: &CliCommand) -> Result<()> {
@@ -607,12 +688,16 @@ fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
     }
 
     let background_label = if args.watch_enabled() {
-        "Start scrcpy in background and watch"
+        "Start scrcpy and keep watching ADB"
     } else {
-        "Start scrcpy in background and close"
+        "Start scrcpy and close airadb"
     };
 
-    match ui::menu(&[background_label, "Start scrcpy", "Close"])? {
+    match ui::menu_with_default(
+        &[background_label, "Start scrcpy and wait", "Close"],
+        1,
+        Duration::from_secs(5),
+    )? {
         1 => Ok(ConnectedAction::StartBackground),
         2 => Ok(ConnectedAction::StartForeground),
         3 => Ok(ConnectedAction::Close),
@@ -623,7 +708,7 @@ fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
 fn start_scrcpy_background(phone: &ConnectedPhone, args: &Args) -> Result<()> {
     let scrcpy = resolve_scrcpy(args)?;
     let pid = scrcpy.launch_background(&phone.serial, &args.scrcpy_options())?;
-    ui::success(format!("Started scrcpy in the background (pid {pid})."));
+    ui::success(format!("Started scrcpy (pid {pid}); airadb can close now."));
     Ok(())
 }
 
@@ -831,6 +916,22 @@ fn resolve_scrcpy(args: &Args) -> Result<Scrcpy> {
 }
 
 fn startup_device_choice(adb: &Adb) -> Result<StartupDeviceChoice> {
+    ui::status("Checking for already-connected phones...");
+    match startup_device_choice_once(adb) {
+        Ok(choice) => Ok(choice),
+        Err(error) if adb::error_is_timeout(&error) => {
+            ui::warn(format!(
+                "ADB device listing timed out: {error:#}. Restarting ADB server once..."
+            ));
+            reset_adb_server(adb)?;
+            startup_device_choice_once(adb)
+                .context("ADB devices still did not answer after restarting the server")
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn startup_device_choice_once(adb: &Adb) -> Result<StartupDeviceChoice> {
     let ready_phones = wait_for_startup_connected_phones(adb, Duration::from_secs(2))?;
 
     match ready_phones.len() {
@@ -899,17 +1000,6 @@ fn ready_connected_phones(adb: &Adb) -> Result<Vec<ConnectedPhone>> {
     Ok(phones)
 }
 
-fn warn_if_mdns_check_fails(adb: &Adb) {
-    match adb.mdns_check() {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => ui::warn(format!(
-            "adb mdns check reported a problem: {}",
-            output.combined_output()
-        )),
-        Err(error) => ui::warn(format!("could not run adb mdns check: {error:#}")),
-    }
-}
-
 fn reset_adb_server(adb: &Adb) -> Result<()> {
     ui::status("Resetting local ADB server...");
     adb.reset_server()?;
@@ -946,7 +1036,6 @@ fn retrying_pairing_flow(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone>
                     },
                     3 => {
                         reset_adb_server(adb)?;
-                        warn_if_mdns_check_fails(adb);
                         continue;
                     }
                     4 => match pairing_code_flow(adb, timeout) {
@@ -1690,6 +1779,10 @@ mod tests {
             "--always-on-top",
             "--window-title",
             "Ovi Pixel",
+            "--window-width",
+            "443",
+            "--window-height",
+            "989",
         ])
         .unwrap();
 
@@ -1699,6 +1792,8 @@ mod tests {
                 borderless: false,
                 always_on_top: true,
                 window_title: "Ovi Pixel".to_string(),
+                window_width: 443,
+                window_height: 989,
                 ..ScrcpyOptions::default()
             }
         );
