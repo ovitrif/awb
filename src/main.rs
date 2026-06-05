@@ -1214,17 +1214,31 @@ fn wait_for_startup_connected_phones(adb: &Adb, timeout: Duration) -> Result<Vec
 }
 
 fn ready_connected_phones(adb: &Adb) -> Result<Vec<ConnectedPhone>> {
-    let phones = adb
-        .devices()?
+    let devices = adb.devices()?;
+    let services = if devices
+        .iter()
+        .any(|device| device.state == adb::DeviceState::Device)
+    {
+        adb.mdns_services().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    Ok(connected_phones_from_devices(devices, &services))
+}
+
+fn connected_phones_from_devices(
+    devices: Vec<adb::AdbDevice>,
+    services: &[adb::MdnsService],
+) -> Vec<ConnectedPhone> {
+    adb::dedupe_ready_devices(devices, services)
         .into_iter()
         .filter(|device| device.state == adb::DeviceState::Device)
         .map(|device| ConnectedPhone {
             serial: device.serial.clone(),
             display_name: device.display_name(),
         })
-        .collect();
-
-    Ok(phones)
+        .collect()
 }
 
 fn reset_adb_server(adb: &Adb) -> Result<()> {
@@ -1476,8 +1490,14 @@ fn wait_for_pairing_endpoint(
     loop {
         countdown.tick(remaining_until(deadline))?;
 
-        match ready_connected_phones(adb) {
-            Ok(ready_phones) => {
+        let devices_result = adb.devices();
+        let services_result = adb.mdns_services();
+        let services = services_result.as_ref().map(Vec::as_slice).unwrap_or(&[]);
+
+        match devices_result {
+            Ok(devices) => {
+                let ready_phones = connected_phones_from_devices(devices, services);
+
                 if !ready_phones.is_empty() {
                     countdown.finish();
                 }
@@ -1498,7 +1518,7 @@ fn wait_for_pairing_endpoint(
             Err(_) => {}
         }
 
-        match adb.mdns_services() {
+        match services_result {
             Ok(services) => {
                 if let Some(service) = services
                     .into_iter()
@@ -1645,6 +1665,21 @@ fn connect_and_wait_for_device(
         let candidates =
             adb::connect_service_candidates(&services, pairing_address, baseline_services);
         let candidate_summary = endpoint_summary(&candidates);
+
+        for service in &candidates {
+            if let Some(device) = adb::matching_ready_device_for_connect_service(
+                &ready_devices,
+                service,
+                baseline_devices,
+            ) {
+                countdown.finish();
+                ui::success(format!(
+                    "ADB device is ready through mDNS: {}",
+                    device.display_name()
+                ));
+                return Ok(device);
+            }
+        }
 
         if candidates.is_empty() && !reported_waiting_for_endpoint {
             countdown.finish();

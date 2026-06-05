@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -56,8 +56,14 @@ pub struct AdbDevice {
 
 impl AdbDevice {
     pub fn display_name(&self) -> String {
-        match &self.model {
-            Some(model) => format!("{} {}", self.serial, model.replace('_', " ")),
+        let model = self.model.as_ref().map(|model| model.replace('_', " "));
+
+        if is_mdns_wireless_serial(&self.serial) {
+            return model.unwrap_or_else(|| "Wireless ADB device".to_string());
+        }
+
+        match model {
+            Some(model) => format!("{} {}", self.serial, model),
             None => self.serial.clone(),
         }
     }
@@ -411,6 +417,42 @@ pub fn matching_ready_device(
     None
 }
 
+pub fn matching_ready_device_for_connect_service(
+    devices: &[AdbDevice],
+    service: &MdnsService,
+    baseline_serials: &HashSet<String>,
+) -> Option<AdbDevice> {
+    devices
+        .iter()
+        .filter(|device| device.state == DeviceState::Device)
+        .filter(|device| !baseline_serials.contains(&device.serial))
+        .find(|device| device_matches_connect_service(device, service))
+        .cloned()
+}
+
+pub fn dedupe_ready_devices(devices: Vec<AdbDevice>, services: &[MdnsService]) -> Vec<AdbDevice> {
+    let mut deduped = Vec::new();
+    let mut wireless_positions = HashMap::new();
+
+    for device in devices {
+        let Some(key) = wireless_transport_key(&device, services) else {
+            deduped.push(device);
+            continue;
+        };
+
+        if let Some(index) = wireless_positions.get(&key).copied() {
+            if preferred_wireless_alias(&device, &deduped[index]) {
+                deduped[index] = device;
+            }
+        } else {
+            wireless_positions.insert(key, deduped.len());
+            deduped.push(device);
+        }
+    }
+
+    deduped
+}
+
 pub fn connect_serial_from_output(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let line = line.trim();
@@ -441,6 +483,61 @@ pub fn connect_services(services: &[MdnsService]) -> HashSet<MdnsService> {
         .filter(|service| service.is_connect_service())
         .cloned()
         .collect()
+}
+
+pub fn device_matches_connect_service(device: &AdbDevice, service: &MdnsService) -> bool {
+    device.serial == service.address || serial_matches_connect_service(&device.serial, service)
+}
+
+fn wireless_transport_key(device: &AdbDevice, services: &[MdnsService]) -> Option<String> {
+    if device.state != DeviceState::Device {
+        return None;
+    }
+
+    services
+        .iter()
+        .filter(|service| service.is_connect_service())
+        .find(|service| device_matches_connect_service(device, service))
+        .map(|service| service.address.clone())
+}
+
+fn serial_matches_connect_service(serial: &str, service: &MdnsService) -> bool {
+    let serial = normalize_mdns_serial(serial);
+    let service_serial = connect_service_serial(service);
+
+    serial == service_serial
+}
+
+fn connect_service_serial(service: &MdnsService) -> String {
+    format!(
+        "{}.{}",
+        service.instance.trim_end_matches('.'),
+        normalize_service_type(&service.service_type)
+    )
+}
+
+fn normalize_mdns_serial(serial: &str) -> String {
+    serial
+        .trim()
+        .trim_end_matches(".local")
+        .trim_end_matches('.')
+        .to_string()
+}
+
+fn is_mdns_wireless_serial(serial: &str) -> bool {
+    normalize_mdns_serial(serial).ends_with(CONNECT_SERVICE_TYPE)
+}
+
+fn preferred_wireless_alias(candidate: &AdbDevice, current: &AdbDevice) -> bool {
+    is_endpoint_serial(&candidate.serial) && !is_endpoint_serial(&current.serial)
+}
+
+fn is_endpoint_serial(serial: &str) -> bool {
+    let Some((_host, port)) = serial.rsplit_once(':') else {
+        return false;
+    };
+
+    port.parse::<u16>().is_ok()
 }
 
 pub fn error_is_timeout(error: &anyhow::Error) -> bool {
@@ -730,6 +827,56 @@ R5CT123ABC device product:foo model:Old_Device device:bar transport_id:1
             .expect("expected matching same-host wireless device");
 
         assert_eq!(matched.serial, "192.168.1.23:40233");
+    }
+
+    #[test]
+    fn matches_ready_mdns_device_for_connect_service() {
+        let service = MdnsService {
+            instance: "adb-5C020DLCH0007Q-tfPgZw".to_string(),
+            service_type: CONNECT_SERVICE_TYPE.to_string(),
+            address: "192.168.68.59:36375".to_string(),
+        };
+        let devices = parse_devices(
+            r#"
+List of devices attached
+adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp device product:foo model:Pixel_10_Pro device:bar
+"#,
+        );
+
+        let matched =
+            matching_ready_device_for_connect_service(&devices, &service, &HashSet::new())
+                .expect("expected mDNS ADB transport to match its service");
+
+        assert_eq!(
+            matched.serial,
+            "adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp"
+        );
+        assert_eq!(matched.display_name(), "Pixel 10 Pro");
+    }
+
+    #[test]
+    fn dedupes_ip_and_mdns_aliases_for_same_wireless_transport() {
+        let service = MdnsService {
+            instance: "adb-5C020DLCH0007Q-tfPgZw".to_string(),
+            service_type: CONNECT_SERVICE_TYPE.to_string(),
+            address: "192.168.68.59:36375".to_string(),
+        };
+        let devices = parse_devices(
+            r#"
+List of devices attached
+192.168.68.59:36375 device product:foo model:Pixel_10_Pro device:bar
+adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp device product:foo model:Pixel_10_Pro device:bar
+"#,
+        );
+
+        let deduped = dedupe_ready_devices(devices, &[service]);
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].serial, "192.168.68.59:36375");
+        assert_eq!(
+            deduped[0].display_name(),
+            "192.168.68.59:36375 Pixel 10 Pro"
+        );
     }
 
     #[test]
