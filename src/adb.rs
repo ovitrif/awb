@@ -178,6 +178,19 @@ impl Adb {
         Ok(output)
     }
 
+    pub fn disconnect(&self, endpoint: &str) -> Result<CommandResult> {
+        let output = self.run_with_timeout(["disconnect", endpoint], ADB_PAIR_CONNECT_TIMEOUT)?;
+
+        if !output.status.success() {
+            bail!(
+                "adb disconnect failed: {}",
+                fallback_message(&output.combined_output())
+            );
+        }
+
+        Ok(output)
+    }
+
     pub fn reconnect_offline(&self) -> Result<CommandResult> {
         self.run(["reconnect", "offline"])
     }
@@ -453,6 +466,31 @@ pub fn dedupe_ready_devices(devices: Vec<AdbDevice>, services: &[MdnsService]) -
     deduped
 }
 
+pub fn duplicate_wireless_endpoint_aliases(
+    devices: &[AdbDevice],
+    services: &[MdnsService],
+) -> Vec<String> {
+    services
+        .iter()
+        .filter(|service| service.is_connect_service())
+        .filter_map(|service| {
+            let has_endpoint_alias = devices.iter().any(|device| {
+                device.state == DeviceState::Device && device.serial == service.address
+            });
+            let has_mdns_alias = devices.iter().any(|device| {
+                device.state == DeviceState::Device
+                    && serial_matches_connect_service(&device.serial, service)
+            });
+
+            if has_endpoint_alias && has_mdns_alias {
+                Some(service.address.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 pub fn connect_serial_from_output(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let line = line.trim();
@@ -529,7 +567,7 @@ fn is_mdns_wireless_serial(serial: &str) -> bool {
 }
 
 fn preferred_wireless_alias(candidate: &AdbDevice, current: &AdbDevice) -> bool {
-    is_endpoint_serial(&candidate.serial) && !is_endpoint_serial(&current.serial)
+    is_mdns_wireless_serial(&candidate.serial) && is_endpoint_serial(&current.serial)
 }
 
 fn is_endpoint_serial(serial: &str) -> bool {
@@ -872,10 +910,31 @@ adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp device product:foo model:Pixel_1
         let deduped = dedupe_ready_devices(devices, &[service]);
 
         assert_eq!(deduped.len(), 1);
-        assert_eq!(deduped[0].serial, "192.168.68.59:36375");
         assert_eq!(
-            deduped[0].display_name(),
-            "192.168.68.59:36375 Pixel 10 Pro"
+            deduped[0].serial,
+            "adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp"
+        );
+        assert_eq!(deduped[0].display_name(), "Pixel 10 Pro");
+    }
+
+    #[test]
+    fn identifies_duplicate_endpoint_aliases_to_disconnect() {
+        let service = MdnsService {
+            instance: "adb-5C020DLCH0007Q-tfPgZw".to_string(),
+            service_type: CONNECT_SERVICE_TYPE.to_string(),
+            address: "192.168.68.59:36375".to_string(),
+        };
+        let devices = parse_devices(
+            r#"
+List of devices attached
+192.168.68.59:36375 device product:foo model:Pixel_10_Pro device:bar
+adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp device product:foo model:Pixel_10_Pro device:bar
+"#,
+        );
+
+        assert_eq!(
+            duplicate_wireless_endpoint_aliases(&devices, &[service]),
+            vec!["192.168.68.59:36375"]
         );
     }
 

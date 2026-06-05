@@ -1214,7 +1214,7 @@ fn wait_for_startup_connected_phones(adb: &Adb, timeout: Duration) -> Result<Vec
 }
 
 fn ready_connected_phones(adb: &Adb) -> Result<Vec<ConnectedPhone>> {
-    let devices = adb.devices()?;
+    let mut devices = adb.devices()?;
     let services = if devices
         .iter()
         .any(|device| device.state == adb::DeviceState::Device)
@@ -1223,6 +1223,10 @@ fn ready_connected_phones(adb: &Adb) -> Result<Vec<ConnectedPhone>> {
     } else {
         Vec::new()
     };
+
+    if disconnect_duplicate_wireless_aliases(adb, &devices, &services) {
+        devices = adb.devices().unwrap_or(devices);
+    }
 
     Ok(connected_phones_from_devices(devices, &services))
 }
@@ -1239,6 +1243,27 @@ fn connected_phones_from_devices(
             display_name: device.display_name(),
         })
         .collect()
+}
+
+fn disconnect_duplicate_wireless_aliases(
+    adb: &Adb,
+    devices: &[adb::AdbDevice],
+    services: &[adb::MdnsService],
+) -> bool {
+    let aliases = adb::duplicate_wireless_endpoint_aliases(devices, services);
+
+    for alias in &aliases {
+        ui::status(format!("Removing duplicate ADB transport {alias}..."));
+
+        match adb.disconnect(alias) {
+            Ok(_) => ui::success(format!("Removed duplicate ADB transport {alias}.")),
+            Err(error) => ui::warn(format!(
+                "could not remove duplicate ADB transport {alias}: {error:#}"
+            )),
+        }
+    }
+
+    !aliases.is_empty()
 }
 
 fn reset_adb_server(adb: &Adb) -> Result<()> {
@@ -1412,10 +1437,18 @@ fn wait_for_ready_device(
     loop {
         countdown.tick(remaining_until(deadline))?;
 
-        if let Some(device) = adb::matching_ready_device(
-            &adb.devices().unwrap_or_default(),
+        let mut devices = adb.devices().unwrap_or_default();
+        let services = adb.mdns_services().unwrap_or_default();
+
+        if disconnect_duplicate_wireless_aliases(adb, &devices, &services) {
+            devices = adb.devices().unwrap_or(devices);
+        }
+
+        if let Some(device) = matching_ready_device_from_snapshot(
+            &devices,
             expected_serial,
             baseline_devices,
+            &services,
         ) {
             countdown.finish();
             ui::success(format!("ADB device is ready: {}", device.display_name()));
@@ -1432,6 +1465,28 @@ fn wait_for_ready_device(
             return Err(error);
         }
     }
+}
+
+fn matching_ready_device_from_snapshot(
+    devices: &[adb::AdbDevice],
+    expected_serial: &str,
+    baseline_devices: &HashSet<String>,
+    services: &[adb::MdnsService],
+) -> Option<adb::AdbDevice> {
+    if let Some(device) = adb::matching_ready_device(devices, expected_serial, baseline_devices) {
+        return Some(device);
+    }
+
+    let expected_host = adb::endpoint_host(expected_serial);
+
+    services
+        .iter()
+        .filter(|service| {
+            service.is_connect_service() && adb::endpoint_host(&service.address) == expected_host
+        })
+        .find_map(|service| {
+            adb::matching_ready_device_for_connect_service(devices, service, baseline_devices)
+        })
 }
 
 fn pair_and_connect(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone> {
@@ -1495,7 +1550,11 @@ fn wait_for_pairing_endpoint(
         let services = services_result.as_ref().map(Vec::as_slice).unwrap_or(&[]);
 
         match devices_result {
-            Ok(devices) => {
+            Ok(mut devices) => {
+                if disconnect_duplicate_wireless_aliases(adb, &devices, services) {
+                    devices = adb.devices().unwrap_or(devices);
+                }
+
                 let ready_phones = connected_phones_from_devices(devices, services);
 
                 if !ready_phones.is_empty() {
@@ -1628,11 +1687,32 @@ fn connect_and_wait_for_device(
     loop {
         countdown.tick(remaining_until(deadline))?;
 
-        let ready_devices = adb.devices().unwrap_or_default();
+        let mut ready_devices = adb.devices().unwrap_or_default();
+        let services = match adb.mdns_services() {
+            Ok(services) => services,
+            Err(error) => {
+                if !reported_connect_mdns_error {
+                    countdown.finish();
+                    ui::warn(format!("adb mDNS connect lookup failed: {error:#}"));
+                    reported_connect_mdns_error = true;
+                }
 
-        if let Some(device) =
-            adb::matching_ready_device(&ready_devices, &expected_serial, baseline_devices)
-        {
+                Vec::new()
+            }
+        };
+        let candidates =
+            adb::connect_service_candidates(&services, pairing_address, baseline_services);
+
+        if disconnect_duplicate_wireless_aliases(adb, &ready_devices, &services) {
+            ready_devices = adb.devices().unwrap_or(ready_devices);
+        }
+
+        if let Some(device) = matching_ready_device_from_snapshot(
+            &ready_devices,
+            &expected_serial,
+            baseline_devices,
+            &services,
+        ) {
             countdown.finish();
             ui::success(format!("ADB device is ready: {}", device.display_name()));
             return Ok(device);
@@ -1650,20 +1730,6 @@ fn connect_and_wait_for_device(
             ));
         }
 
-        let services = match adb.mdns_services() {
-            Ok(services) => services,
-            Err(error) => {
-                if !reported_connect_mdns_error {
-                    countdown.finish();
-                    ui::warn(format!("adb mDNS connect lookup failed: {error:#}"));
-                    reported_connect_mdns_error = true;
-                }
-
-                Vec::new()
-            }
-        };
-        let candidates =
-            adb::connect_service_candidates(&services, pairing_address, baseline_services);
         let candidate_summary = endpoint_summary(&candidates);
 
         for service in &candidates {
@@ -1726,10 +1792,17 @@ fn connect_and_wait_for_device(
                     countdown.finish();
                     ui::status("Verifying the device is ready...");
 
-                    if let Some(device) = adb::matching_ready_device(
-                        &adb.devices().unwrap_or_default(),
+                    let mut devices = adb.devices().unwrap_or_default();
+
+                    if disconnect_duplicate_wireless_aliases(adb, &devices, &services) {
+                        devices = adb.devices().unwrap_or(devices);
+                    }
+
+                    if let Some(device) = matching_ready_device_from_snapshot(
+                        &devices,
                         &expected_serial,
                         baseline_devices,
+                        &services,
                     ) {
                         countdown.finish();
                         return Ok(device);
