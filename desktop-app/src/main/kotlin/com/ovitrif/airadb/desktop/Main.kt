@@ -2,15 +2,19 @@ package com.ovitrif.airadb.desktop
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -38,12 +42,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
@@ -55,11 +56,11 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -71,7 +72,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Tray
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.WindowState
@@ -85,12 +86,20 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.awt.BasicStroke
 import java.awt.GraphicsEnvironment
 import java.awt.MouseInfo
 import java.awt.Point
 import java.awt.Rectangle
+import java.awt.RenderingHints
+import java.awt.SystemTray
+import java.awt.TrayIcon
+import java.awt.Color as AwtColor
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.LocalTime
@@ -104,14 +113,20 @@ private val Ink = Color(0xFF283044)
 private val Muted = Color(0xFF737589)
 private val Blue = Color(0xFF3F7EEE)
 private val AndroidGreen = Color(0xFF38C976)
-private val PopoverSize = DpSize(560.dp, 720.dp)
+private val PopoverSize = DpSize(430.dp, 560.dp)
+private const val TrayClickFocusLossGraceNanos = 300_000_000L
+private const val TrayMenuWidthPx = 150
+private const val TrayMenuItemHeightPx = 24
+private const val TrayMenuSeparatorHeightPx = 5
+private const val TrayMenuVerticalPaddingPx = 12
 
 private val json = Json {
     ignoreUnknownKeys = true
 }
 
 fun main() = application {
-    var popoverVisible by remember { mutableStateOf(true) }
+    var popoverVisible by remember { mutableStateOf(false) }
+    var lastFocusDismissAt by remember { mutableStateOf(0L) }
     val popoverState = remember {
         WindowState(
             size = PopoverSize,
@@ -127,6 +142,9 @@ fun main() = application {
     var running by remember { mutableStateOf(false) }
     val logs = remember { mutableStateListOf<String>() }
     var settings by remember { mutableStateOf(AiradbSettings()) }
+    var optionsExpanded by remember { mutableStateOf(false) }
+    var trayMenuVisible by remember { mutableStateOf(false) }
+    var trayMenuPosition by remember { mutableStateOf<WindowPosition>(WindowPosition.Absolute(0.dp, 0.dp)) }
     val scope = rememberCoroutineScope()
 
     fun appendLog(line: String) {
@@ -148,9 +166,27 @@ fun main() = application {
     }
 
     fun showPopover() {
+        lastFocusDismissAt = 0L
+        trayMenuVisible = false
         popoverState.position = menuBarPopoverPosition()
         popoverVisible = true
         refreshStatus()
+    }
+
+    fun togglePopover() {
+        trayMenuVisible = false
+        if (popoverVisible) {
+            popoverVisible = false
+        } else if (System.nanoTime() - lastFocusDismissAt < TrayClickFocusLossGraceNanos) {
+            lastFocusDismissAt = 0L
+        } else {
+            showPopover()
+        }
+    }
+
+    fun showTrayMenu(anchor: Point) {
+        trayMenuPosition = trayMenuWindowPosition(anchor, running)
+        trayMenuVisible = true
     }
 
     fun launchAiradb(label: String, args: List<String>) {
@@ -159,6 +195,7 @@ fun main() = application {
         activeCommand = label
         running = true
         selectedTab = AppTab.Console
+        popoverState.position = menuBarPopoverPosition()
         popoverVisible = true
         appendLog(timestamped("Starting ${printableCommand(args)}"))
 
@@ -218,26 +255,40 @@ fun main() = application {
         onDispose { controller.stopActiveProcess() }
     }
 
-    Tray(
-        icon = AndroidTrayPainter,
-        tooltip = "airadb",
-        onAction = ::showPopover,
-        menu = {
-            Item("Show airadb", onClick = ::showPopover)
-            Separator()
-            Item("Pair and mirror", onClick = ::pairAndMirror)
-            Item("Stable mirror", onClick = ::stableMirror)
-            Item("Refresh status", onClick = ::refreshStatus)
-            if (running) {
-                Item("Stop command", onClick = ::stopActive)
-            }
-            Separator()
-            Item("Quit", onClick = {
+    AiradbTray(
+        onTogglePopover = ::togglePopover,
+        onShowMenu = ::showTrayMenu,
+    )
+
+    if (trayMenuVisible) {
+        TrayContextMenuWindow(
+            position = trayMenuPosition,
+            popoverVisible = popoverVisible,
+            running = running,
+            onDismiss = { trayMenuVisible = false },
+            onTogglePopover = ::togglePopover,
+            onPairAndMirror = {
+                trayMenuVisible = false
+                pairAndMirror()
+            },
+            onStableMirror = {
+                trayMenuVisible = false
+                stableMirror()
+            },
+            onRefresh = {
+                trayMenuVisible = false
+                refreshStatus()
+            },
+            onStop = {
+                trayMenuVisible = false
+                stopActive()
+            },
+            onQuit = {
                 controller.stopActiveProcess()
                 exitApplication()
-            })
-        },
-    )
+            },
+        )
+    }
 
     if (popoverVisible) {
         Window(
@@ -251,8 +302,10 @@ fun main() = application {
             onCloseRequest = { popoverVisible = false },
         ) {
             DisposableEffect(window) {
+                window.background = AwtColor(0, 0, 0, 0)
                 val listener = object : WindowAdapter() {
                     override fun windowLostFocus(event: WindowEvent?) {
+                        lastFocusDismissAt = System.nanoTime()
                         popoverVisible = false
                     }
                 }
@@ -286,7 +339,9 @@ fun main() = application {
                     activeCommand = activeCommand,
                     logs = logs,
                     settings = settings,
+                    optionsExpanded = optionsExpanded,
                     onSettingsChange = { settings = it },
+                    onOptionsExpandedChange = { optionsExpanded = it },
                     onRefresh = ::refreshStatus,
                     onPairAndMirror = ::pairAndMirror,
                     onStableMirror = ::stableMirror,
@@ -302,6 +357,162 @@ fun main() = application {
 }
 
 @Composable
+private fun AiradbTray(
+    onTogglePopover: () -> Unit,
+    onShowMenu: (Point) -> Unit,
+) {
+    val currentToggle by rememberUpdatedState(onTogglePopover)
+    val currentShowMenu by rememberUpdatedState(onShowMenu)
+    val trayIcon = remember {
+        TrayIcon(androidTrayImage(), "airadb").apply {
+            isImageAutoSize = true
+        }
+    }
+
+    DisposableEffect(Unit) {
+        if (!SystemTray.isSupported()) {
+            return@DisposableEffect onDispose {}
+        }
+
+        val listener = object : MouseAdapter() {
+            override fun mouseClicked(event: MouseEvent) {
+                val shouldShowMenu =
+                    event.button == MouseEvent.BUTTON3 ||
+                        event.isPopupTrigger ||
+                        (event.button == MouseEvent.BUTTON1 && event.isControlDown)
+
+                if (shouldShowMenu) {
+                    SwingUtilities.invokeLater { currentShowMenu(Point(event.xOnScreen, event.yOnScreen)) }
+                } else if (event.button == MouseEvent.BUTTON1) {
+                    SwingUtilities.invokeLater { currentToggle() }
+                }
+            }
+        }
+
+        trayIcon.addMouseListener(listener)
+        SystemTray.getSystemTray().add(trayIcon)
+
+        onDispose {
+            trayIcon.removeMouseListener(listener)
+            SystemTray.getSystemTray().remove(trayIcon)
+        }
+    }
+}
+
+@Composable
+private fun TrayContextMenuWindow(
+    position: WindowPosition,
+    popoverVisible: Boolean,
+    running: Boolean,
+    onDismiss: () -> Unit,
+    onTogglePopover: () -> Unit,
+    onPairAndMirror: () -> Unit,
+    onStableMirror: () -> Unit,
+    onRefresh: () -> Unit,
+    onStop: () -> Unit,
+    onQuit: () -> Unit,
+) {
+    Window(
+        title = "airadb menu",
+        state = WindowState(size = DpSize(TrayMenuWidthPx.dp, trayContextMenuHeight(running).dp), position = position),
+        undecorated = true,
+        transparent = true,
+        resizable = false,
+        alwaysOnTop = true,
+        onCloseRequest = onDismiss,
+    ) {
+        DisposableEffect(window) {
+            window.background = AwtColor(0, 0, 0, 0)
+            val listener = object : WindowAdapter() {
+                override fun windowLostFocus(event: WindowEvent?) {
+                    onDismiss()
+                }
+            }
+
+            window.addWindowFocusListener(listener)
+            window.requestFocus()
+
+            onDispose {
+                window.removeWindowFocusListener(listener)
+            }
+        }
+
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color.White,
+            shape = RoundedCornerShape(8.dp),
+        ) {
+            Column(modifier = Modifier.padding(6.dp)) {
+                ContextMenuItem(if (popoverVisible) "Hide airadb" else "Show airadb", onTogglePopover)
+                ContextMenuSeparator()
+                ContextMenuItem("Pair and mirror", onPairAndMirror)
+                ContextMenuItem("Stable mirror", onStableMirror)
+                ContextMenuItem("Refresh status", onRefresh)
+                if (running) {
+                    ContextMenuItem("Stop command", onStop)
+                }
+                ContextMenuSeparator()
+                ContextMenuItem("Quit", onQuit)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContextMenuItem(label: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(24.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(label, color = Ink, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun ContextMenuSeparator() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(5.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(Color(0xFFEAEAF0)),
+        )
+    }
+}
+
+private fun androidTrayImage(size: Int = 22): BufferedImage {
+    val image = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
+    val graphics = image.createGraphics()
+    graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+    graphics.color = AwtColor.WHITE
+    graphics.stroke = BasicStroke((size * 0.08f).coerceAtLeast(1f), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+
+    graphics.drawLine((size * 0.34f).toInt(), (size * 0.25f).toInt(), (size * 0.24f).toInt(), (size * 0.10f).toInt())
+    graphics.drawLine((size * 0.66f).toInt(), (size * 0.25f).toInt(), (size * 0.76f).toInt(), (size * 0.10f).toInt())
+    graphics.fillRoundRect((size * 0.20f).toInt(), (size * 0.25f).toInt(), (size * 0.60f).toInt(), (size * 0.36f).toInt(), 8, 8)
+    graphics.fillRoundRect((size * 0.28f).toInt(), (size * 0.56f).toInt(), (size * 0.44f).toInt(), (size * 0.26f).toInt(), 5, 5)
+    graphics.fillRoundRect((size * 0.12f).toInt(), (size * 0.58f).toInt(), (size * 0.12f).toInt(), (size * 0.22f).toInt(), 4, 4)
+    graphics.fillRoundRect((size * 0.76f).toInt(), (size * 0.58f).toInt(), (size * 0.12f).toInt(), (size * 0.22f).toInt(), 4, 4)
+
+    graphics.color = AwtColor(42, 48, 68)
+    graphics.fillOval((size * 0.36f).toInt(), (size * 0.39f).toInt(), 2, 2)
+    graphics.fillOval((size * 0.58f).toInt(), (size * 0.39f).toInt(), 2, 2)
+    graphics.dispose()
+
+    return image
+}
+
+@Composable
 private fun AiradbWindow(
     selectedTab: AppTab,
     onSelectTab: (AppTab) -> Unit,
@@ -312,7 +523,9 @@ private fun AiradbWindow(
     activeCommand: String?,
     logs: List<String>,
     settings: AiradbSettings,
+    optionsExpanded: Boolean,
     onSettingsChange: (AiradbSettings) -> Unit,
+    onOptionsExpandedChange: (Boolean) -> Unit,
     onRefresh: () -> Unit,
     onPairAndMirror: () -> Unit,
     onStableMirror: () -> Unit,
@@ -323,46 +536,19 @@ private fun AiradbWindow(
     airadbBinary: String,
 ) {
     Surface(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(8.dp)
-            .shadow(22.dp, RoundedCornerShape(28.dp)),
+        modifier = Modifier.fillMaxSize(),
         color = AiradbPink,
-        shape = RoundedCornerShape(28.dp),
+        shape = RoundedCornerShape(20.dp),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(22.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Header(status = status, running = running, onRefresh = onRefresh)
 
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Panel,
-                shape = RoundedCornerShape(8.dp),
-            ) {
-                PrimaryTabRow(
-                    selectedTabIndex = selectedTab.ordinal,
-                    containerColor = Color.Transparent,
-                    contentColor = Blue,
-                ) {
-                    AppTab.entries.forEach { tab ->
-                        Tab(
-                            selected = selectedTab == tab,
-                            onClick = { onSelectTab(tab) },
-                            text = { Text(tab.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            icon = {
-                                Icon(
-                                    imageVector = if (tab == AppTab.Tools) Icons.Filled.Build else Icons.Filled.Terminal,
-                                    contentDescription = null,
-                                )
-                            },
-                        )
-                    }
-                }
-            }
+            CompactTabBar(selectedTab = selectedTab, onSelectTab = onSelectTab)
 
             when (selectedTab) {
                 AppTab.Tools -> ToolsPanel(
@@ -371,7 +557,9 @@ private fun AiradbWindow(
                     statusError = statusError,
                     running = running,
                     settings = settings,
+                    optionsExpanded = optionsExpanded,
                     onSettingsChange = onSettingsChange,
+                    onOptionsExpandedChange = onOptionsExpandedChange,
                     onPairAndMirror = onPairAndMirror,
                     onStableMirror = onStableMirror,
                     onMirrorAndWait = onMirrorAndWait,
@@ -393,6 +581,58 @@ private fun AiradbWindow(
 }
 
 @Composable
+private fun CompactTabBar(
+    selectedTab: AppTab,
+    onSelectTab: (AppTab) -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(38.dp),
+        color = Panel,
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            AppTab.entries.forEach { tab ->
+                val selected = selectedTab == tab
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (selected) Color.White else Color.Transparent)
+                        .clickable { onSelectTab(tab) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = if (tab == AppTab.Tools) Icons.Filled.Build else Icons.Filled.Terminal,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                            tint = if (selected) Blue else Muted,
+                        )
+                        Text(
+                            tab.label,
+                            color = if (selected) Blue else Muted,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun Header(
     status: StatusSnapshot?,
     running: Boolean,
@@ -404,12 +644,12 @@ private fun Header(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(58.dp)
+                    .size(36.dp)
                     .clip(CircleShape)
                     .background(Color.White),
                 contentAlignment = Alignment.Center,
@@ -417,15 +657,15 @@ private fun Header(
                 Icon(
                     painter = AndroidAppPainter,
                     contentDescription = null,
-                    modifier = Modifier.size(42.dp),
+                    modifier = Modifier.size(26.dp),
                     tint = Color.Unspecified,
                 )
             }
             Column {
-                Text("airadb", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text("airadb", color = Ink, fontSize = 23.sp, fontWeight = FontWeight.Bold)
                 Text(
                     "Android wireless debugging",
-                    style = MaterialTheme.typography.bodyMedium,
+                    fontSize = 12.sp,
                     color = Muted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -434,15 +674,26 @@ private fun Header(
         }
 
         Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             StatusChip(text = if (running) "Running" else "Local", good = true)
             if (status?.airadbVersion != null) {
                 StatusChip(text = "v${status.airadbVersion}", good = true)
             }
-            IconButton(onClick = onRefresh) {
-                Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onRefresh),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Refresh,
+                    contentDescription = "Refresh",
+                    modifier = Modifier.size(17.dp),
+                    tint = Ink,
+                )
             }
         }
     }
@@ -456,7 +707,9 @@ private fun ToolsPanel(
     statusError: String?,
     running: Boolean,
     settings: AiradbSettings,
+    optionsExpanded: Boolean,
     onSettingsChange: (AiradbSettings) -> Unit,
+    onOptionsExpandedChange: (Boolean) -> Unit,
     onPairAndMirror: () -> Unit,
     onStableMirror: () -> Unit,
     onMirrorAndWait: () -> Unit,
@@ -469,7 +722,7 @@ private fun ToolsPanel(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -477,18 +730,19 @@ private fun ToolsPanel(
             shape = RoundedCornerShape(8.dp),
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Installed", style = MaterialTheme.typography.titleMedium, color = Muted)
+                    Text("Installed", color = Muted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         if (statusLoading) "Refreshing" else "${status?.readyDeviceCount() ?: 0} devices",
                         color = Blue,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -533,27 +787,37 @@ private fun ToolsPanel(
             shape = RoundedCornerShape(8.dp),
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Actions", style = MaterialTheme.typography.titleMedium, color = Muted)
-                    if (running) {
-                        TextButton(onClick = onStop) {
-                            Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Stop")
+                    Text("Actions", color = Muted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(onClick = { onOptionsExpandedChange(!optionsExpanded) }) {
+                            Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(13.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (optionsExpanded) "Done" else "Options", fontSize = 12.sp)
+                        }
+                        if (running) {
+                            TextButton(onClick = onStop) {
+                                Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Stop", fontSize = 12.sp)
+                            }
                         }
                     }
                 }
 
                 FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     ActionButton("Pair and mirror", Icons.Filled.PlayArrow, running, onPairAndMirror)
                     ActionButton("Stable mirror", Icons.Filled.CheckCircle, running, onStableMirror)
@@ -564,74 +828,91 @@ private fun ToolsPanel(
             }
         }
 
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = Panel,
-            shape = RoundedCornerShape(8.dp),
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+        if (optionsExpanded) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Panel,
+                shape = RoundedCornerShape(8.dp),
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                Column(
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Filled.Settings, contentDescription = null, tint = Muted)
-                    Text("scrcpy", style = MaterialTheme.typography.titleMedium, color = Muted)
-                }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.Settings,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                            tint = Muted,
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("scrcpy options", color = Muted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                settings.summary(),
+                                color = Muted,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    OutlinedTextField(
-                        value = settings.windowTitle,
-                        onValueChange = { onSettingsChange(settings.copy(windowTitle = it)) },
-                        modifier = Modifier.weight(1f),
-                        label = { Text("Window title") },
-                        singleLine = true,
-                    )
-                    OutlinedTextField(
-                        value = settings.windowWidth,
-                        onValueChange = { onSettingsChange(settings.copy(windowWidth = it.onlyDigits())) },
-                        modifier = Modifier.width(96.dp),
-                        label = { Text("Width") },
-                        singleLine = true,
-                    )
-                    OutlinedTextField(
-                        value = settings.windowHeight,
-                        onValueChange = { onSettingsChange(settings.copy(windowHeight = it.onlyDigits())) },
-                        modifier = Modifier.width(104.dp),
-                        label = { Text("Height") },
-                        singleLine = true,
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = settings.windowTitle,
+                            onValueChange = { onSettingsChange(settings.copy(windowTitle = it)) },
+                            modifier = Modifier.weight(1f),
+                            label = { Text("Title") },
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = settings.windowWidth,
+                            onValueChange = { onSettingsChange(settings.copy(windowWidth = it.onlyDigits())) },
+                            modifier = Modifier.width(76.dp),
+                            label = { Text("W") },
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = settings.windowHeight,
+                            onValueChange = { onSettingsChange(settings.copy(windowHeight = it.onlyDigits())) },
+                            modifier = Modifier.width(82.dp),
+                            label = { Text("H") },
+                            singleLine = true,
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ToggleRow(
+                            label = "Top",
+                            checked = settings.alwaysOnTop,
+                            onCheckedChange = { onSettingsChange(settings.copy(alwaysOnTop = it)) },
+                        )
+                        ToggleRow(
+                            label = "Plain",
+                            checked = settings.plainWindow,
+                            onCheckedChange = { onSettingsChange(settings.copy(plainWindow = it)) },
+                        )
+                    }
+
+                    Text(
+                        airadbBinary,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    ToggleRow(
-                        label = "Always on top",
-                        checked = settings.alwaysOnTop,
-                        onCheckedChange = { onSettingsChange(settings.copy(alwaysOnTop = it)) },
-                    )
-                    ToggleRow(
-                        label = "Plain window",
-                        checked = settings.plainWindow,
-                        onCheckedChange = { onSettingsChange(settings.copy(plainWindow = it)) },
-                    )
-                }
-
-                Text(
-                    airadbBinary,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Muted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
             }
         }
     }
@@ -650,8 +931,8 @@ private fun ConsolePanel(
         shape = RoundedCornerShape(8.dp),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -659,10 +940,10 @@ private fun ConsolePanel(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column {
-                    Text("Console", style = MaterialTheme.typography.titleMedium, color = Muted)
+                    Text("Console", color = Muted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         activeCommand ?: "Idle",
-                        style = MaterialTheme.typography.bodyMedium,
+                        fontSize = 12.sp,
                         color = if (running) Blue else Muted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -671,11 +952,15 @@ private fun ConsolePanel(
                 if (running) {
                     Button(
                         onClick = onStop,
+                        modifier = Modifier
+                            .height(30.dp)
+                            .defaultMinSize(minWidth = 1.dp, minHeight = 1.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD94F5C)),
                     ) {
-                        Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Stop")
+                        Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Stop", fontSize = 12.sp)
                     }
                 }
             }
@@ -692,7 +977,7 @@ private fun ConsolePanel(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(12.dp),
+                            .padding(8.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         if (logs.isEmpty()) {
@@ -701,6 +986,7 @@ private fun ConsolePanel(
                                     "No process output yet.",
                                     color = Color(0xFFADB4C7),
                                     fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
                                 )
                             }
                         } else {
@@ -709,7 +995,7 @@ private fun ConsolePanel(
                                     line,
                                     color = Color(0xFFE9EDF7),
                                     fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 11.sp,
                                 )
                             }
                         }
@@ -735,13 +1021,13 @@ private fun ToolStatusRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(42.dp)
+                    .size(28.dp)
                     .clip(CircleShape)
                     .background(if (available) Color(0xFFE2F8EB) else Color(0xFFFFE8EC)),
                 contentAlignment = Alignment.Center,
@@ -749,12 +1035,20 @@ private fun ToolStatusRow(
                 Icon(
                     icon,
                     contentDescription = null,
+                    modifier = Modifier.size(15.dp),
                     tint = if (available) AndroidGreen else Color(0xFFD94F5C),
                 )
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(name, fontWeight = FontWeight.Bold, color = Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(detail, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    name,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Ink,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(detail, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             StatusChip(if (available) "Ready" else "Check", available)
         }
@@ -771,12 +1065,16 @@ private fun ActionButton(
     Button(
         onClick = onClick,
         enabled = !running,
+        modifier = Modifier
+            .height(32.dp)
+            .defaultMinSize(minWidth = 1.dp, minHeight = 1.dp),
         shape = RoundedCornerShape(8.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
         colors = ButtonDefaults.buttonColors(containerColor = Blue),
     ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
-        Text(label, maxLines = 1)
+        Icon(icon, contentDescription = null, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }
 
@@ -790,8 +1088,8 @@ private fun ToggleRow(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Checkbox(checked = checked, onCheckedChange = onCheckedChange)
-        Text(label, color = Ink, maxLines = 1)
+        Checkbox(checked = checked, onCheckedChange = onCheckedChange, modifier = Modifier.size(30.dp))
+        Text(label, color = Ink, fontSize = 12.sp, maxLines = 1)
     }
 }
 
@@ -803,9 +1101,10 @@ private fun StatusChip(text: String, good: Boolean) {
     ) {
         Text(
             text = text,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
             color = if (good) Color(0xFF157A43) else Color(0xFFA33A45),
-            style = MaterialTheme.typography.labelMedium,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -824,6 +1123,19 @@ private data class AiradbSettings(
     val windowWidth: String = "480",
     val windowHeight: String = "1071",
 ) {
+    fun summary(): String {
+        val size = listOf(windowWidth, windowHeight)
+            .takeIf { values -> values.all(String::isNotBlank) }
+            ?.joinToString("x")
+            ?: "auto"
+        val mode = buildList {
+            if (alwaysOnTop) add("top")
+            if (plainWindow) add("plain")
+        }.joinToString(", ").ifBlank { "borderless" }
+
+        return "$windowTitle · $size · $mode"
+    }
+
     fun toCliArgs(): List<String> = buildList {
         if (alwaysOnTop) {
             add("--always-on-top")
@@ -1075,6 +1387,26 @@ private fun menuBarPopoverPosition(anchor: Point? = currentPointerLocation()): W
     } else {
         screen.y + 32
     }.coerceIn(minY, maxY)
+
+    return WindowPosition.Absolute(x.dp, y.dp)
+}
+
+private fun trayContextMenuHeight(running: Boolean): Int {
+    val itemCount = 5 + if (running) 1 else 0
+    return itemCount * TrayMenuItemHeightPx + 2 * TrayMenuSeparatorHeightPx + TrayMenuVerticalPaddingPx
+}
+
+private fun trayMenuWindowPosition(anchor: Point, running: Boolean): WindowPosition {
+    val screen = screenBoundsFor(anchor)
+    val width = TrayMenuWidthPx
+    val height = trayContextMenuHeight(running)
+    val margin = 8
+    val minX = screen.x + margin
+    val maxX = (screen.x + screen.width - width - margin).coerceAtLeast(minX)
+    val minY = screen.y + margin
+    val maxY = (screen.y + screen.height - height - margin).coerceAtLeast(minY)
+    val x = (anchor.x - width / 2).coerceIn(minX, maxX)
+    val y = (anchor.y + 8).coerceIn(minY, maxY)
 
     return WindowPosition.Absolute(x.dp, y.dp)
 }
