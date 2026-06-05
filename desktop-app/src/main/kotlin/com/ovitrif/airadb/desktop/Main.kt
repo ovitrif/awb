@@ -83,7 +83,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import java.awt.BasicStroke
 import java.awt.GraphicsEnvironment
 import java.awt.MouseInfo
 import java.awt.Point
@@ -605,18 +604,27 @@ private fun androidTrayImage(size: Int = 22): BufferedImage {
     val graphics = image.createGraphics()
     graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
     graphics.color = AwtColor.WHITE
-    graphics.stroke = BasicStroke((size * 0.08f).coerceAtLeast(1f), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
 
-    graphics.drawLine((size * 0.34f).toInt(), (size * 0.25f).toInt(), (size * 0.24f).toInt(), (size * 0.10f).toInt())
-    graphics.drawLine((size * 0.66f).toInt(), (size * 0.25f).toInt(), (size * 0.76f).toInt(), (size * 0.10f).toInt())
-    graphics.fillRoundRect((size * 0.20f).toInt(), (size * 0.25f).toInt(), (size * 0.60f).toInt(), (size * 0.36f).toInt(), 8, 8)
-    graphics.fillRoundRect((size * 0.28f).toInt(), (size * 0.56f).toInt(), (size * 0.44f).toInt(), (size * 0.26f).toInt(), 5, 5)
-    graphics.fillRoundRect((size * 0.12f).toInt(), (size * 0.58f).toInt(), (size * 0.12f).toInt(), (size * 0.22f).toInt(), 4, 4)
-    graphics.fillRoundRect((size * 0.76f).toInt(), (size * 0.58f).toInt(), (size * 0.12f).toInt(), (size * 0.22f).toInt(), 4, 4)
+    graphics.fillRoundRect(
+        (size * 0.12f).toInt(),
+        (size * 0.14f).toInt(),
+        (size * 0.76f).toInt(),
+        (size * 0.42f).toInt(),
+        9,
+        9,
+    )
+    graphics.fillRoundRect(
+        (size * 0.23f).toInt(),
+        (size * 0.51f).toInt(),
+        (size * 0.54f).toInt(),
+        (size * 0.36f).toInt(),
+        6,
+        6,
+    )
 
     graphics.color = AwtColor(42, 48, 68)
-    graphics.fillOval((size * 0.36f).toInt(), (size * 0.39f).toInt(), 2, 2)
-    graphics.fillOval((size * 0.58f).toInt(), (size * 0.39f).toInt(), 2, 2)
+    graphics.fillOval((size * 0.35f).toInt(), (size * 0.31f).toInt(), 2, 2)
+    graphics.fillOval((size * 0.59f).toInt(), (size * 0.31f).toInt(), 2, 2)
     graphics.dispose()
 
     return image
@@ -1507,51 +1515,25 @@ private object AndroidAppPainter : Painter() {
 private fun DrawScope.drawAndroid(size: Size, tray: Boolean) {
     val main = if (tray) Color.White else AndroidGreen
     val eye = if (tray) Color(0xFF222738) else Color.White
-    val antenna = if (tray) Color.White else Color(0xFF1D8E55)
-    val stroke = size.minDimension * 0.055f
-    val headTop = size.height * 0.24f
-    val headLeft = size.width * 0.20f
-    val headSize = Size(size.width * 0.60f, size.height * 0.42f)
-    val bodyTop = size.height * 0.57f
+    val headTop = size.height * 0.13f
+    val headLeft = size.width * 0.11f
+    val headSize = Size(size.width * 0.78f, size.height * 0.44f)
+    val bodyTop = size.height * 0.51f
 
-    drawLine(
-        color = antenna,
-        start = Offset(size.width * 0.34f, size.height * 0.25f),
-        end = Offset(size.width * 0.22f, size.height * 0.10f),
-        strokeWidth = stroke,
-    )
-    drawLine(
-        color = antenna,
-        start = Offset(size.width * 0.66f, size.height * 0.25f),
-        end = Offset(size.width * 0.78f, size.height * 0.10f),
-        strokeWidth = stroke,
-    )
     drawRoundRect(
         color = main,
         topLeft = Offset(headLeft, headTop),
         size = headSize,
-        cornerRadius = CornerRadius(size.width * 0.18f, size.width * 0.18f),
+        cornerRadius = CornerRadius(size.width * 0.20f, size.width * 0.20f),
     )
     drawRoundRect(
         color = main,
-        topLeft = Offset(size.width * 0.28f, bodyTop),
-        size = Size(size.width * 0.44f, size.height * 0.28f),
-        cornerRadius = CornerRadius(size.width * 0.07f, size.width * 0.07f),
+        topLeft = Offset(size.width * 0.23f, bodyTop),
+        size = Size(size.width * 0.54f, size.height * 0.36f),
+        cornerRadius = CornerRadius(size.width * 0.08f, size.width * 0.08f),
     )
-    drawRoundRect(
-        color = main,
-        topLeft = Offset(size.width * 0.12f, bodyTop),
-        size = Size(size.width * 0.12f, size.height * 0.24f),
-        cornerRadius = CornerRadius(size.width * 0.06f, size.width * 0.06f),
-    )
-    drawRoundRect(
-        color = main,
-        topLeft = Offset(size.width * 0.76f, bodyTop),
-        size = Size(size.width * 0.12f, size.height * 0.24f),
-        cornerRadius = CornerRadius(size.width * 0.06f, size.width * 0.06f),
-    )
-    drawCircle(eye, radius = size.width * 0.045f, center = Offset(size.width * 0.39f, size.height * 0.42f))
-    drawCircle(eye, radius = size.width * 0.045f, center = Offset(size.width * 0.61f, size.height * 0.42f))
+    drawCircle(eye, radius = size.width * 0.045f, center = Offset(size.width * 0.38f, size.height * 0.34f))
+    drawCircle(eye, radius = size.width * 0.045f, center = Offset(size.width * 0.62f, size.height * 0.34f))
 }
 
 private fun String.onlyDigits(): String = filter { it.isDigit() }.take(5)
