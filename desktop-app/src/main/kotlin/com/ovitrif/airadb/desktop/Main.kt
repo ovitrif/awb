@@ -18,7 +18,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
@@ -57,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -70,6 +73,7 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Tray
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.WindowState
 import androidx.compose.ui.window.application
 import kotlinx.coroutines.Dispatchers
@@ -81,6 +85,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.awt.GraphicsEnvironment
+import java.awt.MouseInfo
+import java.awt.Point
+import java.awt.Rectangle
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.LocalTime
@@ -94,13 +104,20 @@ private val Ink = Color(0xFF283044)
 private val Muted = Color(0xFF737589)
 private val Blue = Color(0xFF3F7EEE)
 private val AndroidGreen = Color(0xFF38C976)
+private val PopoverSize = DpSize(560.dp, 720.dp)
 
 private val json = Json {
     ignoreUnknownKeys = true
 }
 
 fun main() = application {
-    var windowVisible by remember { mutableStateOf(true) }
+    var popoverVisible by remember { mutableStateOf(true) }
+    val popoverState = remember {
+        WindowState(
+            size = PopoverSize,
+            position = menuBarPopoverPosition(anchor = null),
+        )
+    }
     val controller = remember { AiradbController() }
     var selectedTab by remember { mutableStateOf(AppTab.Tools) }
     var status by remember { mutableStateOf<StatusSnapshot?>(null) }
@@ -130,12 +147,19 @@ fun main() = application {
         }
     }
 
+    fun showPopover() {
+        popoverState.position = menuBarPopoverPosition()
+        popoverVisible = true
+        refreshStatus()
+    }
+
     fun launchAiradb(label: String, args: List<String>) {
         controller.stopActiveProcess()
         logs.clear()
         activeCommand = label
         running = true
         selectedTab = AppTab.Console
+        popoverVisible = true
         appendLog(timestamped("Starting ${printableCommand(args)}"))
 
         scope.launch(Dispatchers.IO) {
@@ -197,8 +221,9 @@ fun main() = application {
     Tray(
         icon = AndroidTrayPainter,
         tooltip = "airadb",
+        onAction = ::showPopover,
         menu = {
-            Item("Show airadb", onClick = { windowVisible = true })
+            Item("Show airadb", onClick = ::showPopover)
             Separator()
             Item("Pair and mirror", onClick = ::pairAndMirror)
             Item("Stable mirror", onClick = ::stableMirror)
@@ -214,13 +239,32 @@ fun main() = application {
         },
     )
 
-    if (windowVisible) {
+    if (popoverVisible) {
         Window(
             title = "airadb",
             icon = AndroidAppPainter,
-            state = WindowState(size = DpSize(560.dp, 720.dp)),
-            onCloseRequest = { windowVisible = false },
+            state = popoverState,
+            undecorated = true,
+            transparent = true,
+            resizable = false,
+            alwaysOnTop = true,
+            onCloseRequest = { popoverVisible = false },
         ) {
+            DisposableEffect(window) {
+                val listener = object : WindowAdapter() {
+                    override fun windowLostFocus(event: WindowEvent?) {
+                        popoverVisible = false
+                    }
+                }
+
+                window.addWindowFocusListener(listener)
+                window.requestFocus()
+
+                onDispose {
+                    window.removeWindowFocusListener(listener)
+                }
+            }
+
             MaterialTheme(
                 colorScheme = lightColorScheme(
                     primary = Blue,
@@ -279,8 +323,12 @@ private fun AiradbWindow(
     airadbBinary: String,
 ) {
     Surface(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(8.dp)
+            .shadow(22.dp, RoundedCornerShape(28.dp)),
         color = AiradbPink,
+        shape = RoundedCornerShape(28.dp),
     ) {
         Column(
             modifier = Modifier
@@ -418,7 +466,9 @@ private fun ToolsPanel(
     airadbBinary: String,
 ) {
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Surface(
@@ -1006,6 +1056,44 @@ private fun DrawScope.drawAndroid(size: Size, tray: Boolean) {
 }
 
 private fun String.onlyDigits(): String = filter { it.isDigit() }.take(5)
+
+private fun menuBarPopoverPosition(anchor: Point? = currentPointerLocation()): WindowPosition {
+    val screen = screenBoundsFor(anchor)
+    val width = PopoverSize.width.value.toInt()
+    val height = PopoverSize.height.value.toInt()
+    val margin = 12
+    val menuBarGap = 10
+    val minX = screen.x + margin
+    val maxX = (screen.x + screen.width - width - margin).coerceAtLeast(minX)
+    val minY = screen.y + margin
+    val maxY = (screen.y + screen.height - height - margin).coerceAtLeast(minY)
+    val fallbackX = maxX
+    val anchorX = anchor?.x?.minus(width / 2) ?: fallbackX
+    val x = anchorX.coerceIn(minX, maxX)
+    val y = if (anchor != null && anchor.y <= screen.y + 96) {
+        anchor.y + menuBarGap
+    } else {
+        screen.y + 32
+    }.coerceIn(minY, maxY)
+
+    return WindowPosition.Absolute(x.dp, y.dp)
+}
+
+private fun currentPointerLocation(): Point? =
+    runCatching { MouseInfo.getPointerInfo()?.location }.getOrNull()
+
+private fun screenBoundsFor(anchor: Point?): Rectangle {
+    val environment = GraphicsEnvironment.getLocalGraphicsEnvironment()
+    val devices = environment.screenDevices
+
+    if (anchor != null) {
+        devices
+            .firstOrNull { device -> device.defaultConfiguration.bounds.contains(anchor) }
+            ?.let { return it.defaultConfiguration.bounds }
+    }
+
+    return environment.defaultScreenDevice.defaultConfiguration.bounds
+}
 
 private fun printableCommand(command: List<String>): String =
     command.joinToString(" ") { part ->
