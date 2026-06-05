@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -29,6 +29,10 @@ impl Scrcpy {
         };
 
         Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn launch(&self, serial: &str, options: &ScrcpyOptions) -> Result<()> {

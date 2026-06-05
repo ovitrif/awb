@@ -20,6 +20,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use qr::PairingQr;
 use scrcpy::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, Scrcpy, ScrcpyOptions, ScrcpyRunMode};
+use serde::Serialize;
 
 const BINARY_NAME: &str = "airadb";
 const ALIAS_NAME: &str = "aw";
@@ -143,6 +144,12 @@ struct Args {
 
 #[derive(Debug, Clone, Subcommand)]
 enum CliCommand {
+    #[command(about = "Print local ADB, scrcpy, and connected device status")]
+    Status(StatusArgs),
+
+    #[command(about = "Kill and restart the local ADB server")]
+    ResetAdb,
+
     #[command(about = "Print shell completions")]
     Completions(CompletionArgs),
 
@@ -151,6 +158,12 @@ enum CliCommand {
         after_help = "Remember: aw = android wifi."
     )]
     InstallShell(InstallShellArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct StatusArgs {
+    #[arg(long, help = "Print status as JSON for desktop UI and automation")]
+    json: bool,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -239,6 +252,43 @@ impl ConnectedAction {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct StatusSnapshot {
+    airadb_version: &'static str,
+    adb: AdbStatus,
+    scrcpy: ToolStatus,
+    devices: Vec<DeviceStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdbStatus {
+    path: Option<String>,
+    available: bool,
+    version: Option<String>,
+    mdns_available: Option<bool>,
+    error: Option<String>,
+    mdns_error: Option<String>,
+    devices_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolStatus {
+    path: Option<String>,
+    available: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceStatus {
+    serial: String,
+    state: String,
+    display_name: String,
+    product: Option<String>,
+    model: Option<String>,
+    device: Option<String>,
+    transport_id: Option<String>,
+}
+
 impl Args {
     fn scrcpy_launch_mode(&self) -> ScrcpyLaunchMode {
         if self.background {
@@ -299,7 +349,7 @@ fn run() -> Result<()> {
     let args = Args::parse();
 
     if let Some(command) = args.command.as_ref() {
-        return handle_cli_command(command);
+        return handle_cli_command(command, &args);
     }
 
     let timeout = Duration::from_secs(args.timeout);
@@ -390,10 +440,187 @@ fn check_adb_mdns(adb: &Adb) -> Result<()> {
     }
 }
 
-fn handle_cli_command(command: &CliCommand) -> Result<()> {
+fn handle_cli_command(command: &CliCommand, args: &Args) -> Result<()> {
     match command {
+        CliCommand::Status(status_args) => print_status(args, status_args),
+        CliCommand::ResetAdb => {
+            let adb = Adb::resolve(args.adb.clone())?;
+            reset_adb_server(&adb)
+        }
         CliCommand::Completions(args) => print_completions(args),
         CliCommand::InstallShell(args) => install_shell(args),
+    }
+}
+
+fn print_status(args: &Args, status_args: &StatusArgs) -> Result<()> {
+    let snapshot = collect_status(args);
+
+    if status_args.json {
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        return Ok(());
+    }
+
+    ui::title("airadb", "Local status");
+    print_tool_status(
+        "ADB",
+        &snapshot.adb.path,
+        snapshot.adb.available,
+        &snapshot.adb.error,
+    );
+
+    if let Some(mdns_available) = snapshot.adb.mdns_available {
+        if mdns_available {
+            ui::success("ADB mDNS is available.");
+        } else if let Some(error) = &snapshot.adb.mdns_error {
+            ui::warn(format!("ADB mDNS is unavailable: {error}"));
+        }
+    }
+
+    print_tool_status(
+        "scrcpy",
+        &snapshot.scrcpy.path,
+        snapshot.scrcpy.available,
+        &snapshot.scrcpy.error,
+    );
+
+    match snapshot.devices.as_slice() {
+        [] if snapshot.adb.devices_error.is_none() => ui::status("No connected ADB devices."),
+        [] => {}
+        devices => {
+            ui::status("Connected ADB devices:");
+            for device in devices {
+                println!("  {} ({})", device.display_name, device.state);
+            }
+        }
+    }
+
+    if let Some(error) = &snapshot.adb.devices_error {
+        ui::warn(format!("could not list devices: {error}"));
+    }
+
+    Ok(())
+}
+
+fn print_tool_status(name: &str, path: &Option<String>, available: bool, error: &Option<String>) {
+    match (available, path, error) {
+        (true, Some(path), _) => ui::success(format!("{name}: {path}")),
+        (true, None, _) => ui::success(format!("{name}: available")),
+        (false, _, Some(error)) => ui::warn(format!("{name}: {error}")),
+        (false, _, None) => ui::warn(format!("{name}: unavailable")),
+    }
+}
+
+fn collect_status(args: &Args) -> StatusSnapshot {
+    let mut adb_status = AdbStatus {
+        path: None,
+        available: false,
+        version: None,
+        mdns_available: None,
+        error: None,
+        mdns_error: None,
+        devices_error: None,
+    };
+    let mut devices = Vec::new();
+
+    match Adb::resolve(args.adb.clone()) {
+        Ok(adb) => {
+            adb_status.path = Some(adb.path().display().to_string());
+
+            match adb.version() {
+                Ok(output) => {
+                    adb_status.available = true;
+                    adb_status.version = first_non_empty_line(&output.combined_output());
+                }
+                Err(error) => adb_status.error = Some(format!("{error:#}")),
+            }
+
+            if adb_status.available {
+                let (mdns_available, mdns_error) = collect_adb_mdns_status(&adb);
+                adb_status.mdns_available = mdns_available;
+                adb_status.mdns_error = mdns_error;
+
+                match adb.devices() {
+                    Ok(adb_devices) => {
+                        devices = adb_devices.into_iter().map(DeviceStatus::from).collect();
+                    }
+                    Err(error) => adb_status.devices_error = Some(format!("{error:#}")),
+                }
+            }
+        }
+        Err(error) => adb_status.error = Some(format!("{error:#}")),
+    }
+
+    StatusSnapshot {
+        airadb_version: env!("CARGO_PKG_VERSION"),
+        adb: adb_status,
+        scrcpy: collect_scrcpy_status(args),
+        devices,
+    }
+}
+
+fn collect_adb_mdns_status(adb: &Adb) -> (Option<bool>, Option<String>) {
+    match adb.mdns_check() {
+        Ok(output) if output.status.success() => (Some(true), None),
+        Ok(output) => (
+            Some(false),
+            Some(fallback_status_message(&output.combined_output())),
+        ),
+        Err(error) => (Some(false), Some(format!("{error:#}"))),
+    }
+}
+
+fn collect_scrcpy_status(args: &Args) -> ToolStatus {
+    match Scrcpy::resolve(args.scrcpy.clone(), args.no_scrcpy_check) {
+        Ok(scrcpy) => ToolStatus {
+            path: Some(scrcpy.path().display().to_string()),
+            available: true,
+            error: None,
+        },
+        Err(error) => ToolStatus {
+            path: None,
+            available: false,
+            error: Some(format!("{error:#}")),
+        },
+    }
+}
+
+fn first_non_empty_line(value: &str) -> Option<String> {
+    value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
+}
+
+fn fallback_status_message(output: &str) -> String {
+    let output = output.trim();
+
+    if output.is_empty() {
+        "command exited without output".to_string()
+    } else {
+        output.to_string()
+    }
+}
+
+impl From<adb::AdbDevice> for DeviceStatus {
+    fn from(device: adb::AdbDevice) -> Self {
+        let state = match &device.state {
+            adb::DeviceState::Device => "device",
+            adb::DeviceState::Offline => "offline",
+            adb::DeviceState::Unauthorized => "unauthorized",
+            adb::DeviceState::Other(value) => value,
+        }
+        .to_string();
+
+        Self {
+            serial: device.serial.clone(),
+            state,
+            display_name: device.display_name(),
+            product: device.product,
+            model: device.model,
+            device: device.device,
+            transport_id: device.transport_id,
+        }
     }
 }
 
