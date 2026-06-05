@@ -42,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.Typography
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -62,6 +63,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -108,6 +110,7 @@ private val Ink = Color(0xFF283044)
 private val Muted = Color(0xFF737589)
 private val Blue = Color(0xFF3F7EEE)
 private val AndroidGreen = Color(0xFF38C976)
+private val AiradbTypography = Typography().withoutLetterSpacing()
 private val PopoverSize = DpSize(430.dp, 360.dp)
 private val AboutWindowSize = DpSize(260.dp, 190.dp)
 private const val TrayClickFocusLossGraceNanos = 300_000_000L
@@ -121,6 +124,27 @@ private const val AboutWindowHeightPx = 190
 private val json = Json {
     ignoreUnknownKeys = true
 }
+
+private fun Typography.withoutLetterSpacing(): Typography =
+    copy(
+        displayLarge = displayLarge.noTracking(),
+        displayMedium = displayMedium.noTracking(),
+        displaySmall = displaySmall.noTracking(),
+        headlineLarge = headlineLarge.noTracking(),
+        headlineMedium = headlineMedium.noTracking(),
+        headlineSmall = headlineSmall.noTracking(),
+        titleLarge = titleLarge.noTracking(),
+        titleMedium = titleMedium.noTracking(),
+        titleSmall = titleSmall.noTracking(),
+        bodyLarge = bodyLarge.noTracking(),
+        bodyMedium = bodyMedium.noTracking(),
+        bodySmall = bodySmall.noTracking(),
+        labelLarge = labelLarge.noTracking(),
+        labelMedium = labelMedium.noTracking(),
+        labelSmall = labelSmall.noTracking(),
+    )
+
+private fun TextStyle.noTracking(): TextStyle = copy(letterSpacing = 0.sp)
 
 fun main() = application {
     var popoverVisible by remember { mutableStateOf(false) }
@@ -361,6 +385,7 @@ fun main() = application {
                     onSurface = Ink,
                     onBackground = Ink,
                 ),
+                typography = AiradbTypography,
             ) {
                 AiradbWindow(
                     selectedTab = selectedTab,
@@ -504,6 +529,7 @@ private fun AboutWindow(version: String?) {
             onSurface = Ink,
             onBackground = Ink,
         ),
+        typography = AiradbTypography,
     ) {
         Surface(
             modifier = Modifier.fillMaxSize(),
@@ -546,7 +572,14 @@ private fun ContextMenuItem(label: String, onClick: () -> Unit) {
             .padding(horizontal = 8.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
-        Text(label, color = Ink, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            label,
+            color = Ink,
+            fontSize = 12.sp,
+            letterSpacing = 0.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -698,6 +731,7 @@ private fun CompactTabBar(
                             tab.label,
                             color = if (selected) Blue else Muted,
                             fontSize = 11.sp,
+                            letterSpacing = 0.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -743,6 +777,7 @@ private fun Header(
                     "Android wireless debugging",
                     fontSize = 10.sp,
                     lineHeight = 11.sp,
+                    letterSpacing = 0.sp,
                     color = Muted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -825,6 +860,7 @@ private fun ToolsPanel(
                         if (statusLoading) "Refreshing" else "${status?.readyDeviceCount() ?: 0} devices",
                         color = Blue,
                         fontSize = 12.sp,
+                        letterSpacing = 0.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -934,6 +970,7 @@ private fun ToolsPanel(
                                 settings.summary(),
                                 color = Muted,
                                 fontSize = 11.sp,
+                                letterSpacing = 0.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -1023,6 +1060,7 @@ private fun ConsolePanel(
                     Text(
                         activeCommand ?: "Idle",
                         fontSize = 12.sp,
+                        letterSpacing = 0.sp,
                         color = if (running) Blue else Muted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1066,6 +1104,7 @@ private fun ConsolePanel(
                                     color = Color(0xFFADB4C7),
                                     fontFamily = FontFamily.Monospace,
                                     fontSize = 11.sp,
+                                    letterSpacing = 0.sp,
                                 )
                             }
                         } else {
@@ -1075,6 +1114,7 @@ private fun ConsolePanel(
                                     color = Color(0xFFE9EDF7),
                                     fontFamily = FontFamily.Monospace,
                                     fontSize = 11.sp,
+                                    letterSpacing = 0.sp,
                                 )
                             }
                         }
@@ -1124,6 +1164,7 @@ private fun ToolStatusRow(
                 name,
                 fontSize = 12.sp,
                 lineHeight = 13.sp,
+                letterSpacing = 0.sp,
                 fontWeight = FontWeight.Bold,
                 color = Ink,
                 maxLines = 1,
@@ -1135,6 +1176,7 @@ private fun ToolStatusRow(
                 color = Muted,
                 fontSize = 11.sp,
                 lineHeight = 12.sp,
+                letterSpacing = 0.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -1167,6 +1209,7 @@ private fun ActionButton(
             label,
             fontSize = 11.sp,
             lineHeight = 12.sp,
+            letterSpacing = 0.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1196,7 +1239,14 @@ private fun CompactInlineButton(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(icon, contentDescription = null, modifier = Modifier.size(12.dp), tint = tint)
-            Text(label, color = tint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            Text(
+                label,
+                color = tint,
+                fontSize = 11.sp,
+                letterSpacing = 0.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
         }
     }
 }
@@ -1212,7 +1262,7 @@ private fun ToggleRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Checkbox(checked = checked, onCheckedChange = onCheckedChange, modifier = Modifier.size(30.dp))
-        Text(label, color = Ink, fontSize = 11.sp, maxLines = 1)
+        Text(label, color = Ink, fontSize = 11.sp, letterSpacing = 0.sp, maxLines = 1)
     }
 }
 
@@ -1228,6 +1278,7 @@ private fun StatusChip(text: String, good: Boolean) {
             color = if (good) Color(0xFF157A43) else Color(0xFFA33A45),
             fontSize = 10.sp,
             lineHeight = 11.sp,
+            letterSpacing = 0.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
