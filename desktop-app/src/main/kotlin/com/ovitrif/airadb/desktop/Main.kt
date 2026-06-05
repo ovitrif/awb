@@ -53,6 +53,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,13 +84,18 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.awt.Frame
 import java.awt.GraphicsEnvironment
+import java.awt.MenuItem
 import java.awt.MouseInfo
+import java.awt.Panel
 import java.awt.Point
+import java.awt.PopupMenu
 import java.awt.Rectangle
 import java.awt.RenderingHints
 import java.awt.SystemTray
 import java.awt.TrayIcon
+import java.awt.Window as AwtWindow
 import java.awt.Color as AwtColor
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -113,10 +119,6 @@ private val AiradbTypography = Typography().withoutLetterSpacing()
 private val PopoverSize = DpSize(430.dp, 360.dp)
 private val AboutWindowSize = DpSize(260.dp, 190.dp)
 private const val TrayClickFocusLossGraceNanos = 300_000_000L
-private const val TrayMenuWidthPx = 150
-private const val TrayMenuItemHeightPx = 24
-private const val TrayMenuSeparatorHeightPx = 5
-private const val TrayMenuVerticalPaddingPx = 12
 private const val AboutWindowWidthPx = 260
 private const val AboutWindowHeightPx = 190
 
@@ -170,8 +172,6 @@ fun main() = application {
     val logs = remember { mutableStateListOf<String>() }
     var settings by remember { mutableStateOf(AiradbSettings()) }
     var optionsExpanded by remember { mutableStateOf(false) }
-    var trayMenuVisible by remember { mutableStateOf(false) }
-    var trayMenuPosition by remember { mutableStateOf<WindowPosition>(WindowPosition.Absolute(0.dp, 0.dp)) }
     var aboutVisible by remember { mutableStateOf(false) }
     var aboutVersion by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -196,14 +196,12 @@ fun main() = application {
 
     fun showPopover() {
         lastFocusDismissAt = 0L
-        trayMenuVisible = false
         popoverState.position = menuBarPopoverPosition()
         popoverVisible = true
         refreshStatus()
     }
 
     fun togglePopover() {
-        trayMenuVisible = false
         if (popoverVisible) {
             popoverVisible = false
         } else if (System.nanoTime() - lastFocusDismissAt < TrayClickFocusLossGraceNanos) {
@@ -211,11 +209,6 @@ fun main() = application {
         } else {
             showPopover()
         }
-    }
-
-    fun showTrayMenu(anchor: Point) {
-        trayMenuPosition = trayMenuWindowPosition(anchor, running)
-        trayMenuVisible = true
     }
 
     fun launchAiradb(label: String, args: List<String>) {
@@ -277,7 +270,6 @@ fun main() = application {
     }
 
     fun showAbout() {
-        trayMenuVisible = false
         aboutVersion = status?.airadbVersion ?: aboutVersion
         aboutState.position = centeredWindowPosition(AboutWindowWidthPx, AboutWindowHeightPx)
         aboutVisible = true
@@ -298,40 +290,19 @@ fun main() = application {
     }
 
     AiradbTray(
+        popoverVisible = popoverVisible,
+        running = running,
         onTogglePopover = ::togglePopover,
-        onShowMenu = ::showTrayMenu,
+        onPairAndMirror = ::pairAndMirror,
+        onStableMirror = ::stableMirror,
+        onRefresh = ::refreshStatus,
+        onStop = ::stopActive,
+        onQuit = {
+            controller.stopActiveProcess()
+            exitApplication()
+        },
+        onAbout = ::showAbout,
     )
-
-    if (trayMenuVisible) {
-        TrayContextMenuWindow(
-            position = trayMenuPosition,
-            popoverVisible = popoverVisible,
-            running = running,
-            onDismiss = { trayMenuVisible = false },
-            onTogglePopover = ::togglePopover,
-            onPairAndMirror = {
-                trayMenuVisible = false
-                pairAndMirror()
-            },
-            onStableMirror = {
-                trayMenuVisible = false
-                stableMirror()
-            },
-            onRefresh = {
-                trayMenuVisible = false
-                refreshStatus()
-            },
-            onStop = {
-                trayMenuVisible = false
-                stopActive()
-            },
-            onQuit = {
-                controller.stopActiveProcess()
-                exitApplication()
-            },
-            onAbout = ::showAbout,
-        )
-    }
 
     if (aboutVisible) {
         Window(
@@ -415,21 +386,47 @@ fun main() = application {
 
 @Composable
 private fun AiradbTray(
+    popoverVisible: Boolean,
+    running: Boolean,
     onTogglePopover: () -> Unit,
-    onShowMenu: (Point) -> Unit,
+    onPairAndMirror: () -> Unit,
+    onStableMirror: () -> Unit,
+    onRefresh: () -> Unit,
+    onStop: () -> Unit,
+    onQuit: () -> Unit,
+    onAbout: () -> Unit,
 ) {
-    val currentToggle by rememberUpdatedState(onTogglePopover)
-    val currentShowMenu by rememberUpdatedState(onShowMenu)
+    val currentToggle = rememberUpdatedState(onTogglePopover)
+    val currentPairAndMirror = rememberUpdatedState(onPairAndMirror)
+    val currentStableMirror = rememberUpdatedState(onStableMirror)
+    val currentRefresh = rememberUpdatedState(onRefresh)
+    val currentStop = rememberUpdatedState(onStop)
+    val currentQuit = rememberUpdatedState(onQuit)
+    val currentAbout = rememberUpdatedState(onAbout)
     val trayIcon = remember {
         TrayIcon(androidTrayImage(), "airadb").apply {
             isImageAutoSize = true
         }
+    }
+    val trayMenu = remember { NativeTrayMenu() }
+
+    SideEffect {
+        trayMenu.visibilityItem.label = if (popoverVisible) "Hide airadb" else "Show airadb"
+        trayMenu.stopItem.isEnabled = running
     }
 
     DisposableEffect(Unit) {
         if (!SystemTray.isSupported()) {
             return@DisposableEffect onDispose {}
         }
+
+        trayMenu.visibilityItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentToggle.value() } }
+        trayMenu.pairItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentPairAndMirror.value() } }
+        trayMenu.stableItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentStableMirror.value() } }
+        trayMenu.refreshItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentRefresh.value() } }
+        trayMenu.stopItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentStop.value() } }
+        trayMenu.quitItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentQuit.value() } }
+        trayMenu.aboutItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentAbout.value() } }
 
         val listener = object : MouseAdapter() {
             override fun mouseClicked(event: MouseEvent) {
@@ -439,9 +436,9 @@ private fun AiradbTray(
                         (event.button == MouseEvent.BUTTON1 && event.isControlDown)
 
                 if (shouldShowMenu) {
-                    SwingUtilities.invokeLater { currentShowMenu(Point(event.xOnScreen, event.yOnScreen)) }
+                    SwingUtilities.invokeLater { trayMenu.show(Point(event.xOnScreen, event.yOnScreen)) }
                 } else if (event.button == MouseEvent.BUTTON1) {
-                    SwingUtilities.invokeLater { currentToggle() }
+                    SwingUtilities.invokeLater { currentToggle.value() }
                 }
             }
         }
@@ -450,70 +447,60 @@ private fun AiradbTray(
         SystemTray.getSystemTray().add(trayIcon)
 
         onDispose {
+            trayMenu.hide()
+            trayMenu.dispose()
             trayIcon.removeMouseListener(listener)
             SystemTray.getSystemTray().remove(trayIcon)
         }
     }
 }
 
-@Composable
-private fun TrayContextMenuWindow(
-    position: WindowPosition,
-    popoverVisible: Boolean,
-    running: Boolean,
-    onDismiss: () -> Unit,
-    onTogglePopover: () -> Unit,
-    onPairAndMirror: () -> Unit,
-    onStableMirror: () -> Unit,
-    onRefresh: () -> Unit,
-    onStop: () -> Unit,
-    onQuit: () -> Unit,
-    onAbout: () -> Unit,
-) {
-    Window(
-        title = "airadb menu",
-        state = WindowState(size = DpSize(TrayMenuWidthPx.dp, trayContextMenuHeight(running).dp), position = position),
-        undecorated = true,
-        transparent = true,
-        resizable = false,
-        alwaysOnTop = true,
-        onCloseRequest = onDismiss,
-    ) {
-        DisposableEffect(window) {
-            window.background = AwtColor(0, 0, 0, 0)
-            val listener = object : WindowAdapter() {
-                override fun windowLostFocus(event: WindowEvent?) {
-                    onDismiss()
-                }
-            }
+private class NativeTrayMenu {
+    val popup = PopupMenu()
+    val visibilityItem = MenuItem("Show airadb")
+    val pairItem = MenuItem("Pair and mirror")
+    val stableItem = MenuItem("Stable mirror")
+    val refreshItem = MenuItem("Refresh status")
+    val stopItem = MenuItem("Stop command")
+    val quitItem = MenuItem("Quit")
+    val aboutItem = MenuItem("About")
+    private val panel = Panel()
+    private val host = AwtWindow(null as Frame?).apply {
+        background = AwtColor(0, 0, 0, 0)
+        isAlwaysOnTop = true
+        setFocusableWindowState(false)
+        setSize(1, 1)
+        add(panel)
+    }
 
-            window.addWindowFocusListener(listener)
-            window.requestFocus()
+    init {
+        popup.add(visibilityItem)
+        popup.addSeparator()
+        popup.add(pairItem)
+        popup.add(stableItem)
+        popup.add(refreshItem)
+        popup.add(stopItem)
+        popup.addSeparator()
+        popup.add(quitItem)
+        popup.add(aboutItem)
+        panel.add(popup)
+    }
 
-            onDispose {
-                window.removeWindowFocusListener(listener)
-            }
+    fun show(anchor: Point) {
+        host.setLocation(anchor)
+        if (!host.isVisible) {
+            host.isVisible = true
         }
+        popup.show(panel, 0, 0)
+    }
 
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = Color.White,
-            shape = RoundedCornerShape(8.dp),
-        ) {
-            Column(modifier = Modifier.padding(6.dp)) {
-                ContextMenuItem(if (popoverVisible) "Hide airadb" else "Show airadb", onTogglePopover)
-                ContextMenuSeparator()
-                ContextMenuItem("Pair and mirror", onPairAndMirror)
-                ContextMenuItem("Stable mirror", onStableMirror)
-                ContextMenuItem("Refresh status", onRefresh)
-                if (running) {
-                    ContextMenuItem("Stop command", onStop)
-                }
-                ContextMenuSeparator()
-                ContextMenuItem("Quit", onQuit)
-                ContextMenuItem("About", onAbout)
-            }
-        }
+    fun hide() {
+        host.isVisible = false
+    }
+
+    fun dispose() {
+        hide()
+        host.dispose()
     }
 }
 
@@ -557,45 +544,6 @@ private fun AboutWindow(version: String?) {
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun ContextMenuItem(label: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(24.dp)
-            .clip(RoundedCornerShape(5.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Text(
-            label,
-            color = Ink,
-            fontSize = 12.sp,
-            letterSpacing = 0.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-@Composable
-private fun ContextMenuSeparator() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(5.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Color(0xFFEAEAF0)),
-        )
     }
 }
 
@@ -1556,26 +1504,6 @@ private fun menuBarPopoverPosition(anchor: Point? = currentPointerLocation()): W
     } else {
         screen.y + 32
     }.coerceIn(minY, maxY)
-
-    return WindowPosition.Absolute(x.dp, y.dp)
-}
-
-private fun trayContextMenuHeight(running: Boolean): Int {
-    val itemCount = 6 + if (running) 1 else 0
-    return itemCount * TrayMenuItemHeightPx + 2 * TrayMenuSeparatorHeightPx + TrayMenuVerticalPaddingPx
-}
-
-private fun trayMenuWindowPosition(anchor: Point, running: Boolean): WindowPosition {
-    val screen = screenBoundsFor(anchor)
-    val width = TrayMenuWidthPx
-    val height = trayContextMenuHeight(running)
-    val margin = 8
-    val minX = screen.x + margin
-    val maxX = (screen.x + screen.width - width - margin).coerceAtLeast(minX)
-    val minY = screen.y + margin
-    val maxY = (screen.y + screen.height - height - margin).coerceAtLeast(minY)
-    val x = (anchor.x - width / 2).coerceIn(minX, maxX)
-    val y = (anchor.y + 8).coerceIn(minY, maxY)
 
     return WindowPosition.Absolute(x.dp, y.dp)
 }
