@@ -109,11 +109,14 @@ private val Muted = Color(0xFF737589)
 private val Blue = Color(0xFF3F7EEE)
 private val AndroidGreen = Color(0xFF38C976)
 private val PopoverSize = DpSize(430.dp, 360.dp)
+private val AboutWindowSize = DpSize(260.dp, 190.dp)
 private const val TrayClickFocusLossGraceNanos = 300_000_000L
 private const val TrayMenuWidthPx = 150
 private const val TrayMenuItemHeightPx = 24
 private const val TrayMenuSeparatorHeightPx = 5
 private const val TrayMenuVerticalPaddingPx = 12
+private const val AboutWindowWidthPx = 260
+private const val AboutWindowHeightPx = 190
 
 private val json = Json {
     ignoreUnknownKeys = true
@@ -128,6 +131,12 @@ fun main() = application {
             position = menuBarPopoverPosition(anchor = null),
         )
     }
+    val aboutState = remember {
+        WindowState(
+            size = AboutWindowSize,
+            position = centeredWindowPosition(AboutWindowWidthPx, AboutWindowHeightPx),
+        )
+    }
     val controller = remember { AiradbController() }
     var selectedTab by remember { mutableStateOf(AppTab.Tools) }
     var status by remember { mutableStateOf<StatusSnapshot?>(null) }
@@ -140,6 +149,8 @@ fun main() = application {
     var optionsExpanded by remember { mutableStateOf(false) }
     var trayMenuVisible by remember { mutableStateOf(false) }
     var trayMenuPosition by remember { mutableStateOf<WindowPosition>(WindowPosition.Absolute(0.dp, 0.dp)) }
+    var aboutVisible by remember { mutableStateOf(false) }
+    var aboutVersion by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     fun appendLog(line: String) {
@@ -242,6 +253,19 @@ fun main() = application {
         runAiradb("Install shell", listOf("install-shell", "--force"))
     }
 
+    fun showAbout() {
+        trayMenuVisible = false
+        aboutVersion = status?.airadbVersion ?: aboutVersion
+        aboutState.position = centeredWindowPosition(AboutWindowWidthPx, AboutWindowHeightPx)
+        aboutVisible = true
+        if (aboutVersion == null) {
+            scope.launch {
+                runCatching { controller.loadVersion() }
+                    .onSuccess { aboutVersion = it }
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
         refreshStatus()
     }
@@ -282,7 +306,21 @@ fun main() = application {
                 controller.stopActiveProcess()
                 exitApplication()
             },
+            onAbout = ::showAbout,
         )
+    }
+
+    if (aboutVisible) {
+        Window(
+            title = "About airadb",
+            icon = AndroidAppPainter,
+            state = aboutState,
+            resizable = false,
+            alwaysOnTop = true,
+            onCloseRequest = { aboutVisible = false },
+        ) {
+            AboutWindow(version = aboutVersion ?: status?.airadbVersion)
+        }
     }
 
     if (popoverVisible) {
@@ -406,6 +444,7 @@ private fun TrayContextMenuWindow(
     onRefresh: () -> Unit,
     onStop: () -> Unit,
     onQuit: () -> Unit,
+    onAbout: () -> Unit,
 ) {
     Window(
         title = "airadb menu",
@@ -448,6 +487,49 @@ private fun TrayContextMenuWindow(
                 }
                 ContextMenuSeparator()
                 ContextMenuItem("Quit", onQuit)
+                ContextMenuItem("About", onAbout)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutWindow(version: String?) {
+    MaterialTheme(
+        colorScheme = lightColorScheme(
+            primary = Blue,
+            secondary = AndroidGreen,
+            surface = Panel,
+            background = Color.White,
+            onSurface = Ink,
+            onBackground = Ink,
+        ),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color.White,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Icon(
+                    painter = AndroidAppPainter,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = Color.Unspecified,
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("airadb", color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = version?.let { "v$it" } ?: "Version unavailable",
+                    color = Muted,
+                    fontSize = 13.sp,
+                )
             }
         }
     }
@@ -541,7 +623,7 @@ private fun AiradbWindow(
                 .padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Header(status = status, running = running, onRefresh = onRefresh)
+            Header(running = running, onRefresh = onRefresh)
 
             CompactTabBar(selectedTab = selectedTab, onSelectTab = onSelectTab)
 
@@ -629,7 +711,6 @@ private fun CompactTabBar(
 
 @Composable
 private fun Header(
-    status: StatusSnapshot?,
     running: Boolean,
     onRefresh: () -> Unit,
 ) {
@@ -673,9 +754,8 @@ private fun Header(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            StatusChip(text = if (running) "Running" else "Local", good = true)
-            if (status?.airadbVersion != null) {
-                StatusChip(text = "v${status.airadbVersion}", good = true)
+            if (running) {
+                StatusChip(text = "Running", good = true)
             }
             Box(
                 modifier = Modifier
@@ -1215,6 +1295,18 @@ private class AiradbController {
         return json.decodeFromString(StatusSnapshot.serializer(), result.stdout)
     }
 
+    suspend fun loadVersion(): String {
+        val result = runCapture(listOf(airadbBinary, "--version"), timeoutMillis = 5_000)
+        if (result.exitCode != 0) {
+            error(result.stderr.ifBlank { result.stdout }.ifBlank { "airadb --version failed" })
+        }
+
+        return result.stdout
+            .trim()
+            .removePrefix("airadb")
+            .trim()
+    }
+
     suspend fun stream(
         args: List<String>,
         onLine: (String) -> Unit,
@@ -1436,7 +1528,7 @@ private fun menuBarPopoverPosition(anchor: Point? = currentPointerLocation()): W
 }
 
 private fun trayContextMenuHeight(running: Boolean): Int {
-    val itemCount = 5 + if (running) 1 else 0
+    val itemCount = 6 + if (running) 1 else 0
     return itemCount * TrayMenuItemHeightPx + 2 * TrayMenuSeparatorHeightPx + TrayMenuVerticalPaddingPx
 }
 
@@ -1457,6 +1549,14 @@ private fun trayMenuWindowPosition(anchor: Point, running: Boolean): WindowPosit
 
 private fun currentPointerLocation(): Point? =
     runCatching { MouseInfo.getPointerInfo()?.location }.getOrNull()
+
+private fun centeredWindowPosition(width: Int, height: Int, anchor: Point? = currentPointerLocation()): WindowPosition {
+    val screen = screenBoundsFor(anchor)
+    val x = screen.x + (screen.width - width) / 2
+    val y = screen.y + (screen.height - height) / 2
+
+    return WindowPosition.Absolute(x.dp, y.dp)
+}
 
 private fun screenBoundsFor(anchor: Point?): Rectangle {
     val environment = GraphicsEnvironment.getLocalGraphicsEnvironment()
