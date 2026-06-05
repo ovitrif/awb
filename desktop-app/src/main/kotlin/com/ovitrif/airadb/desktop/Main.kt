@@ -6,8 +6,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -38,15 +36,12 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -113,7 +108,7 @@ private val Ink = Color(0xFF283044)
 private val Muted = Color(0xFF737589)
 private val Blue = Color(0xFF3F7EEE)
 private val AndroidGreen = Color(0xFF38C976)
-private val PopoverSize = DpSize(430.dp, 560.dp)
+private val PopoverSize = DpSize(430.dp, 360.dp)
 private const val TrayClickFocusLossGraceNanos = 300_000_000L
 private const val TrayMenuWidthPx = 150
 private const val TrayMenuItemHeightPx = 24
@@ -538,13 +533,13 @@ private fun AiradbWindow(
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = AiradbPink,
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(18.dp),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Header(status = status, running = running, onRefresh = onRefresh)
 
@@ -588,13 +583,13 @@ private fun CompactTabBar(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(38.dp),
+            .height(30.dp),
         color = Panel,
         shape = RoundedCornerShape(8.dp),
     ) {
         Row(
-            modifier = Modifier.padding(3.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier.padding(2.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             AppTab.entries.forEach { tab ->
                 val selected = selectedTab == tab
@@ -614,13 +609,13 @@ private fun CompactTabBar(
                         Icon(
                             imageVector = if (tab == AppTab.Tools) Icons.Filled.Build else Icons.Filled.Terminal,
                             contentDescription = null,
-                            modifier = Modifier.size(15.dp),
+                            modifier = Modifier.size(13.dp),
                             tint = if (selected) Blue else Muted,
                         )
                         Text(
                             tab.label,
                             color = if (selected) Blue else Muted,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -644,12 +639,12 @@ private fun Header(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(36.dp)
+                    .size(30.dp)
                     .clip(CircleShape)
                     .background(Color.White),
                 contentAlignment = Alignment.Center,
@@ -657,15 +652,16 @@ private fun Header(
                 Icon(
                     painter = AndroidAppPainter,
                     contentDescription = null,
-                    modifier = Modifier.size(26.dp),
+                    modifier = Modifier.size(22.dp),
                     tint = Color.Unspecified,
                 )
             }
             Column {
-                Text("airadb", color = Ink, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+                Text("airadb", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold, lineHeight = 20.sp)
                 Text(
                     "Android wireless debugging",
-                    fontSize = 12.sp,
+                    fontSize = 10.sp,
+                    lineHeight = 11.sp,
                     color = Muted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -674,7 +670,7 @@ private fun Header(
         }
 
         Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             StatusChip(text = if (running) "Running" else "Local", good = true)
@@ -683,7 +679,7 @@ private fun Header(
             }
             Box(
                 modifier = Modifier
-                    .size(28.dp)
+                    .size(24.dp)
                     .clip(CircleShape)
                     .clickable(onClick = onRefresh),
                 contentAlignment = Alignment.Center,
@@ -691,7 +687,7 @@ private fun Header(
                 Icon(
                     Icons.Filled.Refresh,
                     contentDescription = "Refresh",
-                    modifier = Modifier.size(17.dp),
+                    modifier = Modifier.size(15.dp),
                     tint = Ink,
                 )
             }
@@ -700,7 +696,6 @@ private fun Header(
 }
 
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
 private fun ToolsPanel(
     status: StatusSnapshot?,
     statusLoading: Boolean,
@@ -718,11 +713,18 @@ private fun ToolsPanel(
     onStop: () -> Unit,
     airadbBinary: String,
 ) {
+    val devices = status?.devices.orEmpty()
+    val scrollModifier = if (optionsExpanded || devices.size > 1) {
+        Modifier.verticalScroll(rememberScrollState())
+    } else {
+        Modifier
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .then(scrollModifier),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -730,19 +732,19 @@ private fun ToolsPanel(
             shape = RoundedCornerShape(8.dp),
         ) {
             Column(
-                modifier = Modifier.padding(10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(7.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Installed", color = Muted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Installed", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         if (statusLoading) "Refreshing" else "${status?.readyDeviceCount() ?: 0} devices",
                         color = Blue,
-                        fontSize = 14.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -760,7 +762,6 @@ private fun ToolsPanel(
                     icon = Icons.Filled.PlayArrow,
                 )
 
-                val devices = status?.devices.orEmpty()
                 if (devices.isEmpty()) {
                     ToolStatusRow(
                         name = "Android phone",
@@ -787,43 +788,41 @@ private fun ToolsPanel(
             shape = RoundedCornerShape(8.dp),
         ) {
             Column(
-                modifier = Modifier.padding(10.dp),
-                verticalArrangement = Arrangement.spacedBy(9.dp),
+                modifier = Modifier.padding(7.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Actions", color = Muted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Actions", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        TextButton(onClick = { onOptionsExpandedChange(!optionsExpanded) }) {
-                            Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(13.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text(if (optionsExpanded) "Done" else "Options", fontSize = 12.sp)
-                        }
+                        CompactInlineButton(
+                            label = if (optionsExpanded) "Done" else "Options",
+                            icon = Icons.Filled.Settings,
+                            onClick = { onOptionsExpandedChange(!optionsExpanded) },
+                        )
                         if (running) {
-                            TextButton(onClick = onStop) {
-                                Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text("Stop", fontSize = 12.sp)
-                            }
+                            CompactInlineButton("Stop", Icons.Filled.Stop, onStop, danger = true)
                         }
                     }
                 }
 
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    ActionButton("Pair and mirror", Icons.Filled.PlayArrow, running, onPairAndMirror)
-                    ActionButton("Stable mirror", Icons.Filled.CheckCircle, running, onStableMirror)
-                    ActionButton("Mirror and wait", Icons.Filled.Terminal, running, onMirrorAndWait)
-                    ActionButton("Reset ADB", Icons.Filled.Refresh, running, onResetAdb)
-                    ActionButton("Install shell", Icons.Filled.Download, running, onInstallShell)
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        ActionButton("Pair and mirror", Icons.Filled.PlayArrow, running, onPairAndMirror, Modifier.weight(1f))
+                        ActionButton("Stable mirror", Icons.Filled.CheckCircle, running, onStableMirror, Modifier.weight(1f))
+                        ActionButton("Mirror and wait", Icons.Filled.Terminal, running, onMirrorAndWait, Modifier.weight(1f))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        ActionButton("Reset ADB", Icons.Filled.Refresh, running, onResetAdb, Modifier.weight(1f))
+                        ActionButton("Install shell", Icons.Filled.Download, running, onInstallShell, Modifier.weight(1f))
+                        Spacer(Modifier.weight(1f))
+                    }
                 }
             }
         }
@@ -835,8 +834,8 @@ private fun ToolsPanel(
                 shape = RoundedCornerShape(8.dp),
             ) {
                 Column(
-                    modifier = Modifier.padding(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(7.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -846,11 +845,11 @@ private fun ToolsPanel(
                         Icon(
                             Icons.Filled.Settings,
                             contentDescription = null,
-                            modifier = Modifier.size(15.dp),
+                            modifier = Modifier.size(13.dp),
                             tint = Muted,
                         )
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("scrcpy options", color = Muted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                            Text("scrcpy options", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                             Text(
                                 settings.summary(),
                                 color = Muted,
@@ -875,14 +874,14 @@ private fun ToolsPanel(
                         OutlinedTextField(
                             value = settings.windowWidth,
                             onValueChange = { onSettingsChange(settings.copy(windowWidth = it.onlyDigits())) },
-                            modifier = Modifier.width(76.dp),
+                            modifier = Modifier.width(68.dp),
                             label = { Text("W") },
                             singleLine = true,
                         )
                         OutlinedTextField(
                             value = settings.windowHeight,
                             onValueChange = { onSettingsChange(settings.copy(windowHeight = it.onlyDigits())) },
-                            modifier = Modifier.width(82.dp),
+                            modifier = Modifier.width(74.dp),
                             label = { Text("H") },
                             singleLine = true,
                         )
@@ -1013,21 +1012,23 @@ private fun ToolStatusRow(
     available: Boolean,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(34.dp),
         shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = if (available) Color.White else PanelMuted),
+        color = if (available) Color.White else PanelMuted,
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(28.dp)
+                    .size(22.dp)
                     .clip(CircleShape)
                     .background(if (available) Color(0xFFE2F8EB) else Color(0xFFFFE8EC)),
                 contentAlignment = Alignment.Center,
@@ -1035,21 +1036,28 @@ private fun ToolStatusRow(
                 Icon(
                     icon,
                     contentDescription = null,
-                    modifier = Modifier.size(15.dp),
+                    modifier = Modifier.size(12.dp),
                     tint = if (available) AndroidGreen else Color(0xFFD94F5C),
                 )
             }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    name,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Ink,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(detail, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
+            Text(
+                name,
+                fontSize = 12.sp,
+                lineHeight = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = Ink,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                detail,
+                modifier = Modifier.weight(1f),
+                color = Muted,
+                fontSize = 11.sp,
+                lineHeight = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             StatusChip(if (available) "Ready" else "Check", available)
         }
     }
@@ -1061,20 +1069,55 @@ private fun ActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     running: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Button(
         onClick = onClick,
         enabled = !running,
-        modifier = Modifier
-            .height(32.dp)
+        modifier = modifier
+            .height(28.dp)
             .defaultMinSize(minWidth = 1.dp, minHeight = 1.dp),
         shape = RoundedCornerShape(8.dp),
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+        contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp),
         colors = ButtonDefaults.buttonColors(containerColor = Blue),
     ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(14.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Icon(icon, contentDescription = null, modifier = Modifier.size(12.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(
+            label,
+            fontSize = 11.sp,
+            lineHeight = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun CompactInlineButton(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    danger: Boolean = false,
+) {
+    val tint = if (danger) Color(0xFFA33A45) else Blue
+    Box(
+        modifier = Modifier
+            .height(22.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (danger) Color(0xFFFFE8EC) else Color.White)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 7.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(12.dp), tint = tint)
+            Text(label, color = tint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        }
     }
 }
 
@@ -1089,7 +1132,7 @@ private fun ToggleRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Checkbox(checked = checked, onCheckedChange = onCheckedChange, modifier = Modifier.size(30.dp))
-        Text(label, color = Ink, fontSize = 12.sp, maxLines = 1)
+        Text(label, color = Ink, fontSize = 11.sp, maxLines = 1)
     }
 }
 
@@ -1101,9 +1144,10 @@ private fun StatusChip(text: String, good: Boolean) {
     ) {
         Text(
             text = text,
-            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
             color = if (good) Color(0xFF157A43) else Color(0xFFA33A45),
-            fontSize = 11.sp,
+            fontSize = 10.sp,
+            lineHeight = 11.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
