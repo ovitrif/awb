@@ -105,6 +105,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.TimeUnit
 import javax.swing.SwingUtilities
 
 private val AiradbPink = Color(0xFFF4DCE7)
@@ -1367,10 +1368,15 @@ private data class AiradbSettings(
 
 private class AiradbController {
     val airadbBinary: String = resolveAiradbBinary()
+    private val processEnvironment: Map<String, String> = airadbProcessEnvironment()
     private var activeProcess: Process? = null
 
     suspend fun loadStatus(): StatusSnapshot {
-        val result = runCapture(listOf(airadbBinary, "status", "--json"), timeoutMillis = 25_000)
+        val result = runCapture(
+            listOf(airadbBinary, "status", "--json"),
+            timeoutMillis = 25_000,
+            environment = processEnvironment,
+        )
         if (result.exitCode != 0) {
             error(result.stderr.ifBlank { result.stdout }.ifBlank { "airadb status failed" })
         }
@@ -1379,7 +1385,11 @@ private class AiradbController {
     }
 
     suspend fun loadVersion(): String {
-        val result = runCapture(listOf(airadbBinary, "--version"), timeoutMillis = 5_000)
+        val result = runCapture(
+            listOf(airadbBinary, "--version"),
+            timeoutMillis = 5_000,
+            environment = processEnvironment,
+        )
         if (result.exitCode != 0) {
             error(result.stderr.ifBlank { result.stdout }.ifBlank { "airadb --version failed" })
         }
@@ -1397,6 +1407,7 @@ private class AiradbController {
     ) {
         val process = withContext(Dispatchers.IO) {
             ProcessBuilder(args)
+                .applyAiradbEnvironment(processEnvironment)
                 .redirectErrorStream(true)
                 .start()
         }
@@ -1432,9 +1443,14 @@ private data class CommandResult(
     val stderr: String,
 )
 
-private suspend fun runCapture(command: List<String>, timeoutMillis: Long): CommandResult = coroutineScope {
+private suspend fun runCapture(
+    command: List<String>,
+    timeoutMillis: Long,
+    environment: Map<String, String> = emptyMap(),
+): CommandResult = coroutineScope {
     val process = withContext(Dispatchers.IO) {
         ProcessBuilder(command)
+            .applyAiradbEnvironment(environment)
             .redirectErrorStream(false)
             .start()
     }
@@ -1455,6 +1471,78 @@ private suspend fun runCapture(command: List<String>, timeoutMillis: Long): Comm
         stdout = stdout.await(),
         stderr = stderr.await(),
     )
+}
+
+private fun ProcessBuilder.applyAiradbEnvironment(environment: Map<String, String>): ProcessBuilder {
+    if (environment.isNotEmpty()) {
+        environment().putAll(environment)
+    }
+    return this
+}
+
+private fun airadbProcessEnvironment(): Map<String, String> {
+    val environment = System.getenv().toMutableMap()
+    val path = mergedExecutablePath(loginShellPath().orEmpty(), environment["PATH"].orEmpty())
+    if (path.isNotBlank()) {
+        environment["PATH"] = path
+    }
+
+    val androidSdk = Path.of(System.getProperty("user.home"), "Library/Android/sdk")
+    if (Files.isDirectory(androidSdk)) {
+        if (environment["ANDROID_HOME"].isNullOrBlank()) {
+            environment["ANDROID_HOME"] = androidSdk.toString()
+        }
+        if (environment["ANDROID_SDK_ROOT"].isNullOrBlank()) {
+            environment["ANDROID_SDK_ROOT"] = androidSdk.toString()
+        }
+    }
+
+    return environment
+}
+
+private fun loginShellPath(): String? {
+    val shell = System.getenv("SHELL")?.takeIf { it.isNotBlank() } ?: "/bin/zsh"
+    val marker = "__AIRADB_PATH__="
+    return runCatching {
+        val process = ProcessBuilder(shell, "-lic", "print -r -- ${marker}\$PATH")
+            .redirectErrorStream(true)
+            .start()
+        if (!process.waitFor(2, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            return null
+        }
+        process.inputStream.bufferedReader().readText()
+            .lineSequence()
+            .firstOrNull { it.startsWith(marker) }
+            ?.removePrefix(marker)
+            ?.takeIf { process.exitValue() == 0 }
+    }.getOrNull()
+}
+
+private fun mergedExecutablePath(vararg pathValues: String): String {
+    val home = System.getProperty("user.home")
+    val candidates = buildList {
+        pathValues.forEach { value ->
+            value.split(":")
+                .filterTo(this) { it.isNotBlank() }
+        }
+        add("$home/Library/Android/sdk/platform-tools")
+        add("$home/Library/Android/sdk/emulator")
+        add("$home/Library/Android/sdk/cmdline-tools/latest/bin")
+        add("$home/.local/bin")
+        add("$home/.cargo/bin")
+        add("/opt/homebrew/bin")
+        add("/opt/homebrew/sbin")
+        add("/usr/local/bin")
+        add("/usr/bin")
+        add("/bin")
+        add("/usr/sbin")
+        add("/sbin")
+    }
+
+    return candidates
+        .distinct()
+        .joinToString(":")
 }
 
 private fun resolveAiradbBinary(): String {
