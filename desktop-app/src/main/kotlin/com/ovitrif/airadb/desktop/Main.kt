@@ -95,7 +95,6 @@ import java.awt.Rectangle
 import java.awt.RenderingHints
 import java.awt.SystemTray
 import java.awt.TrayIcon
-import java.awt.Window as AwtWindow
 import java.awt.Color as AwtColor
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -257,6 +256,20 @@ fun main() = application {
         runAiradb("Stable mirror", settings.toCliArgs() + "--stable")
     }
 
+    fun mirrorDevice(device: DeviceStatus) {
+        runAiradb(
+            "Mirror ${device.displayName}",
+            settings.toCliArgs() + listOf("--device-serial", device.serial, "--background"),
+        )
+    }
+
+    fun stableMirrorDevice(device: DeviceStatus) {
+        runAiradb(
+            "Stable ${device.displayName}",
+            settings.toCliArgs() + listOf("--device-serial", device.serial, "--stable"),
+        )
+    }
+
     fun mirrorAndWait() {
         runAiradb("Mirror and wait", settings.toCliArgs() + "--foreground")
     }
@@ -373,6 +386,8 @@ fun main() = application {
                     onRefresh = ::refreshStatus,
                     onPairAndMirror = ::pairAndMirror,
                     onStableMirror = ::stableMirror,
+                    onMirrorDevice = ::mirrorDevice,
+                    onStableMirrorDevice = ::stableMirrorDevice,
                     onMirrorAndWait = ::mirrorAndWait,
                     onResetAdb = ::resetAdb,
                     onInstallShell = ::installShell,
@@ -465,7 +480,8 @@ private class NativeTrayMenu {
     val quitItem = MenuItem("Quit")
     val aboutItem = MenuItem("About")
     private val panel = Panel()
-    private val host = AwtWindow(null as Frame?).apply {
+    private val host = Frame().apply {
+        isUndecorated = true
         background = AwtColor(0, 0, 0, 0)
         isAlwaysOnTop = true
         setFocusableWindowState(false)
@@ -595,6 +611,8 @@ private fun AiradbWindow(
     onRefresh: () -> Unit,
     onPairAndMirror: () -> Unit,
     onStableMirror: () -> Unit,
+    onMirrorDevice: (DeviceStatus) -> Unit,
+    onStableMirrorDevice: (DeviceStatus) -> Unit,
     onMirrorAndWait: () -> Unit,
     onResetAdb: () -> Unit,
     onInstallShell: () -> Unit,
@@ -628,6 +646,8 @@ private fun AiradbWindow(
                     onOptionsExpandedChange = onOptionsExpandedChange,
                     onPairAndMirror = onPairAndMirror,
                     onStableMirror = onStableMirror,
+                    onMirrorDevice = onMirrorDevice,
+                    onStableMirrorDevice = onStableMirrorDevice,
                     onMirrorAndWait = onMirrorAndWait,
                     onResetAdb = onResetAdb,
                     onInstallShell = onInstallShell,
@@ -778,6 +798,8 @@ private fun ToolsPanel(
     onOptionsExpandedChange: (Boolean) -> Unit,
     onPairAndMirror: () -> Unit,
     onStableMirror: () -> Unit,
+    onMirrorDevice: (DeviceStatus) -> Unit,
+    onStableMirrorDevice: (DeviceStatus) -> Unit,
     onMirrorAndWait: () -> Unit,
     onResetAdb: () -> Unit,
     onInstallShell: () -> Unit,
@@ -843,12 +865,27 @@ private fun ToolsPanel(
                     )
                 } else {
                     devices.forEach { device ->
+                        val ready = device.state == "device"
                         ToolStatusRow(
                             name = device.displayName,
                             detail = device.serial,
-                            available = device.state == "device",
+                            available = ready,
                             icon = Icons.Filled.CheckCircle,
-                        )
+                            showStatus = false,
+                        ) {
+                            DeviceActionButton(
+                                label = "Mirror",
+                                icon = Icons.Filled.PlayArrow,
+                                enabled = ready && !running && status?.scrcpy?.available == true,
+                                onClick = { onMirrorDevice(device) },
+                            )
+                            DeviceActionButton(
+                                label = "Stable",
+                                icon = Icons.Filled.CheckCircle,
+                                enabled = ready && !running && status?.scrcpy?.available == true,
+                                onClick = { onStableMirrorDevice(device) },
+                            )
+                        }
                     }
                 }
             }
@@ -1087,6 +1124,8 @@ private fun ToolStatusRow(
     detail: String,
     available: Boolean,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    showStatus: Boolean = true,
+    trailingContent: (@Composable () -> Unit)? = null,
 ) {
     Surface(
         modifier = Modifier
@@ -1136,8 +1175,45 @@ private fun ToolStatusRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            StatusChip(if (available) "Ready" else "Check", available)
+            trailingContent?.invoke()
+            if (showStatus) {
+                StatusChip(if (available) "Ready" else "Check", available)
+            }
         }
+    }
+}
+
+@Composable
+private fun DeviceActionButton(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .height(24.dp)
+            .defaultMinSize(minWidth = 1.dp, minHeight = 1.dp),
+        shape = RoundedCornerShape(7.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Blue,
+            disabledContainerColor = Color(0xFFE7E1E7),
+            disabledContentColor = Color(0xFF9B9AAA),
+        ),
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(11.dp))
+        Spacer(Modifier.width(3.dp))
+        Text(
+            label,
+            fontSize = 10.sp,
+            lineHeight = 11.sp,
+            letterSpacing = 0.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
     }
 }
 

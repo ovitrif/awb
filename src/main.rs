@@ -138,6 +138,13 @@ struct Args {
     )]
     keep_screen_awake: bool,
 
+    #[arg(
+        long,
+        value_name = "SERIAL",
+        help = "Use a specific connected ADB device serial instead of prompting"
+    )]
+    device_serial: Option<String>,
+
     #[arg(long, help = "Print Wi-Fi status after connecting and when it changes")]
     wifi_doctor: bool,
 }
@@ -368,10 +375,14 @@ fn run() -> Result<()> {
 
     ensure_adb_mdns_ready(&adb)?;
 
-    let phone = match startup_device_choice(&adb)? {
-        StartupDeviceChoice::Connected(phone) => phone,
-        StartupDeviceChoice::PairNew => retrying_pairing_flow(&adb, timeout)?,
-        StartupDeviceChoice::Close => return Ok(()),
+    let phone = if let Some(serial) = args.device_serial.as_deref() {
+        connected_phone_for_serial(&adb, serial)?
+    } else {
+        match startup_device_choice(&adb)? {
+            StartupDeviceChoice::Connected(phone) => phone,
+            StartupDeviceChoice::PairNew => retrying_pairing_flow(&adb, timeout)?,
+            StartupDeviceChoice::Close => return Ok(()),
+        }
     };
 
     ui::success(format!("Connected to {}", phone.display_name));
@@ -1102,6 +1113,12 @@ fn ready_phone_matching(adb: &Adb, expected_serial: &str) -> Result<Option<Conne
             }
         }),
     )
+}
+
+fn connected_phone_for_serial(adb: &Adb, serial: &str) -> Result<ConnectedPhone> {
+    ready_phone_matching(adb, serial)?.with_context(|| {
+        format!("ADB device {serial} is not connected or is not in the ready device state")
+    })
 }
 
 fn reconnect_endpoints(adb: &Adb, current_serial: &str) -> Vec<String> {
@@ -2132,6 +2149,16 @@ mod tests {
                 ..ScrcpyOptions::default()
             }
         );
+    }
+
+    #[test]
+    fn parses_explicit_device_serial() {
+        let args =
+            Args::try_parse_from(["airadb", "--device-serial", "R5CT123ABC", "--background"])
+                .unwrap();
+
+        assert_eq!(args.device_serial.as_deref(), Some("R5CT123ABC"));
+        assert_eq!(args.scrcpy_launch_mode(), ScrcpyLaunchMode::Background);
     }
 
     #[test]
