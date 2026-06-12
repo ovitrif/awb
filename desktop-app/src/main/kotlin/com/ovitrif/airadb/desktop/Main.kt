@@ -24,6 +24,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Computer
@@ -609,7 +610,15 @@ private fun AiradbWindow(
                 .padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Header(running = running, onRefresh = onRefresh)
+            Header(
+                running = running,
+                activeCommand = activeCommand,
+                optionsExpanded = optionsExpanded,
+                onRefresh = onRefresh,
+                onOptionsExpandedChange = onOptionsExpandedChange,
+                onConnect = onConnect,
+                onStop = onStop,
+            )
 
             CompactTabBar(selectedTab = selectedTab, onSelectTab = onSelectTab)
 
@@ -619,13 +628,10 @@ private fun AiradbWindow(
                     statusLoading = statusLoading,
                     statusError = statusError,
                     running = running,
-                    activeCommand = activeCommand,
                     activeDeviceSerial = activeDeviceSerial,
                     settings = settings,
                     optionsExpanded = optionsExpanded,
                     onSettingsChange = onSettingsChange,
-                    onOptionsExpandedChange = onOptionsExpandedChange,
-                    onConnect = onConnect,
                     onMirrorDevice = onMirrorDevice,
                     onStop = onStop,
                     airadbBinary = airadbBinary,
@@ -698,8 +704,15 @@ private fun CompactTabBar(
 @Composable
 private fun Header(
     running: Boolean,
+    activeCommand: String?,
+    optionsExpanded: Boolean,
     onRefresh: () -> Unit,
+    onOptionsExpandedChange: (Boolean) -> Unit,
+    onConnect: () -> Unit,
+    onStop: () -> Unit,
 ) {
+    val connectActive = running && activeCommand == "Connect"
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -758,6 +771,17 @@ private fun Header(
                     tint = Ink,
                 )
             }
+            CompactInlineButton(
+                label = "Settings",
+                icon = Icons.Filled.Settings,
+                onClick = { onOptionsExpandedChange(!optionsExpanded) },
+            )
+            DeviceActionButton(
+                icon = if (connectActive) Icons.Filled.Stop else Icons.Filled.Add,
+                active = connectActive,
+                enabled = !running || connectActive,
+                onClick = if (connectActive) onStop else onConnect,
+            )
         }
     }
 }
@@ -768,13 +792,10 @@ private fun ToolsPanel(
     statusLoading: Boolean,
     statusError: String?,
     running: Boolean,
-    activeCommand: String?,
     activeDeviceSerial: String?,
     settings: AiradbSettings,
     optionsExpanded: Boolean,
     onSettingsChange: (AiradbSettings) -> Unit,
-    onOptionsExpandedChange: (Boolean) -> Unit,
-    onConnect: () -> Unit,
     onMirrorDevice: (DeviceStatus) -> Unit,
     onStop: () -> Unit,
     airadbBinary: String,
@@ -855,53 +876,6 @@ private fun ToolsPanel(
                                 onClick = if (mirrorActive) onStop else ({ onMirrorDevice(device) }),
                             )
                         }
-                    }
-                }
-            }
-        }
-
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = Panel,
-            shape = RoundedCornerShape(8.dp),
-        ) {
-            Column(
-                modifier = Modifier.padding(7.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Actions", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CompactInlineButton(
-                            label = if (optionsExpanded) "Done" else "Options",
-                            icon = Icons.Filled.Settings,
-                            onClick = { onOptionsExpandedChange(!optionsExpanded) },
-                        )
-                        if (running) {
-                            CompactInlineButton("Stop", Icons.Filled.Stop, onStop, danger = true)
-                        }
-                    }
-                }
-
-                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        ActionButton(
-                            label = "Connect",
-                            icon = Icons.Filled.PlayArrow,
-                            running = running,
-                            active = activeCommand == "Connect",
-                            onClick = onConnect,
-                            onActiveClick = onStop,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.weight(2f))
                     }
                 }
             }
@@ -1178,49 +1152,6 @@ private fun DeviceActionButton(
         ),
     ) {
         Icon(icon, contentDescription = null, modifier = Modifier.size(12.dp))
-    }
-}
-
-@Composable
-private fun ActionButton(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    running: Boolean,
-    active: Boolean = false,
-    onClick: () -> Unit,
-    onActiveClick: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
-) {
-    Button(
-        onClick = if (active && onActiveClick != null) onActiveClick else onClick,
-        enabled = !running || active,
-        modifier = modifier
-            .height(28.dp)
-            .defaultMinSize(minWidth = 1.dp, minHeight = 1.dp),
-        shape = RoundedCornerShape(8.dp),
-        contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (active) AndroidGreen else Blue,
-            contentColor = Color.White,
-            disabledContainerColor = Color(0xFFE7E1E7),
-            disabledContentColor = Color(0xFF9B9AAA),
-        ),
-    ) {
-        Icon(
-            if (active) Icons.Filled.Stop else icon,
-            contentDescription = null,
-            modifier = Modifier.size(12.dp),
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(
-            if (active) "Running" else label,
-            fontSize = 11.sp,
-            lineHeight = 12.sp,
-            letterSpacing = 0.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
