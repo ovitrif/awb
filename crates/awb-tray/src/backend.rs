@@ -449,13 +449,12 @@ fn wait_for_pairing_endpoint(
     loop {
         ensure_not_cancelled(cancel)?;
 
-        if let Ok(services) = adb.mdns_services() {
-            if let Some(service) = services
+        if let Ok(services) = adb.mdns_services()
+            && let Some(service) = services
                 .into_iter()
                 .find(|service| service.instance == qr.instance && service.is_pairing_service())
-            {
-                return Ok(service.address);
-            }
+        {
+            return Ok(service.address);
         }
 
         if let Ok(Some(endpoint)) =
@@ -500,12 +499,11 @@ fn connect_after_pairing(
                 .map(|service| service.address)
                 .collect();
 
-        if endpoints.is_empty() {
-            if let Ok(found) =
+        if endpoints.is_empty()
+            && let Ok(found) =
                 dnssd::discover_connect_endpoints(pairing_endpoint, Duration::from_secs(2))
-            {
-                endpoints = found;
-            }
+        {
+            endpoints = found;
         }
 
         for endpoint in endpoints {
