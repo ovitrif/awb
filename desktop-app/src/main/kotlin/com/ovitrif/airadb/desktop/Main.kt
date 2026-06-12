@@ -168,7 +168,6 @@ fun main() = application {
     var statusError by remember { mutableStateOf<String?>(null) }
     var activeCommand by remember { mutableStateOf<String?>(null) }
     var activeDeviceSerial by remember { mutableStateOf<String?>(null) }
-    var activeDeviceMode by remember { mutableStateOf<DeviceRunMode?>(null) }
     var running by remember { mutableStateOf(false) }
     val logs = remember { mutableStateListOf<String>() }
     var settings by remember { mutableStateOf(AiradbSettings()) }
@@ -216,13 +215,11 @@ fun main() = application {
         label: String,
         args: List<String>,
         deviceSerial: String? = null,
-        deviceMode: DeviceRunMode? = null,
     ) {
         controller.stopActiveProcess()
         logs.clear()
         activeCommand = label
         activeDeviceSerial = deviceSerial
-        activeDeviceMode = deviceMode
         running = true
         popoverState.position = menuBarPopoverPosition()
         popoverVisible = true
@@ -237,7 +234,6 @@ fun main() = application {
                         appendLog(timestamped("$label exited with code $exitCode"))
                         activeCommand = null
                         activeDeviceSerial = null
-                        activeDeviceMode = null
                         running = false
                         refreshStatus()
                     }
@@ -250,13 +246,11 @@ fun main() = application {
         label: String,
         commandArgs: List<String>,
         deviceSerial: String? = null,
-        deviceMode: DeviceRunMode? = null,
     ) {
         launchAiradb(
             label = label,
             args = listOf(controller.airadbBinary) + commandArgs,
             deviceSerial = deviceSerial,
-            deviceMode = deviceMode,
         )
     }
 
@@ -264,18 +258,13 @@ fun main() = application {
         controller.stopActiveProcess()
         activeCommand = null
         activeDeviceSerial = null
-        activeDeviceMode = null
         running = false
         appendLog(timestamped("Stopped active command"))
         refreshStatus()
     }
 
-    fun pairAndMirror() {
-        runAiradb("Pair and mirror", settings.toCliArgs() + "--background")
-    }
-
-    fun stableMirror() {
-        runAiradb("Stable mirror", settings.toCliArgs() + "--stable")
+    fun connectPhone() {
+        runAiradb("Connect", listOf("--connect-only"))
     }
 
     fun mirrorDevice(device: DeviceStatus) {
@@ -283,25 +272,7 @@ fun main() = application {
             "Mirror ${device.displayName}",
             settings.toCliArgs() + listOf("--device-serial", device.serial, "--background"),
             deviceSerial = device.serial,
-            deviceMode = DeviceRunMode.Mirror,
         )
-    }
-
-    fun stableMirrorDevice(device: DeviceStatus) {
-        runAiradb(
-            "Stable ${device.displayName}",
-            settings.toCliArgs() + listOf("--device-serial", device.serial, "--stable"),
-            deviceSerial = device.serial,
-            deviceMode = DeviceRunMode.Stable,
-        )
-    }
-
-    fun mirrorAndWait() {
-        runAiradb("Mirror and wait", settings.toCliArgs() + "--foreground")
-    }
-
-    fun resetAdb() {
-        runAiradb("Reset ADB", listOf("reset-adb"))
     }
 
     fun showAbout() {
@@ -328,8 +299,7 @@ fun main() = application {
         popoverVisible = popoverVisible,
         running = running,
         onTogglePopover = ::togglePopover,
-        onPairAndMirror = ::pairAndMirror,
-        onStableMirror = ::stableMirror,
+        onConnect = ::connectPhone,
         onRefresh = ::refreshStatus,
         onStop = ::stopActive,
         onQuit = {
@@ -401,19 +371,14 @@ fun main() = application {
                     running = running,
                     activeCommand = activeCommand,
                     activeDeviceSerial = activeDeviceSerial,
-                    activeDeviceMode = activeDeviceMode,
                     logs = logs,
                     settings = settings,
                     optionsExpanded = optionsExpanded,
                     onSettingsChange = { settings = it },
                     onOptionsExpandedChange = { optionsExpanded = it },
                     onRefresh = ::refreshStatus,
-                    onPairAndMirror = ::pairAndMirror,
-                    onStableMirror = ::stableMirror,
+                    onConnect = ::connectPhone,
                     onMirrorDevice = ::mirrorDevice,
-                    onStableMirrorDevice = ::stableMirrorDevice,
-                    onMirrorAndWait = ::mirrorAndWait,
-                    onResetAdb = ::resetAdb,
                     onStop = ::stopActive,
                     airadbBinary = controller.airadbBinary,
                 )
@@ -427,16 +392,14 @@ private fun AiradbTray(
     popoverVisible: Boolean,
     running: Boolean,
     onTogglePopover: () -> Unit,
-    onPairAndMirror: () -> Unit,
-    onStableMirror: () -> Unit,
+    onConnect: () -> Unit,
     onRefresh: () -> Unit,
     onStop: () -> Unit,
     onQuit: () -> Unit,
     onAbout: () -> Unit,
 ) {
     val currentToggle = rememberUpdatedState(onTogglePopover)
-    val currentPairAndMirror = rememberUpdatedState(onPairAndMirror)
-    val currentStableMirror = rememberUpdatedState(onStableMirror)
+    val currentConnect = rememberUpdatedState(onConnect)
     val currentRefresh = rememberUpdatedState(onRefresh)
     val currentStop = rememberUpdatedState(onStop)
     val currentQuit = rememberUpdatedState(onQuit)
@@ -459,8 +422,7 @@ private fun AiradbTray(
         }
 
         trayMenu.visibilityItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentToggle.value() } }
-        trayMenu.pairItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentPairAndMirror.value() } }
-        trayMenu.stableItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentStableMirror.value() } }
+        trayMenu.connectItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentConnect.value() } }
         trayMenu.refreshItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentRefresh.value() } }
         trayMenu.stopItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentStop.value() } }
         trayMenu.quitItem.addActionListener { SwingUtilities.invokeLater { trayMenu.hide(); currentQuit.value() } }
@@ -496,8 +458,7 @@ private fun AiradbTray(
 private class NativeTrayMenu {
     val popup = PopupMenu()
     val visibilityItem = MenuItem("Show airadb")
-    val pairItem = MenuItem("Pair and mirror")
-    val stableItem = MenuItem("Stable mirror")
+    val connectItem = MenuItem("Connect")
     val refreshItem = MenuItem("Refresh status")
     val stopItem = MenuItem("Stop command")
     val quitItem = MenuItem("Quit")
@@ -515,8 +476,7 @@ private class NativeTrayMenu {
     init {
         popup.add(visibilityItem)
         popup.addSeparator()
-        popup.add(pairItem)
-        popup.add(stableItem)
+        popup.add(connectItem)
         popup.add(refreshItem)
         popup.add(stopItem)
         popup.addSeparator()
@@ -627,19 +587,14 @@ private fun AiradbWindow(
     running: Boolean,
     activeCommand: String?,
     activeDeviceSerial: String?,
-    activeDeviceMode: DeviceRunMode?,
     logs: List<String>,
     settings: AiradbSettings,
     optionsExpanded: Boolean,
     onSettingsChange: (AiradbSettings) -> Unit,
     onOptionsExpandedChange: (Boolean) -> Unit,
     onRefresh: () -> Unit,
-    onPairAndMirror: () -> Unit,
-    onStableMirror: () -> Unit,
+    onConnect: () -> Unit,
     onMirrorDevice: (DeviceStatus) -> Unit,
-    onStableMirrorDevice: (DeviceStatus) -> Unit,
-    onMirrorAndWait: () -> Unit,
-    onResetAdb: () -> Unit,
     onStop: () -> Unit,
     airadbBinary: String,
 ) {
@@ -666,17 +621,12 @@ private fun AiradbWindow(
                     running = running,
                     activeCommand = activeCommand,
                     activeDeviceSerial = activeDeviceSerial,
-                    activeDeviceMode = activeDeviceMode,
                     settings = settings,
                     optionsExpanded = optionsExpanded,
                     onSettingsChange = onSettingsChange,
                     onOptionsExpandedChange = onOptionsExpandedChange,
-                    onPairAndMirror = onPairAndMirror,
-                    onStableMirror = onStableMirror,
+                    onConnect = onConnect,
                     onMirrorDevice = onMirrorDevice,
-                    onStableMirrorDevice = onStableMirrorDevice,
-                    onMirrorAndWait = onMirrorAndWait,
-                    onResetAdb = onResetAdb,
                     onStop = onStop,
                     airadbBinary = airadbBinary,
                 )
@@ -820,17 +770,12 @@ private fun ToolsPanel(
     running: Boolean,
     activeCommand: String?,
     activeDeviceSerial: String?,
-    activeDeviceMode: DeviceRunMode?,
     settings: AiradbSettings,
     optionsExpanded: Boolean,
     onSettingsChange: (AiradbSettings) -> Unit,
     onOptionsExpandedChange: (Boolean) -> Unit,
-    onPairAndMirror: () -> Unit,
-    onStableMirror: () -> Unit,
+    onConnect: () -> Unit,
     onMirrorDevice: (DeviceStatus) -> Unit,
-    onStableMirrorDevice: (DeviceStatus) -> Unit,
-    onMirrorAndWait: () -> Unit,
-    onResetAdb: () -> Unit,
     onStop: () -> Unit,
     airadbBinary: String,
 ) {
@@ -863,7 +808,7 @@ private fun ToolsPanel(
                 ) {
                     Text("Installed", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     Text(
-                        if (statusLoading) "Refreshing" else "${status?.readyDeviceCount() ?: 0} devices",
+                        if (statusLoading) "..." else "${status?.readyDeviceCount() ?: 0}",
                         color = Blue,
                         fontSize = 12.sp,
                         letterSpacing = 0.sp,
@@ -895,11 +840,7 @@ private fun ToolsPanel(
                     devices.forEach { device ->
                         val ready = device.state == "device"
                         val mirrorActive = running &&
-                            activeDeviceSerial == device.serial &&
-                            activeDeviceMode == DeviceRunMode.Mirror
-                        val stableActive = running &&
-                            activeDeviceSerial == device.serial &&
-                            activeDeviceMode == DeviceRunMode.Stable
+                            activeDeviceSerial == device.serial
                         ToolStatusRow(
                             name = device.displayName,
                             detail = device.serial,
@@ -908,18 +849,10 @@ private fun ToolsPanel(
                             showStatus = false,
                         ) {
                             DeviceActionButton(
-                                label = if (mirrorActive) "Running" else "Mirror",
                                 icon = if (mirrorActive) Icons.Filled.Stop else Icons.Filled.PlayArrow,
                                 active = mirrorActive,
                                 enabled = ready && status?.scrcpy?.available == true && (!running || mirrorActive),
                                 onClick = if (mirrorActive) onStop else ({ onMirrorDevice(device) }),
-                            )
-                            DeviceActionButton(
-                                label = if (stableActive) "Running" else "Stable",
-                                icon = if (stableActive) Icons.Filled.Stop else Icons.Filled.CheckCircle,
-                                active = stableActive,
-                                enabled = ready && status?.scrcpy?.available == true && (!running || stableActive),
-                                onClick = if (stableActive) onStop else ({ onStableMirrorDevice(device) }),
                             )
                         }
                     }
@@ -960,40 +893,11 @@ private fun ToolsPanel(
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         ActionButton(
-                            label = "Pair and mirror",
+                            label = "Connect",
                             icon = Icons.Filled.PlayArrow,
                             running = running,
-                            active = activeCommand == "Pair and mirror",
-                            onClick = onPairAndMirror,
-                            onActiveClick = onStop,
-                            modifier = Modifier.weight(1f),
-                        )
-                        ActionButton(
-                            label = "Stable mirror",
-                            icon = Icons.Filled.CheckCircle,
-                            running = running,
-                            active = activeCommand == "Stable mirror",
-                            onClick = onStableMirror,
-                            onActiveClick = onStop,
-                            modifier = Modifier.weight(1f),
-                        )
-                        ActionButton(
-                            label = "Mirror and wait",
-                            icon = Icons.Filled.Terminal,
-                            running = running,
-                            active = activeCommand == "Mirror and wait",
-                            onClick = onMirrorAndWait,
-                            onActiveClick = onStop,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        ActionButton(
-                            label = "Reset ADB",
-                            icon = Icons.Filled.Refresh,
-                            running = running,
-                            active = activeCommand == "Reset ADB",
-                            onClick = onResetAdb,
+                            active = activeCommand == "Connect",
+                            onClick = onConnect,
                             onActiveClick = onStop,
                             modifier = Modifier.weight(1f),
                         )
@@ -1252,7 +1156,6 @@ private fun ToolStatusRow(
 
 @Composable
 private fun DeviceActionButton(
-    label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     active: Boolean = false,
     enabled: Boolean,
@@ -1262,10 +1165,11 @@ private fun DeviceActionButton(
         onClick = onClick,
         enabled = enabled,
         modifier = Modifier
+            .width(26.dp)
             .height(24.dp)
             .defaultMinSize(minWidth = 1.dp, minHeight = 1.dp),
         shape = RoundedCornerShape(7.dp),
-        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+        contentPadding = PaddingValues(0.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = if (active) AndroidGreen else Blue,
             contentColor = Color.White,
@@ -1273,16 +1177,7 @@ private fun DeviceActionButton(
             disabledContentColor = Color(0xFF9B9AAA),
         ),
     ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(11.dp))
-        Spacer(Modifier.width(3.dp))
-        Text(
-            label,
-            fontSize = 10.sp,
-            lineHeight = 11.sp,
-            letterSpacing = 0.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-        )
+        Icon(icon, contentDescription = null, modifier = Modifier.size(12.dp))
     }
 }
 
@@ -1401,11 +1296,6 @@ private fun StatusChip(text: String, good: Boolean) {
 private enum class AppTab(val label: String) {
     Tools("Tools"),
     Console("Console"),
-}
-
-private enum class DeviceRunMode {
-    Mirror,
-    Stable,
 }
 
 private data class AiradbSettings(

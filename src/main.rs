@@ -59,6 +59,13 @@ struct Args {
 
     #[arg(
         long,
+        conflicts_with_all = ["background", "foreground", "stable"],
+        help = "Connect or pair a phone without starting scrcpy or showing the scrcpy menu"
+    )]
+    connect_only: bool,
+
+    #[arg(
+        long,
         conflicts_with = "foreground",
         help = "Start scrcpy without waiting for it and skip the menu"
     )]
@@ -377,6 +384,11 @@ fn run() -> Result<()> {
 
     let phone = if let Some(serial) = args.device_serial.as_deref() {
         connected_phone_for_serial(&adb, serial)?
+    } else if args.connect_only {
+        match connect_only_phone(&adb, timeout)? {
+            Some(phone) => phone,
+            None => return Ok(()),
+        }
     } else {
         match startup_device_choice(&adb)? {
             StartupDeviceChoice::Connected(phone) => phone,
@@ -919,6 +931,10 @@ fn should_request_stay_awake(args: &Args, action: ConnectedAction) -> bool {
 }
 
 fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
+    if args.connect_only {
+        return Ok(ConnectedAction::Close);
+    }
+
     match args.scrcpy_launch_mode() {
         ScrcpyLaunchMode::Background => return Ok(ConnectedAction::StartBackground),
         ScrcpyLaunchMode::Foreground => return Ok(ConnectedAction::StartForeground),
@@ -940,6 +956,27 @@ fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
         2 => Ok(ConnectedAction::StartForeground),
         3 => Ok(ConnectedAction::Close),
         _ => unreachable!("ui::menu only returns a valid option"),
+    }
+}
+
+fn connect_only_phone(adb: &Adb, timeout: Duration) -> Result<Option<ConnectedPhone>> {
+    ui::status("Checking for already-connected phones...");
+    let ready_phones = wait_for_startup_connected_phones(adb, Duration::from_secs(2))?;
+
+    match ready_phones.len() {
+        0 => retrying_pairing_flow(adb, timeout).map(Some),
+        1 => {
+            let phone = ready_phones[0].clone();
+            ui::success(format!(
+                "ADB is already connected to {}.",
+                phone.display_name
+            ));
+            Ok(Some(phone))
+        }
+        count => {
+            ui::success(format!("ADB is already connected to {count} devices."));
+            Ok(None)
+        }
     }
 }
 
@@ -2080,6 +2117,19 @@ mod tests {
         assert!(args.watch_enabled());
         assert!(args.keep_screen_awake_enabled());
         assert!(args.wifi_doctor_enabled());
+    }
+
+    #[test]
+    fn connect_only_closes_without_scrcpy_menu() {
+        let args = Args::try_parse_from(["airadb", "--connect-only"]).unwrap();
+
+        assert_eq!(args.scrcpy_launch_mode(), ScrcpyLaunchMode::Menu);
+        assert_eq!(
+            connected_phone_action(&args).unwrap(),
+            ConnectedAction::Close
+        );
+        assert!(Args::try_parse_from(["airadb", "--connect-only", "--background"]).is_err());
+        assert!(Args::try_parse_from(["airadb", "--connect-only", "--stable"]).is_err());
     }
 
     #[test]
