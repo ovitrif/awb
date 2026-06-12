@@ -757,32 +757,44 @@ private fun Header(
             if (running) {
                 StatusChip(text = "Running", good = true)
             }
-            Box(
-                modifier = Modifier
-                    .size(24.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onRefresh),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.Refresh,
-                    contentDescription = "Refresh",
-                    modifier = Modifier.size(15.dp),
-                    tint = Ink,
-                )
-            }
-            CompactInlineButton(
-                label = "Settings",
+            HeaderIconButton(
+                icon = Icons.Filled.Refresh,
+                contentDescription = "Refresh",
+                onClick = onRefresh,
+            )
+            HeaderIconButton(
                 icon = Icons.Filled.Settings,
+                contentDescription = "Settings",
                 onClick = { onOptionsExpandedChange(!optionsExpanded) },
             )
-            DeviceActionButton(
+            HeaderIconButton(
                 icon = if (connectActive) Icons.Filled.Stop else Icons.Filled.Add,
-                active = connectActive,
-                enabled = !running || connectActive,
+                contentDescription = if (connectActive) "Stop" else "Connect",
                 onClick = if (connectActive) onStop else onConnect,
             )
         }
+    }
+}
+
+@Composable
+private fun HeaderIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(24.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(15.dp),
+            tint = Ink,
+        )
     }
 }
 
@@ -1152,40 +1164,6 @@ private fun DeviceActionButton(
         ),
     ) {
         Icon(icon, contentDescription = null, modifier = Modifier.size(12.dp))
-    }
-}
-
-@Composable
-private fun CompactInlineButton(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    onClick: () -> Unit,
-    danger: Boolean = false,
-) {
-    val tint = if (danger) Color(0xFFA33A45) else Blue
-    Box(
-        modifier = Modifier
-            .height(22.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(if (danger) Color(0xFFFFE8EC) else Color.White)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 7.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(12.dp), tint = tint)
-            Text(
-                label,
-                color = tint,
-                fontSize = 11.sp,
-                letterSpacing = 0.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-            )
-        }
     }
 }
 
