@@ -92,7 +92,7 @@
               "fill": "$text-strong",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "Airadb Icon",
+              "content": "awb Icon",
               "fontFamily": "Inter",
               "fontSize": 26,
               "fontWeight": "700"

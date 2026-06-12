@@ -60,7 +60,7 @@ padding 14/16, vertical gap 12. Font: Inter.
       `*.gradle.kts`, `gradle/`, `gradle.properties`, `.gradle/`, `.kotlin/`, `build/`).
 - [x] Restructure into the workspace above; move `src/*.rs` logic into `awb-core` (lib) and
       the CLI into `crates/awb`.
-- [x] Rename everything `airadb` -> `awb`: binary name, UI strings, env vars
+- [x] Rename everything airadb -> awb: binary name, UI strings, env vars
       (`AWB_INSTALL_*`), repo metadata. Version becomes 2.0.0.
 - [x] Drop the `aw` alias machinery (`install-shell` symlink logic); keep `awb completions`.
 - [x] Add `awb tray` subcommand that launches `awb-tray` detached (sibling binary or PATH).
@@ -105,10 +105,10 @@ archives; launch the bundled `AWB.app`.
 
 ### M4: Docs and launch
 
-- [ ] Rewrite README for awb: what it is, install one-liner, CLI usage, tray app, screenshots
+- [x] Rewrite README for awb: what it is, install one-liner, CLI usage, tray app, screenshots
       from M2 verification, requirements (macOS, adb, scrcpy optional), build from source.
-- [ ] Refresh AGENTS.md workflow (workspace commands, awb install path).
-- [ ] Remove stale `PLAN.md`; commit `DESIGN.pen` and this roadmap.
+- [x] Refresh AGENTS.md workflow (workspace commands, awb install path).
+- [x] Remove stale `PLAN.md`; commit `DESIGN.pen` and this roadmap.
 - [ ] Final pass: `git status` clean, CI green, tag `v2.0.0` when the user is ready.
 
 Verify: fresh-clone build, README commands copy-paste correctly, repo has no leftover
