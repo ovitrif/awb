@@ -57,6 +57,51 @@ pub fn window_logo(frame_size: u32, glyph_size: f32, offset: f32, oversample: u3
     }
 }
 
+/// App icon for the macOS bundle: dark rounded tile with the colored glyph,
+/// per the `componentBg` tile in DESIGN.pen.
+pub fn app_icon_png(size: u32) -> Vec<u8> {
+    let mut pixmap = Pixmap::new(size, size).expect("icon pixmap");
+    let tile = size as f32;
+    let radius = tile * 0.2237;
+
+    let mut builder = PathBuilder::new();
+    builder.push_circle(radius, radius, radius);
+    builder.push_circle(tile - radius, radius, radius);
+    builder.push_circle(radius, tile - radius, radius);
+    builder.push_circle(tile - radius, tile - radius, radius);
+    builder.push_rect(tiny_skia::Rect::from_ltrb(radius, 0.0, tile - radius, tile).unwrap());
+    builder.push_rect(tiny_skia::Rect::from_ltrb(0.0, radius, tile, tile - radius).unwrap());
+    let rounded_tile = builder.finish().expect("tile path");
+
+    let mut paint = Paint::default();
+    paint.set_color(Color::from_rgba8(0x1C, 0x1C, 0x1E, 0xFF));
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &rounded_tile,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+
+    // Center the 100-unit glyph viewBox at ~78% tile size; the glyph's
+    // visual bounds sit between y=43 and y=75, so nudge it upward to
+    // optically center.
+    let glyph_scale = tile * 0.78 / VIEWBOX;
+    let offset_x = tile * 0.11;
+    let offset_y = tile * 0.5 - (59.0 * glyph_scale);
+    let transform =
+        Transform::from_scale(glyph_scale, glyph_scale).post_translate(offset_x, offset_y);
+
+    let green = Color::from_rgba8(0x3D, 0xDC, 0x84, 0xFF);
+    let blue = Color::from_rgba8(0x4D, 0x9F, 0xF5, 0xFF);
+    fill_path(&mut pixmap, LOGO_HEAD, green, transform);
+    fill_path(&mut pixmap, LOGO_WAVE_1, blue, transform);
+    fill_path(&mut pixmap, LOGO_WAVE_2, blue, transform);
+
+    pixmap.encode_png().expect("png encoding")
+}
+
 fn fill_path(pixmap: &mut Pixmap, svg_path: &str, color: Color, transform: Transform) {
     let bez = BezPath::from_svg(svg_path).expect("valid design path");
     let mut builder = PathBuilder::new();

@@ -12,22 +12,45 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85"
+          toolchain: "1.88"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check
 
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Unit tests
         run: cargo test
+
+      - name: Bundle AWB.app
+        run: |
+          cargo build --release -p awb-tray
+          scripts/bundle-app.sh
+
+  check-linux-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Lint CLI crates
+        run: cargo clippy -p awb-core -p awb --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test -p awb-core -p awb

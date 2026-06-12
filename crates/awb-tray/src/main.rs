@@ -9,6 +9,21 @@ mod theme;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(index) = args.iter().position(|arg| arg == "--render-icon") {
+        let path = args
+            .get(index + 1)
+            .map(String::as_str)
+            .unwrap_or("icon.png");
+        let size = args
+            .get(index + 2)
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(1024);
+        std::fs::write(path, glyph::app_icon_png(size)).expect("write icon");
+        println!("wrote {path} ({size}x{size})");
+        return Ok(());
+    }
+
     let viewport = egui::ViewportBuilder::default()
         .with_title("awb")
         .with_inner_size([theme::WINDOW_WIDTH, theme::WINDOW_HEIGHT])

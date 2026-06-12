@@ -92,12 +92,12 @@ phone end to end; confirm no Dock icon, focus-loss dismiss, and light/dark menu 
 
 ### M3: Packaging and release readiness
 
-- [ ] Rewrite `install.sh` for `awb`: installs both binaries from the release archive,
+- [x] Rewrite `install.sh` for `awb`: installs both binaries from the release archive,
       `AWB_INSTALL_*` overrides, checksum verification, zsh completions.
-- [ ] Update `ci.yml` (workspace fmt/clippy/test on macOS) and `release.yml` (tag-driven:
+- [x] Update `ci.yml` (workspace fmt/clippy/test on macOS) and `release.yml` (tag-driven:
       macOS aarch64/x86_64 archives with both binaries, Linux musl CLI-only archives,
       checksums, install.sh asset). (Verify workflow runs after merge.)
-- [ ] `scripts/bundle-app.sh`: wrap `awb-tray` into `AWB.app` (LSUIElement) for release
+- [x] `scripts/bundle-app.sh`: wrap `awb-tray` into `AWB.app` (LSUIElement) for release
       archives so the tray app can live in /Applications and login items.
 
 Verify: run install.sh against a local file server or `gh release` dry run; `tar tzf` the

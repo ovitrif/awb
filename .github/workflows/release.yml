@@ -51,22 +51,26 @@ jobs:
         if: matrix.build_kind == 'zig'
         run: cargo install --locked cargo-zigbuild
 
-      - name: Build (zig)
+      - name: Build CLI (zig)
         if: matrix.build_kind == 'zig'
-        run: cargo zigbuild --release --target ${{ matrix.target }}
+        run: cargo zigbuild --release -p awb --target ${{ matrix.target }}
 
-      - name: Build (native)
+      - name: Build CLI and tray app (native)
         if: matrix.build_kind == 'native'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release -p awb -p awb-tray --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME}"
           target="${{ matrix.target }}"
-          staging="airadb-${tag}-${target}"
+          staging="awb-${tag}-${target}"
           mkdir "$staging"
-          cp "target/${target}/release/airadb" "$staging/"
+          cp "target/${target}/release/awb" "$staging/"
+          if [[ "$target" == *apple-darwin ]]; then
+            cp "target/${target}/release/awb-tray" "$staging/"
+            scripts/bundle-app.sh "target/${target}/release/awb-tray" "$staging"
+          fi
           tar czf "${staging}.tar.gz" "$staging"
           echo "ARCHIVE=${staging}.tar.gz" >> "$GITHUB_ENV"
 
