@@ -86,6 +86,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.awt.Frame
 import java.awt.GraphicsEnvironment
+import java.awt.Image
 import java.awt.MenuItem
 import java.awt.MouseInfo
 import java.awt.Panel
@@ -100,6 +101,10 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
+import java.awt.geom.Arc2D
+import java.awt.geom.Area
+import java.awt.geom.Ellipse2D
+import java.awt.image.BaseMultiResolutionImage
 import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
@@ -547,35 +552,72 @@ private fun AboutWindow(version: String?) {
     }
 }
 
-private fun androidTrayImage(size: Int = 22): BufferedImage {
+private val TraySilhouetteLight = AwtColor(0xF4, 0xF4, 0xF6)
+private val TraySilhouetteDark = AwtColor(0x1D, 0x1D, 0x1F)
+
+private fun androidTrayImage(size: Int = 22): Image {
+    val color = if (menuBarIsDark()) TraySilhouetteLight else TraySilhouetteDark
+    return BaseMultiResolutionImage(
+        trayGlyphImage(size, color),
+        trayGlyphImage(size * 2, color),
+    )
+}
+
+private fun menuBarIsDark(): Boolean = runCatching {
+    val process = ProcessBuilder("defaults", "read", "-g", "AppleInterfaceStyle")
+        .redirectErrorStream(true)
+        .start()
+    process.waitFor(1, TimeUnit.SECONDS) &&
+        process.exitValue() == 0 &&
+        process.inputStream.bufferedReader().readText().contains("Dark")
+}.getOrDefault(true)
+
+// Android-WiFi tray glyph from the airadb.pen design: a bugdroid dome with
+// punched-out eyes under two WiFi arcs, all in a 100x100 viewBox centered on (50, 75).
+private fun trayGlyphImage(size: Int, color: AwtColor): BufferedImage {
     val image = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
     val graphics = image.createGraphics()
     graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-    graphics.color = AwtColor.WHITE
+    graphics.color = color
+    val scale = size / 100.0
 
-    graphics.fillRoundRect(
-        (size * 0.12f).toInt(),
-        (size * 0.14f).toInt(),
-        (size * 0.76f).toInt(),
-        (size * 0.42f).toInt(),
-        9,
-        9,
-    )
-    graphics.fillRoundRect(
-        (size * 0.23f).toInt(),
-        (size * 0.51f).toInt(),
-        (size * 0.54f).toInt(),
-        (size * 0.36f).toInt(),
-        6,
-        6,
-    )
+    val dome = Area(Arc2D.Double(25 * scale, 50 * scale, 50 * scale, 50 * scale, 0.0, 180.0, Arc2D.CHORD))
+    dome.subtract(Area(Ellipse2D.Double(38.5 * scale, 59.5 * scale, 7 * scale, 7 * scale)))
+    dome.subtract(Area(Ellipse2D.Double(54.5 * scale, 59.5 * scale, 7 * scale, 7 * scale)))
 
-    graphics.color = AwtColor(42, 48, 68)
-    graphics.fillOval((size * 0.35f).toInt(), (size * 0.31f).toInt(), 2, 2)
-    graphics.fillOval((size * 0.59f).toInt(), (size * 0.31f).toInt(), 2, 2)
+    val glyph = Area(dome)
+    glyph.add(wifiArc(innerRadius = 31.0, outerRadius = 38.0, scale = scale))
+    glyph.add(wifiArc(innerRadius = 44.0, outerRadius = 51.0, scale = scale))
+    graphics.fill(glyph)
     graphics.dispose()
 
     return image
+}
+
+private fun wifiArc(innerRadius: Double, outerRadius: Double, scale: Double): Area {
+    val band = Area(
+        Arc2D.Double(
+            (50 - outerRadius) * scale,
+            (75 - outerRadius) * scale,
+            outerRadius * 2 * scale,
+            outerRadius * 2 * scale,
+            38.0,
+            104.0,
+            Arc2D.PIE,
+        ),
+    )
+    band.subtract(
+        Area(
+            Ellipse2D.Double(
+                (50 - innerRadius) * scale,
+                (75 - innerRadius) * scale,
+                innerRadius * 2 * scale,
+                innerRadius * 2 * scale,
+            ),
+        ),
+    )
+
+    return band
 }
 
 @Composable
@@ -1491,25 +1533,17 @@ private data class DeviceStatus(
     val transportId: String? = null,
 )
 
-private object AndroidTrayPainter : Painter() {
-    override val intrinsicSize = Size(64f, 64f)
-
-    override fun DrawScope.onDraw() {
-        drawAndroid(size, tray = true)
-    }
-}
-
 private object AndroidAppPainter : Painter() {
     override val intrinsicSize = Size(256f, 256f)
 
     override fun DrawScope.onDraw() {
-        drawAndroid(size, tray = false)
+        drawAndroid(size)
     }
 }
 
-private fun DrawScope.drawAndroid(size: Size, tray: Boolean) {
-    val main = if (tray) Color.White else AndroidGreen
-    val eye = if (tray) Color(0xFF222738) else Color.White
+private fun DrawScope.drawAndroid(size: Size) {
+    val main = AndroidGreen
+    val eye = Color.White
     val headTop = size.height * 0.13f
     val headLeft = size.width * 0.11f
     val headSize = Size(size.width * 0.78f, size.height * 0.44f)
