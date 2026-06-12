@@ -1,0 +1,537 @@
+//! Background workers: status polling, QR pairing, and scrcpy mirrors.
+//! All state lives in `Shared` behind a mutex; workers repaint the UI on change.
+
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
+use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
+
+use awb_core::adb::{self, Adb};
+use awb_core::dnssd;
+use awb_core::qr::{PairingQr, QrModules};
+use awb_core::scrcpy::Scrcpy;
+use eframe::egui::Context;
+
+const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone)]
+pub struct ToolInfo {
+    pub available: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub serial: String,
+    pub name: String,
+    pub ready: bool,
+    pub state: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub adb: ToolInfo,
+    pub scrcpy: ToolInfo,
+    pub devices: Vec<DeviceInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PairingPhase {
+    Qr { modules: QrModules },
+    Connecting { label: String },
+    Failed { message: String },
+}
+
+pub struct PairingSession {
+    pub phase: PairingPhase,
+    pub cancel: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+pub struct Shared {
+    pub snapshot: Option<Snapshot>,
+    pub refreshing: bool,
+    pub logs: Vec<String>,
+    pub pairing: Option<PairingSession>,
+    pub mirrors: HashMap<String, Child>,
+}
+
+impl Shared {
+    pub fn log(&mut self, line: impl AsRef<str>) {
+        self.logs.push(format!("[{}] {}", clock(), line.as_ref()));
+
+        let overflow = self.logs.len().saturating_sub(600);
+        if overflow > 0 {
+            self.logs.drain(..overflow);
+        }
+    }
+}
+
+fn clock() -> String {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let local_offset = local_utc_offset_seconds();
+    let day_seconds = ((now as i64 + local_offset).rem_euclid(86_400)) as u64;
+
+    format!(
+        "{:02}:{:02}:{:02}",
+        day_seconds / 3600,
+        (day_seconds / 60) % 60,
+        day_seconds % 60
+    )
+}
+
+fn local_utc_offset_seconds() -> i64 {
+    use std::sync::OnceLock;
+
+    static OFFSET: OnceLock<i64> = OnceLock::new();
+
+    // `date +%z` once at startup avoids a chrono dependency for log timestamps.
+    *OFFSET.get_or_init(|| {
+        std::process::Command::new("date")
+            .arg("+%z")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|raw| {
+                let raw = raw.trim();
+                let (sign, digits) = raw.split_at(1);
+                let hours: i64 = digits.get(0..2)?.parse().ok()?;
+                let minutes: i64 = digits.get(2..4)?.parse().ok()?;
+                let offset = hours * 3600 + minutes * 60;
+                Some(if sign == "-" { -offset } else { offset })
+            })
+            .unwrap_or(0)
+    })
+}
+
+pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
+    {
+        let mut state = shared.lock().unwrap();
+        if state.refreshing {
+            return;
+        }
+        state.refreshing = true;
+    }
+    ctx.request_repaint();
+
+    thread::spawn(move || {
+        let snapshot = collect_snapshot();
+
+        let mut state = shared.lock().unwrap();
+        state.reap_finished_mirrors();
+        state.snapshot = Some(snapshot);
+        state.refreshing = false;
+        drop(state);
+        ctx.request_repaint();
+    });
+}
+
+fn collect_snapshot() -> Snapshot {
+    let adb_handle = Adb::resolve(None);
+
+    let adb_info = match &adb_handle {
+        Ok(adb) => match adb.version() {
+            Ok(output) => ToolInfo {
+                available: true,
+                detail: output
+                    .combined_output()
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("available")
+                    .to_string(),
+            },
+            Err(error) => ToolInfo {
+                available: false,
+                detail: format!("{error:#}"),
+            },
+        },
+        Err(error) => ToolInfo {
+            available: false,
+            detail: format!("{error:#}"),
+        },
+    };
+
+    let scrcpy_info = match Scrcpy::resolve(None, false) {
+        Ok(scrcpy) => ToolInfo {
+            available: true,
+            detail: scrcpy.path().display().to_string(),
+        },
+        Err(_) => ToolInfo {
+            available: false,
+            detail: "Not found".to_string(),
+        },
+    };
+
+    let devices = adb_handle
+        .ok()
+        .filter(|_| adb_info.available)
+        .and_then(|adb| {
+            let devices = adb.devices().ok()?;
+            let services = adb.mdns_services().unwrap_or_default();
+
+            Some(
+                adb::dedupe_ready_devices(devices, &services)
+                    .into_iter()
+                    .map(|device| DeviceInfo {
+                        ready: device.state == adb::DeviceState::Device,
+                        state: state_label(&device.state).to_string(),
+                        name: device
+                            .model
+                            .as_deref()
+                            .map(|model| model.replace('_', " "))
+                            .unwrap_or_else(|| device.serial.clone()),
+                        serial: device.serial,
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+
+    Snapshot {
+        adb: adb_info,
+        scrcpy: scrcpy_info,
+        devices,
+    }
+}
+
+fn state_label(state: &adb::DeviceState) -> &str {
+    match state {
+        adb::DeviceState::Device => "device",
+        adb::DeviceState::Offline => "offline",
+        adb::DeviceState::Unauthorized => "unauthorized",
+        adb::DeviceState::Other(value) => value,
+    }
+}
+
+impl Shared {
+    pub fn reap_finished_mirrors(&mut self) {
+        let mut finished = Vec::new();
+
+        for (serial, child) in self.mirrors.iter_mut() {
+            if let Ok(Some(_)) = child.try_wait() {
+                finished.push(serial.clone());
+            }
+        }
+
+        for serial in finished {
+            self.mirrors.remove(&serial);
+            self.log(format!("Mirror of {serial} ended"));
+        }
+    }
+}
+
+pub fn start_mirror(
+    shared: Arc<Mutex<Shared>>,
+    ctx: Context,
+    device: DeviceInfo,
+    options: awb_core::scrcpy::ScrcpyOptions,
+) {
+    thread::spawn(move || {
+        let result = Scrcpy::resolve(None, false).and_then(|scrcpy| {
+            let mut command = std::process::Command::new(scrcpy.path());
+            command
+                .args(awb_core::scrcpy::default_args(&device.serial, &options))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            command
+                .spawn()
+                .map_err(|error| anyhow::anyhow!("failed to start scrcpy: {error}"))
+        });
+
+        let mut state = shared.lock().unwrap();
+        match result {
+            Ok(mut child) => {
+                state.log(format!("Mirroring {} (pid {})", device.name, child.id()));
+
+                if let Some(out) = child.stdout.take() {
+                    spawn_log_pump(shared.clone(), ctx.clone(), Box::new(BufReader::new(out)));
+                }
+                if let Some(err) = child.stderr.take() {
+                    spawn_log_pump(shared.clone(), ctx.clone(), Box::new(BufReader::new(err)));
+                }
+
+                state.mirrors.insert(device.serial.clone(), child);
+            }
+            Err(error) => state.log(format!("Mirror failed: {error:#}")),
+        }
+        drop(state);
+        ctx.request_repaint();
+    });
+}
+
+fn spawn_log_pump(shared: Arc<Mutex<Shared>>, ctx: Context, reader: Box<dyn BufRead + Send>) {
+    thread::spawn(move || {
+        for line in reader.lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            shared.lock().unwrap().log(line);
+            ctx.request_repaint();
+        }
+    });
+}
+
+pub fn stop_mirror(shared: &Arc<Mutex<Shared>>, serial: &str) {
+    let mut state = shared.lock().unwrap();
+
+    if let Some(mut child) = state.mirrors.remove(serial) {
+        let _ = child.kill();
+        let _ = child.wait();
+        state.log(format!("Stopped mirror of {serial}"));
+    }
+}
+
+pub fn stop_all_mirrors(shared: &Arc<Mutex<Shared>>) {
+    let mut state = shared.lock().unwrap();
+    let serials: Vec<String> = state.mirrors.keys().cloned().collect();
+
+    for serial in serials {
+        if let Some(mut child) = state.mirrors.remove(&serial) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+pub fn start_pairing(shared: Arc<Mutex<Shared>>, ctx: Context) {
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut state = shared.lock().unwrap();
+
+        if let Some(session) = &state.pairing {
+            session.cancel.store(true, Ordering::Relaxed);
+        }
+
+        let qr = PairingQr::generate();
+        let modules = match qr.modules() {
+            Ok(modules) => modules,
+            Err(error) => {
+                state.log(format!("QR generation failed: {error:#}"));
+                return;
+            }
+        };
+
+        state.pairing = Some(PairingSession {
+            phase: PairingPhase::Qr { modules },
+            cancel: cancel.clone(),
+        });
+        state.log(format!("Pairing started ({})", qr.instance));
+        drop(state);
+
+        let shared = shared.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || pairing_worker(shared, ctx, qr, cancel));
+    }
+
+    ctx.request_repaint();
+}
+
+pub fn cancel_pairing(shared: &Arc<Mutex<Shared>>) {
+    let mut state = shared.lock().unwrap();
+
+    if let Some(session) = state.pairing.take() {
+        session.cancel.store(true, Ordering::Relaxed);
+        state.log("Pairing cancelled");
+    }
+}
+
+fn pairing_worker(
+    shared: Arc<Mutex<Shared>>,
+    ctx: Context,
+    qr: PairingQr,
+    cancel: Arc<AtomicBool>,
+) {
+    let result = run_pairing(&shared, &ctx, &qr, &cancel);
+
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let mut state = shared.lock().unwrap();
+    match result {
+        Ok(device_name) => {
+            state.log(format!("Paired and connected to {device_name}"));
+            state.pairing = None;
+            drop(state);
+            refresh_status(shared, ctx.clone());
+        }
+        Err(error) => {
+            state.log(format!("Pairing failed: {error:#}"));
+            set_phase(
+                &mut state,
+                PairingPhase::Failed {
+                    message: format!("{error:#}"),
+                },
+            );
+        }
+    }
+    ctx.request_repaint();
+}
+
+fn set_phase(state: &mut Shared, phase: PairingPhase) {
+    if let Some(session) = &mut state.pairing {
+        session.phase = phase;
+    }
+}
+
+fn run_pairing(
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &Context,
+    qr: &PairingQr,
+    cancel: &Arc<AtomicBool>,
+) -> anyhow::Result<String> {
+    let adb = Adb::resolve(None)?;
+    let baseline_services = adb::connect_services(&adb.mdns_services().unwrap_or_default());
+    let baseline_devices = adb::ready_device_serials(&adb.devices().unwrap_or_default());
+
+    let pairing_endpoint = wait_for_pairing_endpoint(&adb, qr, cancel)?;
+    ensure_not_cancelled(cancel)?;
+
+    update_phase(
+        shared,
+        ctx,
+        PairingPhase::Connecting {
+            label: "Pairing with your phone…".to_string(),
+        },
+    );
+    adb.pair(&pairing_endpoint, &qr.secret)?;
+    ensure_not_cancelled(cancel)?;
+
+    update_phase(
+        shared,
+        ctx,
+        PairingPhase::Connecting {
+            label: "Connecting…".to_string(),
+        },
+    );
+
+    let device = connect_after_pairing(
+        &adb,
+        &pairing_endpoint,
+        &baseline_services,
+        &baseline_devices,
+        cancel,
+    )?;
+
+    Ok(device.display_name())
+}
+
+fn update_phase(shared: &Arc<Mutex<Shared>>, ctx: &Context, phase: PairingPhase) {
+    set_phase(&mut shared.lock().unwrap(), phase);
+    ctx.request_repaint();
+}
+
+fn ensure_not_cancelled(cancel: &Arc<AtomicBool>) -> anyhow::Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+
+    Ok(())
+}
+
+fn wait_for_pairing_endpoint(
+    adb: &Adb,
+    qr: &PairingQr,
+    cancel: &Arc<AtomicBool>,
+) -> anyhow::Result<String> {
+    let deadline = Instant::now() + PAIRING_TIMEOUT;
+
+    loop {
+        ensure_not_cancelled(cancel)?;
+
+        if let Ok(services) = adb.mdns_services() {
+            if let Some(service) = services
+                .into_iter()
+                .find(|service| service.instance == qr.instance && service.is_pairing_service())
+            {
+                return Ok(service.address);
+            }
+        }
+
+        if let Ok(Some(endpoint)) =
+            dnssd::discover_pairing_endpoint(&qr.instance, Duration::from_secs(2))
+        {
+            return Ok(endpoint);
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!("no QR scan detected");
+        }
+
+        thread::sleep(Duration::from_millis(400));
+    }
+}
+
+fn connect_after_pairing(
+    adb: &Adb,
+    pairing_endpoint: &str,
+    baseline_services: &std::collections::HashSet<adb::MdnsService>,
+    baseline_devices: &std::collections::HashSet<String>,
+    cancel: &Arc<AtomicBool>,
+) -> anyhow::Result<adb::AdbDevice> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut tried = std::collections::HashSet::new();
+
+    loop {
+        ensure_not_cancelled(cancel)?;
+
+        let devices = adb.devices().unwrap_or_default();
+        let services = adb.mdns_services().unwrap_or_default();
+
+        if let Some(device) =
+            adb::matching_ready_device(&devices, pairing_endpoint, baseline_devices)
+        {
+            return Ok(device);
+        }
+
+        let mut endpoints: Vec<String> =
+            adb::connect_service_candidates(&services, pairing_endpoint, baseline_services)
+                .into_iter()
+                .map(|service| service.address)
+                .collect();
+
+        if endpoints.is_empty() {
+            if let Ok(found) =
+                dnssd::discover_connect_endpoints(pairing_endpoint, Duration::from_secs(2))
+            {
+                endpoints = found;
+            }
+        }
+
+        for endpoint in endpoints {
+            if !tried.insert(endpoint.clone()) {
+                continue;
+            }
+
+            ensure_not_cancelled(cancel)?;
+
+            if let Ok(output) = adb.connect(&endpoint) {
+                let serial =
+                    adb::connect_serial_from_output(&output.combined_output()).unwrap_or(endpoint);
+                let devices = adb.devices().unwrap_or_default();
+
+                if let Some(device) =
+                    adb::matching_ready_device(&devices, &serial, baseline_devices)
+                {
+                    return Ok(device);
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!("paired, but no connectable endpoint was found");
+        }
+
+        thread::sleep(Duration::from_millis(500));
+    }
+}

@@ -33,6 +33,28 @@ impl PairingQr {
 
         Ok(code.render::<unicode::Dense1x2>().quiet_zone(true).build())
     }
+
+    pub fn modules(&self) -> Result<QrModules> {
+        let code = QrCode::new(self.payload.as_bytes())
+            .map_err(|error| anyhow!("failed to build QR code: {error}"))?;
+        let size = code.width();
+
+        Ok(QrModules {
+            size,
+            dark: code
+                .to_colors()
+                .iter()
+                .map(|color| color.select(true, false))
+                .collect(),
+        })
+    }
+}
+
+/// Square QR matrix in row-major order; `dark[y * size + x]` is true for dark modules.
+#[derive(Debug, Clone)]
+pub struct QrModules {
+    pub size: usize,
+    pub dark: Vec<bool>,
 }
 
 fn pairing_instance_name() -> String {

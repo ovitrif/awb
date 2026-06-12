@@ -1,0 +1,47 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod app;
+mod backend;
+mod config;
+mod glyph;
+mod theme;
+
+use eframe::egui;
+
+fn main() -> eframe::Result {
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("awb")
+        .with_inner_size([theme::WINDOW_WIDTH, theme::WINDOW_HEIGHT])
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_transparent(true)
+        .with_window_level(egui::WindowLevel::AlwaysOnTop)
+        .with_visible(false);
+
+    #[allow(unused_mut)]
+    let mut native_options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+
+        native_options.event_loop_builder = Some(Box::new(|builder| {
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        }));
+    }
+
+    eframe::run_native(
+        "awb",
+        native_options,
+        Box::new(|cc| {
+            app::TrayApp::new(cc)
+                .map(|app| Box::new(app) as Box<dyn eframe::App>)
+                .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("failed to start awb-tray: {error:#}").into()
+                })
+        }),
+    )
+}

@@ -72,17 +72,17 @@ and run it.
 
 ### M2: macOS tray app implementing DESIGN.pen
 
-- [ ] Skeleton: `awb-tray` with tray-icon (template glyph rasterized from the design
+- [x] Skeleton: `awb-tray` with tray-icon (template glyph rasterized from the design
       geometry), accessory activation policy (no Dock icon), borderless transparent
       always-on-top egui popover toggled by left-click on the tray icon, positioned under it,
       hidden on focus loss; right-click menu (Show/Hide, Pair new device, Refresh, Quit).
-- [ ] Theme: embed Inter font + Phosphor icon font; design tokens as constants.
-- [ ] Main screen: header, Devices/Logs tabs, device list rows backed by `awb-core` status
+- [x] Theme: embed Inter font + Phosphor icon font; design tokens as constants.
+- [x] Main screen: header, Devices/Logs tabs, device list rows backed by `awb-core` status
       polling on a background thread, mirror (scrcpy) start/stop per device.
-- [ ] Logs tab: timestamped action/output lines, monospaced, scrollable.
-- [ ] Settings screen: scrcpy options (Title, W, H, Top, Plain) persisted to
+- [x] Logs tab: timestamped action/output lines, monospaced, scrollable.
+- [x] Settings screen: scrcpy options (Title, W, H, Top, Plain) persisted to
       `~/.config/awb/config.toml`; Dependencies section with ADB/scrcpy status rows.
-- [ ] Pair flow: QR -> Connecting -> Failed/Connected states driven by the same pairing
+- [x] Pair flow: QR -> Connecting -> Failed/Connected states driven by the same pairing
       logic the CLI uses (QR generation, mDNS watch, pair, connect) on a worker thread,
       with Retry/Cancel.
 
