@@ -72,17 +72,17 @@ and run it.
 
 ### M2: macOS tray app implementing DESIGN.pen
 
-- [x] Skeleton: `awb-tray` with tray-icon (template glyph rasterized from the design
+- [ ] Skeleton: `awb-tray` with tray-icon (template glyph rasterized from the design
       geometry), accessory activation policy (no Dock icon), borderless transparent
       always-on-top egui popover toggled by left-click on the tray icon, positioned under it,
       hidden on focus loss; right-click menu (Show/Hide, Pair new device, Refresh, Quit).
-- [x] Theme: embed Inter font + Phosphor icon font; design tokens as constants.
-- [x] Main screen: header, Devices/Logs tabs, device list rows backed by `awb-core` status
+- [ ] Theme: embed Inter font + Phosphor icon font; design tokens as constants.
+- [ ] Main screen: header, Devices/Logs tabs, device list rows backed by `awb-core` status
       polling on a background thread, mirror (scrcpy) start/stop per device.
-- [x] Logs tab: timestamped action/output lines, monospaced, scrollable.
-- [x] Settings screen: scrcpy options (Title, W, H, Top, Plain) persisted to
+- [ ] Logs tab: timestamped action/output lines, monospaced, scrollable.
+- [ ] Settings screen: scrcpy options (Title, W, H, Top, Plain) persisted to
       `~/.config/awb/config.toml`; Dependencies section with ADB/scrcpy status rows.
-- [x] Pair flow: QR -> Connecting -> Failed/Connected states driven by the same pairing
+- [ ] Pair flow: QR -> Connecting -> Failed/Connected states driven by the same pairing
       logic the CLI uses (QR generation, mDNS watch, pair, connect) on a worker thread,
       with Retry/Cancel.
 
@@ -92,12 +92,12 @@ phone end to end; confirm no Dock icon, focus-loss dismiss, and light/dark menu 
 
 ### M3: Packaging and release readiness
 
-- [x] Rewrite `install.sh` for `awb`: installs both binaries from the release archive,
+- [ ] Rewrite `install.sh` for `awb`: installs both binaries from the release archive,
       `AWB_INSTALL_*` overrides, checksum verification, zsh completions.
-- [x] Update `ci.yml` (workspace fmt/clippy/test on macOS) and `release.yml` (tag-driven:
+- [ ] Update `ci.yml` (workspace fmt/clippy/test on macOS) and `release.yml` (tag-driven:
       macOS aarch64/x86_64 archives with both binaries, Linux musl CLI-only archives,
       checksums, install.sh asset). (Verify workflow runs after merge.)
-- [x] `scripts/bundle-app.sh`: wrap `awb-tray` into `AWB.app` (LSUIElement) for release
+- [ ] `scripts/bundle-app.sh`: wrap `awb-tray` into `AWB.app` (LSUIElement) for release
       archives so the tray app can live in /Applications and login items.
 
 Verify: run install.sh against a local file server or `gh release` dry run; `tar tzf` the
@@ -105,10 +105,10 @@ archives; launch the bundled `AWB.app`.
 
 ### M4: Docs and launch
 
-- [x] Rewrite README for awb: what it is, install one-liner, CLI usage, tray app, screenshots
+- [ ] Rewrite README for awb: what it is, install one-liner, CLI usage, tray app, screenshots
       from M2 verification, requirements (macOS, adb, scrcpy optional), build from source.
-- [x] Refresh AGENTS.md workflow (workspace commands, awb install path).
-- [x] Remove stale `PLAN.md`; commit `DESIGN.pen` and this roadmap.
+- [ ] Refresh AGENTS.md workflow (workspace commands, awb install path).
+- [ ] Remove stale `PLAN.md`; commit `DESIGN.pen` and this roadmap.
 - [ ] Final pass: `git status` clean, CI green, tag `v2.0.0` when the user is ready.
 
 Verify: fresh-clone build, README commands copy-paste correctly, repo has no leftover

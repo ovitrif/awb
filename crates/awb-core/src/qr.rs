@@ -39,7 +39,7 @@ fn pairing_instance_name() -> String {
     machine_name_candidates()
         .into_iter()
         .find_map(|candidate| sanitize_pairing_instance(&candidate))
-        .unwrap_or_else(|| format!("airadb-{}", safe_random(6).to_ascii_lowercase()))
+        .unwrap_or_else(|| format!("awb-{}", safe_random(6).to_ascii_lowercase()))
 }
 
 fn machine_name_candidates() -> Vec<String> {

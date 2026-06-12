@@ -249,13 +249,13 @@ impl Adb {
                 "shell",
                 "uiautomator",
                 "dump",
-                "/sdcard/airadb-window.xml",
+                "/sdcard/awb-window.xml",
             ])?,
         )?;
 
         let cat_output = ensure_success(
-            "adb exec-out cat /sdcard/airadb-window.xml",
-            self.run(["-s", serial, "exec-out", "cat", "/sdcard/airadb-window.xml"])?,
+            "adb exec-out cat /sdcard/awb-window.xml",
+            self.run(["-s", serial, "exec-out", "cat", "/sdcard/awb-window.xml"])?,
         )?;
 
         Ok(cat_output.combined_output())
@@ -334,10 +334,10 @@ fn timeout_hint(stderr: &str) -> String {
     let stderr = stderr.trim();
 
     if stderr.is_empty() {
-        ". Try `airadb --reset-adb` or `adb kill-server` if ADB is wedged.".to_string()
+        ". Try `awb --reset-adb` or `adb kill-server` if ADB is wedged.".to_string()
     } else {
         format!(
-            ": {}. Try `airadb --reset-adb` or `adb kill-server` if ADB is wedged.",
+            ": {}. Try `awb --reset-adb` or `adb kill-server` if ADB is wedged.",
             fallback_message(stderr)
         )
     }
