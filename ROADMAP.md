@@ -109,7 +109,7 @@ archives; launch the bundled `AWB.app`.
       from M2 verification, requirements (macOS, adb, scrcpy optional), build from source.
 - [x] Refresh AGENTS.md workflow (workspace commands, awb install path).
 - [x] Remove stale `PLAN.md`; commit `DESIGN.pen` and this roadmap.
-- [ ] Final pass: `git status` clean, CI green, tag `v2.0.0` when the user is ready.
+- [x] Final pass: `git status` clean, CI green. Tag `v2.0.0` to publish the first release.
 
 Verify: fresh-clone build, README commands copy-paste correctly, repo has no leftover
 airadb/Gradle references (`grep -ri airadb` returns only intentional history notes).
