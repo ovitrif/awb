@@ -18,7 +18,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: "1.92"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -44,7 +44,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: "1.92"
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
