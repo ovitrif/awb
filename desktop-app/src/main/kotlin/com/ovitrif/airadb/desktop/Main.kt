@@ -116,7 +116,7 @@ private val Muted = Color(0xFF737589)
 private val Blue = Color(0xFF3F7EEE)
 private val AndroidGreen = Color(0xFF38C976)
 private val AiradbTypography = Typography().withoutLetterSpacing()
-private val PopoverSize = DpSize(430.dp, 360.dp)
+private val PopoverSize = DpSize(460.dp, 430.dp)
 private val AboutWindowSize = DpSize(260.dp, 190.dp)
 private const val TrayClickFocusLossGraceNanos = 300_000_000L
 private const val AboutWindowWidthPx = 260
@@ -168,6 +168,8 @@ fun main() = application {
     var statusLoading by remember { mutableStateOf(false) }
     var statusError by remember { mutableStateOf<String?>(null) }
     var activeCommand by remember { mutableStateOf<String?>(null) }
+    var activeDeviceSerial by remember { mutableStateOf<String?>(null) }
+    var activeDeviceMode by remember { mutableStateOf<DeviceRunMode?>(null) }
     var running by remember { mutableStateOf(false) }
     val logs = remember { mutableStateListOf<String>() }
     var settings by remember { mutableStateOf(AiradbSettings()) }
@@ -211,12 +213,18 @@ fun main() = application {
         }
     }
 
-    fun launchAiradb(label: String, args: List<String>) {
+    fun launchAiradb(
+        label: String,
+        args: List<String>,
+        deviceSerial: String? = null,
+        deviceMode: DeviceRunMode? = null,
+    ) {
         controller.stopActiveProcess()
         logs.clear()
         activeCommand = label
+        activeDeviceSerial = deviceSerial
+        activeDeviceMode = deviceMode
         running = true
-        selectedTab = AppTab.Console
         popoverState.position = menuBarPopoverPosition()
         popoverVisible = true
         appendLog(timestamped("Starting ${printableCommand(args)}"))
@@ -229,6 +237,8 @@ fun main() = application {
                     SwingUtilities.invokeLater {
                         appendLog(timestamped("$label exited with code $exitCode"))
                         activeCommand = null
+                        activeDeviceSerial = null
+                        activeDeviceMode = null
                         running = false
                         refreshStatus()
                     }
@@ -237,13 +247,25 @@ fun main() = application {
         }
     }
 
-    fun runAiradb(label: String, commandArgs: List<String>) {
-        launchAiradb(label, listOf(controller.airadbBinary) + commandArgs)
+    fun runAiradb(
+        label: String,
+        commandArgs: List<String>,
+        deviceSerial: String? = null,
+        deviceMode: DeviceRunMode? = null,
+    ) {
+        launchAiradb(
+            label = label,
+            args = listOf(controller.airadbBinary) + commandArgs,
+            deviceSerial = deviceSerial,
+            deviceMode = deviceMode,
+        )
     }
 
     fun stopActive() {
         controller.stopActiveProcess()
         activeCommand = null
+        activeDeviceSerial = null
+        activeDeviceMode = null
         running = false
         appendLog(timestamped("Stopped active command"))
         refreshStatus()
@@ -261,6 +283,8 @@ fun main() = application {
         runAiradb(
             "Mirror ${device.displayName}",
             settings.toCliArgs() + listOf("--device-serial", device.serial, "--background"),
+            deviceSerial = device.serial,
+            deviceMode = DeviceRunMode.Mirror,
         )
     }
 
@@ -268,6 +292,8 @@ fun main() = application {
         runAiradb(
             "Stable ${device.displayName}",
             settings.toCliArgs() + listOf("--device-serial", device.serial, "--stable"),
+            deviceSerial = device.serial,
+            deviceMode = DeviceRunMode.Stable,
         )
     }
 
@@ -379,6 +405,8 @@ fun main() = application {
                     statusError = statusError,
                     running = running,
                     activeCommand = activeCommand,
+                    activeDeviceSerial = activeDeviceSerial,
+                    activeDeviceMode = activeDeviceMode,
                     logs = logs,
                     settings = settings,
                     optionsExpanded = optionsExpanded,
@@ -604,6 +632,8 @@ private fun AiradbWindow(
     statusError: String?,
     running: Boolean,
     activeCommand: String?,
+    activeDeviceSerial: String?,
+    activeDeviceMode: DeviceRunMode?,
     logs: List<String>,
     settings: AiradbSettings,
     optionsExpanded: Boolean,
@@ -641,6 +671,9 @@ private fun AiradbWindow(
                     statusLoading = statusLoading,
                     statusError = statusError,
                     running = running,
+                    activeCommand = activeCommand,
+                    activeDeviceSerial = activeDeviceSerial,
+                    activeDeviceMode = activeDeviceMode,
                     settings = settings,
                     optionsExpanded = optionsExpanded,
                     onSettingsChange = onSettingsChange,
@@ -793,6 +826,9 @@ private fun ToolsPanel(
     statusLoading: Boolean,
     statusError: String?,
     running: Boolean,
+    activeCommand: String?,
+    activeDeviceSerial: String?,
+    activeDeviceMode: DeviceRunMode?,
     settings: AiradbSettings,
     optionsExpanded: Boolean,
     onSettingsChange: (AiradbSettings) -> Unit,
@@ -808,7 +844,7 @@ private fun ToolsPanel(
     airadbBinary: String,
 ) {
     val devices = status?.devices.orEmpty()
-    val scrollModifier = if (optionsExpanded || devices.size > 1) {
+    val scrollModifier = if (optionsExpanded || devices.size > 3) {
         Modifier.verticalScroll(rememberScrollState())
     } else {
         Modifier
@@ -867,6 +903,12 @@ private fun ToolsPanel(
                 } else {
                     devices.forEach { device ->
                         val ready = device.state == "device"
+                        val mirrorActive = running &&
+                            activeDeviceSerial == device.serial &&
+                            activeDeviceMode == DeviceRunMode.Mirror
+                        val stableActive = running &&
+                            activeDeviceSerial == device.serial &&
+                            activeDeviceMode == DeviceRunMode.Stable
                         ToolStatusRow(
                             name = device.displayName,
                             detail = device.serial,
@@ -875,16 +917,18 @@ private fun ToolsPanel(
                             showStatus = false,
                         ) {
                             DeviceActionButton(
-                                label = "Mirror",
-                                icon = Icons.Filled.PlayArrow,
-                                enabled = ready && !running && status?.scrcpy?.available == true,
-                                onClick = { onMirrorDevice(device) },
+                                label = if (mirrorActive) "Running" else "Mirror",
+                                icon = if (mirrorActive) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+                                active = mirrorActive,
+                                enabled = ready && status?.scrcpy?.available == true && (!running || mirrorActive),
+                                onClick = if (mirrorActive) onStop else ({ onMirrorDevice(device) }),
                             )
                             DeviceActionButton(
-                                label = "Stable",
-                                icon = Icons.Filled.CheckCircle,
-                                enabled = ready && !running && status?.scrcpy?.available == true,
-                                onClick = { onStableMirrorDevice(device) },
+                                label = if (stableActive) "Running" else "Stable",
+                                icon = if (stableActive) Icons.Filled.Stop else Icons.Filled.CheckCircle,
+                                active = stableActive,
+                                enabled = ready && status?.scrcpy?.available == true && (!running || stableActive),
+                                onClick = if (stableActive) onStop else ({ onStableMirrorDevice(device) }),
                             )
                         }
                     }
@@ -924,13 +968,53 @@ private fun ToolsPanel(
 
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        ActionButton("Pair and mirror", Icons.Filled.PlayArrow, running, onPairAndMirror, Modifier.weight(1f))
-                        ActionButton("Stable mirror", Icons.Filled.CheckCircle, running, onStableMirror, Modifier.weight(1f))
-                        ActionButton("Mirror and wait", Icons.Filled.Terminal, running, onMirrorAndWait, Modifier.weight(1f))
+                        ActionButton(
+                            label = "Pair and mirror",
+                            icon = Icons.Filled.PlayArrow,
+                            running = running,
+                            active = activeCommand == "Pair and mirror",
+                            onClick = onPairAndMirror,
+                            onActiveClick = onStop,
+                            modifier = Modifier.weight(1f),
+                        )
+                        ActionButton(
+                            label = "Stable mirror",
+                            icon = Icons.Filled.CheckCircle,
+                            running = running,
+                            active = activeCommand == "Stable mirror",
+                            onClick = onStableMirror,
+                            onActiveClick = onStop,
+                            modifier = Modifier.weight(1f),
+                        )
+                        ActionButton(
+                            label = "Mirror and wait",
+                            icon = Icons.Filled.Terminal,
+                            running = running,
+                            active = activeCommand == "Mirror and wait",
+                            onClick = onMirrorAndWait,
+                            onActiveClick = onStop,
+                            modifier = Modifier.weight(1f),
+                        )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        ActionButton("Reset ADB", Icons.Filled.Refresh, running, onResetAdb, Modifier.weight(1f))
-                        ActionButton("Install shell", Icons.Filled.Download, running, onInstallShell, Modifier.weight(1f))
+                        ActionButton(
+                            label = "Reset ADB",
+                            icon = Icons.Filled.Refresh,
+                            running = running,
+                            active = activeCommand == "Reset ADB",
+                            onClick = onResetAdb,
+                            onActiveClick = onStop,
+                            modifier = Modifier.weight(1f),
+                        )
+                        ActionButton(
+                            label = "Install shell",
+                            icon = Icons.Filled.Download,
+                            running = running,
+                            active = activeCommand == "Install shell",
+                            onClick = onInstallShell,
+                            onActiveClick = onStop,
+                            modifier = Modifier.weight(1f),
+                        )
                         Spacer(Modifier.weight(1f))
                     }
                 }
@@ -1188,6 +1272,7 @@ private fun ToolStatusRow(
 private fun DeviceActionButton(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    active: Boolean = false,
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
@@ -1200,7 +1285,8 @@ private fun DeviceActionButton(
         shape = RoundedCornerShape(7.dp),
         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
         colors = ButtonDefaults.buttonColors(
-            containerColor = Blue,
+            containerColor = if (active) AndroidGreen else Blue,
+            contentColor = Color.White,
             disabledContainerColor = Color(0xFFE7E1E7),
             disabledContentColor = Color(0xFF9B9AAA),
         ),
@@ -1223,23 +1309,34 @@ private fun ActionButton(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     running: Boolean,
+    active: Boolean = false,
     onClick: () -> Unit,
+    onActiveClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Button(
-        onClick = onClick,
-        enabled = !running,
+        onClick = if (active && onActiveClick != null) onActiveClick else onClick,
+        enabled = !running || active,
         modifier = modifier
             .height(28.dp)
             .defaultMinSize(minWidth = 1.dp, minHeight = 1.dp),
         shape = RoundedCornerShape(8.dp),
         contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = Blue),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (active) AndroidGreen else Blue,
+            contentColor = Color.White,
+            disabledContainerColor = Color(0xFFE7E1E7),
+            disabledContentColor = Color(0xFF9B9AAA),
+        ),
     ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(12.dp))
+        Icon(
+            if (active) Icons.Filled.Stop else icon,
+            contentDescription = null,
+            modifier = Modifier.size(12.dp),
+        )
         Spacer(Modifier.width(4.dp))
         Text(
-            label,
+            if (active) "Running" else label,
             fontSize = 11.sp,
             lineHeight = 12.sp,
             letterSpacing = 0.sp,
@@ -1322,6 +1419,11 @@ private fun StatusChip(text: String, good: Boolean) {
 private enum class AppTab(val label: String) {
     Tools("Tools"),
     Console("Console"),
+}
+
+private enum class DeviceRunMode {
+    Mirror,
+    Stable,
 }
 
 private data class AiradbSettings(
