@@ -27,7 +27,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -305,10 +304,6 @@ fun main() = application {
         runAiradb("Reset ADB", listOf("reset-adb"))
     }
 
-    fun installShell() {
-        runAiradb("Install shell", listOf("install-shell", "--force"))
-    }
-
     fun showAbout() {
         aboutVersion = status?.airadbVersion ?: aboutVersion
         aboutState.position = centeredWindowPosition(AboutWindowWidthPx, AboutWindowHeightPx)
@@ -419,7 +414,6 @@ fun main() = application {
                     onStableMirrorDevice = ::stableMirrorDevice,
                     onMirrorAndWait = ::mirrorAndWait,
                     onResetAdb = ::resetAdb,
-                    onInstallShell = ::installShell,
                     onStop = ::stopActive,
                     airadbBinary = controller.airadbBinary,
                 )
@@ -646,7 +640,6 @@ private fun AiradbWindow(
     onStableMirrorDevice: (DeviceStatus) -> Unit,
     onMirrorAndWait: () -> Unit,
     onResetAdb: () -> Unit,
-    onInstallShell: () -> Unit,
     onStop: () -> Unit,
     airadbBinary: String,
 ) {
@@ -684,7 +677,6 @@ private fun AiradbWindow(
                     onStableMirrorDevice = onStableMirrorDevice,
                     onMirrorAndWait = onMirrorAndWait,
                     onResetAdb = onResetAdb,
-                    onInstallShell = onInstallShell,
                     onStop = onStop,
                     airadbBinary = airadbBinary,
                 )
@@ -839,7 +831,6 @@ private fun ToolsPanel(
     onStableMirrorDevice: (DeviceStatus) -> Unit,
     onMirrorAndWait: () -> Unit,
     onResetAdb: () -> Unit,
-    onInstallShell: () -> Unit,
     onStop: () -> Unit,
     airadbBinary: String,
 ) {
@@ -1006,16 +997,7 @@ private fun ToolsPanel(
                             onActiveClick = onStop,
                             modifier = Modifier.weight(1f),
                         )
-                        ActionButton(
-                            label = "Install shell",
-                            icon = Icons.Filled.Download,
-                            running = running,
-                            active = activeCommand == "Install shell",
-                            onClick = onInstallShell,
-                            onActiveClick = onStop,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.weight(1f))
+                        Spacer(Modifier.weight(2f))
                     }
                 }
             }
