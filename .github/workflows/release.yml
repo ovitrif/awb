@@ -68,8 +68,11 @@ jobs:
           mkdir "$staging"
           cp "target/${target}/release/awb" "$staging/"
           if [[ "$target" == *apple-darwin ]]; then
+            # Render icons with a host-arch build so the cross-compiled target
+            # binary is never executed on this (arm64) runner.
+            cargo build --release -p awb-app
             cp "target/${target}/release/awb-app" "$staging/"
-            scripts/bundle-app.sh "target/${target}/release/awb-app" "$staging"
+            scripts/bundle-app.sh "target/${target}/release/awb-app" "$staging" "target/release/awb-app"
           fi
           tar czf "${staging}.tar.gz" "$staging"
           echo "ARCHIVE=${staging}.tar.gz" >> "$GITHUB_ENV"

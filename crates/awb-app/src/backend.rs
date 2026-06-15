@@ -258,6 +258,14 @@ pub fn start_mirror(
 
         let mut state = shared.lock().unwrap();
         match result {
+            Ok(mut child) if state.mirrors.contains_key(&device.serial) => {
+                // Another start won the race (e.g. a rapid double-click). Drop-
+                // ping a Child does not kill scrcpy, so stop this extra process
+                // rather than replacing — and losing track of — the tracked one.
+                let _ = child.kill();
+                let _ = child.wait();
+                state.log(format!("Already mirroring {}", device.name));
+            }
             Ok(mut child) => {
                 state.log(format!("Mirroring {} (pid {})", device.name, child.id()));
 

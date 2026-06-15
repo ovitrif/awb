@@ -913,9 +913,18 @@ fn ready_phone_matching(adb: &Adb, expected_serial: &str) -> Result<Option<Conne
 }
 
 fn connected_phone_for_serial(adb: &Adb, serial: &str) -> Result<ConnectedPhone> {
-    ready_phone_matching(adb, serial)?.with_context(|| {
-        format!("ADB device {serial} is not connected or is not in the ready device state")
-    })
+    // Require the exact serial, not the fuzzy `matching_ready_device` fallback,
+    // which would otherwise select an unrelated sole ready device.
+    adb.devices()?
+        .into_iter()
+        .find(|device| device.serial == serial && device.state == adb::DeviceState::Device)
+        .map(|device| ConnectedPhone {
+            display_name: device.display_name(),
+            serial: device.serial,
+        })
+        .with_context(|| {
+            format!("ADB device {serial} is not connected or is not in the ready device state")
+        })
 }
 
 fn reconnect_endpoints(adb: &Adb, current_serial: &str) -> Vec<String> {
