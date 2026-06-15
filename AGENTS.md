@@ -5,18 +5,23 @@
 
 ## Workflow
 - After every separable unit of work, commit the completed changes directly.
-- After every separable unit of work, install or reinstall the local `awb` binary so the checked-out tool is immediately testable.
 - Keep commits scoped to the completed unit of work.
 - Before committing Rust changes, run:
   - `rtk cargo fmt --all -- --check`
   - `rtk cargo test`
   - `rtk cargo clippy --all-targets -- -D warnings`
   - `rtk cargo build --release`
-- Reinstall locally with:
-  - `rtk proxy install -m 755 target/release/awb /Users/ovitrif/.local/bin/awb`
-  - `rtk proxy install -m 755 target/release/awb-app /Users/ovitrif/.local/bin/awb-app`
-- Verify the reinstall with:
-  - `rtk proxy /Users/ovitrif/.local/bin/awb --version`
+
+## Reinstall after every CLI/app change (required)
+Any change to `crates/awb` (the `awb` CLI) or `crates/awb-app` (the menu bar
+app) MUST be followed by a rebuild, reinstall, and restart so the checked-out
+tools match the source and the running menu bar app is not left stale:
+- `rtk cargo build --release`
+- `rtk proxy install -m 755 target/release/awb /Users/ovitrif/.local/bin/awb`
+- `rtk proxy install -m 755 target/release/awb-app /Users/ovitrif/.local/bin/awb-app`
+- Rebundle the app: `rtk proxy scripts/bundle-app.sh target/release/awb-app target/bundle`, then refresh `/Applications/AWB.app` from `target/bundle/AWB.app`.
+- Replace the running instance (overwriting the binary does not update an already-running process): `rtk proxy pkill -9 -f awb-app`, then relaunch `awb app`.
+- Verify: `rtk proxy /Users/ovitrif/.local/bin/awb --version`.
 
 ## Layout
 - `crates/awb-core`: shared ADB/scrcpy/QR/mDNS logic (lib).
