@@ -1,0 +1,13 @@
+[package]
+name = "menu-icon"
+description = "Internal rename of the upstream tray-icon crate (macOS menu bar status item)."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.92"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The upstream crate is published as `tray-icon`; this wrapper is the only
+# place that name appears so the rest of the workspace can use `menu-icon`.
+tray-icon = "0.24"

@@ -20,6 +20,5 @@ kurbo = "0.13"
 serde.workspace = true
 tiny-skia = "0.12"
 toml = "0.9"
-# Published as `tray-icon`; aliased so our code never references "tray".
-menu-icon = { package = "tray-icon", version = "0.24" }
+menu-icon = { path = "../menu-icon" }
 winit = "0.30"

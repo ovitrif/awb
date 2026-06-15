@@ -8,10 +8,7 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as ph;
 use menu_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use menu_icon::{
-    MouseButton, MouseButtonState, TrayIcon as MenuBarIcon, TrayIconBuilder as MenuBarIconBuilder,
-    TrayIconEvent as MenuBarIconEvent,
-};
+use menu_icon::{MenuBarIcon, MenuBarIconBuilder, MenuBarIconEvent, MouseButton, MouseButtonState};
 
 use crate::backend::{self, PairingPhase, Shared, Snapshot};
 use crate::config::Settings;
