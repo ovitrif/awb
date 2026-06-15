@@ -53,8 +53,6 @@ pub struct App {
     shown_at: Instant,
     focus_hidden_at: Option<Instant>,
     last_poll: Instant,
-    show_on_launch: bool,
-    pinned: bool,
     open_at_login: Option<bool>,
     pending_show: bool,
 }
@@ -140,8 +138,6 @@ impl App {
             shown_at: Instant::now(),
             focus_hidden_at: None,
             last_poll: Instant::now(),
-            show_on_launch: std::env::args().any(|arg| arg == "--show"),
-            pinned: std::env::args().any(|arg| arg == "--show"),
             open_at_login: None,
             pending_show: false,
         })
@@ -254,7 +250,7 @@ impl App {
     }
 
     fn handle_focus(&mut self, ctx: &Context) {
-        if !self.visible || self.pinned {
+        if !self.visible {
             return;
         }
 
@@ -288,19 +284,6 @@ impl eframe::App for App {
             self.pending_show = false;
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(ViewportCommand::Focus);
-        }
-
-        if self.show_on_launch {
-            self.show_on_launch = false;
-            ctx.send_viewport_cmd(ViewportCommand::OuterPosition([400.0, 60.0].into()));
-            self.show(ctx, None);
-
-            match std::env::var("AWB_SCREEN").as_deref() {
-                Ok("settings") => self.screen = Screen::Settings,
-                Ok("pair") => self.open_pairing(ctx),
-                Ok("logs") => self.tab = Tab::Logs,
-                _ => {}
-            }
         }
 
         self.handle_events(ctx);
@@ -614,9 +597,14 @@ impl App {
                     let painter = ui.painter();
                     painter.rect_filled(rect, 12.0, theme::QR_CARD);
 
+                    // Reserve a 4-module quiet zone inside the 144px area; the
+                    // raw matrix has none and Android's scanner rejects codes
+                    // without it.
                     let qr_size = 144.0;
-                    let cell = qr_size / modules.size as f32;
-                    let origin = rect.center() - vec2(qr_size / 2.0, qr_size / 2.0);
+                    let quiet = 4.0;
+                    let cell = qr_size / (modules.size as f32 + 2.0 * quiet);
+                    let origin = rect.center() - vec2(qr_size / 2.0, qr_size / 2.0)
+                        + vec2(quiet * cell, quiet * cell);
                     for y in 0..modules.size {
                         for x in 0..modules.size {
                             if modules.dark[y * modules.size + x] {

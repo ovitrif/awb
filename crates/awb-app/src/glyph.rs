@@ -3,9 +3,8 @@
 
 use kurbo::{BezPath, PathEl};
 use tiny_skia::{
-    Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, PathBuilder, Pixmap,
-    PixmapPaint, Point, PremultipliedColorU8, RadialGradient, Shader, SpreadMode, Stroke,
-    Transform,
+    Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, PixmapPaint, Point,
+    PremultipliedColorU8, RadialGradient, Shader, SpreadMode, Stroke, Transform,
 };
 
 /// Visual bounds of the glyph inside the 100-unit viewBox: [x, y, w, h]. The
@@ -41,29 +40,17 @@ pub struct Raster {
 pub fn menubar_icon(height: u32) -> Raster {
     let [gx, gy, gw, gh] = GLYPH_BOUNDS;
     let h = height as f32;
-    let pad = h * 0.1;
+    let pad = h * 0.12;
     let scale = (h - 2.0 * pad) / gh;
     let width = (gw * scale + 2.0 * pad).ceil() as u32;
 
+    // Fill only (no stroke), matching the design's light Wi-Fi arcs. Rendered
+    // larger than its slot so macOS downscales it into a crisp template rather
+    // than the upscaled gray a small bitmap would produce.
     let mut pixmap = Pixmap::new(width, height).expect("menu bar icon pixmap");
     let transform =
         Transform::from_scale(scale, scale).post_translate(pad - gx * scale, pad - gy * scale);
-
-    if let Some(path) = skia_path(MENUBAR_GLYPH) {
-        let mut paint = Paint::default();
-        paint.set_color(Color::BLACK);
-        paint.anti_alias = true;
-        pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, None);
-        // The Wi-Fi arcs are only ~2 of 51 units thick; stroke the outline so
-        // they stay solid instead of fading to sub-pixel gray at menu bar size.
-        let stroke = Stroke {
-            width: 2.5,
-            line_cap: LineCap::Round,
-            line_join: LineJoin::Round,
-            ..Default::default()
-        };
-        pixmap.stroke_path(&path, &paint, &stroke, transform, None);
-    }
+    fill_path(&mut pixmap, MENUBAR_GLYPH, Color::BLACK, transform);
 
     Raster {
         width,
