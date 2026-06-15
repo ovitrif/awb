@@ -64,9 +64,9 @@ main() {
   install -m 755 "${dir}/${BINARY}" "${install_dir}/${BINARY}"
   echo "Installed ${install_dir}/${BINARY}"
 
-  if [ -f "${dir}/awb-tray" ]; then
-    install -m 755 "${dir}/awb-tray" "${install_dir}/awb-tray"
-    echo "Installed ${install_dir}/awb-tray (run 'awb tray' for the menu bar app)"
+  if [ -f "${dir}/awb-app" ]; then
+    install -m 755 "${dir}/awb-app" "${install_dir}/awb-app"
+    echo "Installed ${install_dir}/awb-app (run 'awb app' for the menu bar app)"
   fi
 
   echo "Run '${BINARY}' to get started."

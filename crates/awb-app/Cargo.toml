@@ -1,5 +1,5 @@
 [package]
-name = "awb-tray"
+name = "awb-app"
 description = "awb (Android Wireless Bridge) macOS menu bar app."
 version.workspace = true
 edition.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "awb-tray"
+name = "awb-app"
 path = "src/main.rs"
 
 [dependencies]

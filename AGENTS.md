@@ -14,14 +14,14 @@
   - `rtk cargo build --release`
 - Reinstall locally with:
   - `rtk proxy install -m 755 target/release/awb /Users/ovitrif/.local/bin/awb`
-  - `rtk proxy install -m 755 target/release/awb-tray /Users/ovitrif/.local/bin/awb-tray`
+  - `rtk proxy install -m 755 target/release/awb-app /Users/ovitrif/.local/bin/awb-app`
 - Verify the reinstall with:
   - `rtk proxy /Users/ovitrif/.local/bin/awb --version`
 
 ## Layout
 - `crates/awb-core`: shared ADB/scrcpy/QR/mDNS logic (lib).
 - `crates/awb`: the `awb` CLI.
-- `crates/awb-tray`: the macOS menu bar app (`awb-tray`), design source in `DESIGN.pen`.
+- `crates/awb-app`: the macOS menu bar app (`awb-app`), design source in `DESIGN.pen`.
 
 ## CI / GitHub Actions
 - GitHub Action workflow file changes only take effect on PRs opened after the merge of the PR that modifies them. Always note "(after merge)" in test plan items about verifying workflow behavior.

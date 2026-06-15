@@ -13,12 +13,13 @@ use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIc
 use crate::backend::{self, PairingPhase, Shared, Snapshot};
 use crate::config::Settings;
 use crate::glyph;
+use crate::login_item;
 use crate::theme::{self, icon, medium, regular, semibold};
 
 const FOCUS_GRACE: Duration = Duration::from_millis(300);
 const STATUS_POLL: Duration = Duration::from_secs(5);
 
-static TRAY_EVENTS: Mutex<Vec<TrayIconEvent>> = Mutex::new(Vec::new());
+static STATUS_EVENTS: Mutex<Vec<TrayIconEvent>> = Mutex::new(Vec::new());
 static MENU_EVENTS: Mutex<Vec<MenuEvent>> = Mutex::new(Vec::new());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +35,7 @@ enum Tab {
     Logs,
 }
 
-pub struct TrayApp {
+pub struct App {
     shared: Arc<Mutex<Shared>>,
     settings: Settings,
     width_text: String,
@@ -42,7 +43,8 @@ pub struct TrayApp {
     screen: Screen,
     tab: Tab,
     logo: TextureHandle,
-    _tray: TrayIcon,
+    shell: TextureHandle,
+    _status_icon: TrayIcon,
     show_item: MenuItem,
     pair_id: MenuId,
     refresh_id: MenuId,
@@ -53,9 +55,10 @@ pub struct TrayApp {
     last_poll: Instant,
     show_on_launch: bool,
     pinned: bool,
+    open_at_login: Option<bool>,
 }
 
-impl TrayApp {
+impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         let ctx = cc.egui_ctx.clone();
         theme::install_fonts(&ctx);
@@ -66,6 +69,13 @@ impl TrayApp {
             &logo_raster.rgba,
         );
         let logo = ctx.load_texture("awb-logo", logo_image, TextureOptions::LINEAR);
+
+        let shell_raster = glyph::shell_background(3);
+        let shell_image = egui::ColorImage::from_rgba_premultiplied(
+            [shell_raster.width as usize, shell_raster.height as usize],
+            &shell_raster.rgba,
+        );
+        let shell = ctx.load_texture("awb-shell", shell_image, TextureOptions::LINEAR);
 
         let menu = Menu::new();
         let show_item = MenuItem::new("Show awb", true, None);
@@ -81,21 +91,21 @@ impl TrayApp {
             &quit_item,
         ])?;
 
-        let icon_raster = glyph::tray_icon(22);
-        let tray_icon =
+        let icon_raster = glyph::menubar_icon(22);
+        let icon =
             tray_icon::Icon::from_rgba(icon_raster.rgba, icon_raster.width, icon_raster.height)?;
-        let tray = TrayIconBuilder::new()
-            .with_icon(tray_icon)
+        let status_icon = TrayIconBuilder::new()
+            .with_icon(icon)
             .with_icon_as_template(true)
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .with_tooltip("awb - Android Wireless Bridge")
             .build()?;
 
-        let tray_ctx = ctx.clone();
+        let status_ctx = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |event| {
-            TRAY_EVENTS.lock().unwrap().push(event);
-            tray_ctx.request_repaint();
+            STATUS_EVENTS.lock().unwrap().push(event);
+            status_ctx.request_repaint();
         }));
 
         let menu_ctx = ctx.clone();
@@ -119,7 +129,8 @@ impl TrayApp {
             screen: Screen::Main,
             tab: Tab::Devices,
             logo,
-            _tray: tray,
+            shell,
+            _status_icon: status_icon,
             show_item,
             pair_id: pair_item.id().clone(),
             refresh_id: refresh_item.id().clone(),
@@ -130,6 +141,7 @@ impl TrayApp {
             last_poll: Instant::now(),
             show_on_launch: std::env::args().any(|arg| arg == "--show"),
             pinned: std::env::args().any(|arg| arg == "--show"),
+            open_at_login: None,
         })
     }
 
@@ -139,11 +151,13 @@ impl TrayApp {
                 .input(|i| i.viewport().native_pixels_per_point)
                 .unwrap_or(2.0) as f64;
             let bottom = rect.position.y + f64::from(rect.size.height);
-            // tray-icon reports physical pixels; a logical menu bar bottom
+            // the status-item rect is in physical pixels; a logical menu bar bottom
             // would sit under ~50 even on 1x displays.
             let divisor = if bottom > 50.0 { scale } else { 1.0 };
             let center_x = (rect.position.x + f64::from(rect.size.width) / 2.0) / divisor;
-            let y = bottom / divisor + 6.0;
+            // Leave ~8px between the icon and the beak tip (the tip sits a
+            // touch below the window top).
+            let y = bottom / divisor + 6.5;
             let mut x = center_x - f64::from(theme::WINDOW_WIDTH) / 2.0;
 
             if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
@@ -215,8 +229,8 @@ impl TrayApp {
             }
         }
 
-        let tray_events: Vec<TrayIconEvent> = std::mem::take(&mut *TRAY_EVENTS.lock().unwrap());
-        for event in tray_events {
+        let status_events: Vec<TrayIconEvent> = std::mem::take(&mut *STATUS_EVENTS.lock().unwrap());
+        for event in status_events {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -248,7 +262,7 @@ impl TrayApp {
     }
 }
 
-impl eframe::App for TrayApp {
+impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
     }
@@ -295,17 +309,19 @@ impl eframe::App for TrayApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let rect = ui.max_rect();
-        let radius = CornerRadius::same(theme::WINDOW_RADIUS);
 
-        ui.painter().rect_filled(rect, radius, theme::BG);
-        ui.painter().rect_stroke(
+        // Beak + rounded body + gradient + hairline, baked into one texture.
+        ui.painter().image(
+            self.shell.id(),
             rect,
-            radius,
-            Stroke::new(1.0, theme::WINDOW_STROKE),
-            egui::StrokeKind::Inside,
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
         );
 
-        let content = rect.shrink2(vec2(16.0, 14.0));
+        let content = Rect::from_min_max(
+            egui::pos2(rect.left() + 16.0, rect.top() + theme::BEAK_HEIGHT + 14.0),
+            egui::pos2(rect.right() - 16.0, rect.bottom() - 14.0),
+        );
         let mut content_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(content)
@@ -320,7 +336,7 @@ impl eframe::App for TrayApp {
     }
 }
 
-impl TrayApp {
+impl App {
     fn main_screen(&mut self, ui: &mut Ui, ctx: &Context) {
         self.main_header(ui, ctx);
         ui.add_space(12.0);
@@ -489,7 +505,9 @@ impl TrayApp {
         }
         ui.add_space(12.0);
 
-        ui.add(Label::new(semibold("scrcpy", 12.5, theme::TEXT_BRIGHT)).selectable(false));
+        ui.add(
+            Label::new(semibold("Screen Mirroring", 12.5, theme::TEXT_BRIGHT)).selectable(false),
+        );
         ui.add_space(10.0);
 
         let mut changed = false;
@@ -512,6 +530,22 @@ impl TrayApp {
 
         if changed {
             self.save_settings();
+        }
+
+        ui.add_space(12.0);
+        // Queried lazily: the System Events lookup prompts for Automation
+        // access the first time, so we defer it until Settings is opened.
+        let mut open_at_login = match self.open_at_login {
+            Some(value) => value,
+            None => {
+                let enabled = login_item::is_enabled();
+                self.open_at_login = Some(enabled);
+                enabled
+            }
+        };
+        if check_item(ui, "Open at Login", &mut open_at_login) {
+            login_item::set_enabled(open_at_login);
+            self.open_at_login = Some(open_at_login);
         }
 
         ui.add_space(12.0);

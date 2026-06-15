@@ -55,9 +55,9 @@ jobs:
         if: matrix.build_kind == 'zig'
         run: cargo zigbuild --release -p awb --target ${{ matrix.target }}
 
-      - name: Build CLI and tray app (native)
+      - name: Build CLI and menu bar app (native)
         if: matrix.build_kind == 'native'
-        run: cargo build --release -p awb -p awb-tray --target ${{ matrix.target }}
+        run: cargo build --release -p awb -p awb-app --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -68,8 +68,8 @@ jobs:
           mkdir "$staging"
           cp "target/${target}/release/awb" "$staging/"
           if [[ "$target" == *apple-darwin ]]; then
-            cp "target/${target}/release/awb-tray" "$staging/"
-            scripts/bundle-app.sh "target/${target}/release/awb-tray" "$staging"
+            cp "target/${target}/release/awb-app" "$staging/"
+            scripts/bundle-app.sh "target/${target}/release/awb-app" "$staging"
           fi
           tar czf "${staging}.tar.gz" "$staging"
           echo "ARCHIVE=${staging}.tar.gz" >> "$GITHUB_ENV"

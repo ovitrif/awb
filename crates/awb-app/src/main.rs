@@ -4,6 +4,7 @@ mod app;
 mod backend;
 mod config;
 mod glyph;
+mod login_item;
 mod theme;
 
 use eframe::egui;
@@ -24,9 +25,19 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    if let Some(index) = args.iter().position(|arg| arg == "--render-shell") {
+        let path = args
+            .get(index + 1)
+            .map(String::as_str)
+            .unwrap_or("shell.png");
+        std::fs::write(path, glyph::shell_background_png(3)).expect("write shell");
+        println!("wrote {path}");
+        return Ok(());
+    }
+
     let viewport = egui::ViewportBuilder::default()
         .with_title("awb")
-        .with_inner_size([theme::WINDOW_WIDTH, theme::WINDOW_HEIGHT])
+        .with_inner_size([theme::WINDOW_WIDTH, theme::WINDOW_FULL_HEIGHT])
         .with_decorations(false)
         .with_resizable(false)
         .with_transparent(true)
@@ -52,10 +63,10 @@ fn main() -> eframe::Result {
         "awb",
         native_options,
         Box::new(|cc| {
-            app::TrayApp::new(cc)
+            app::App::new(cc)
                 .map(|app| Box::new(app) as Box<dyn eframe::App>)
                 .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
-                    format!("failed to start awb-tray: {error:#}").into()
+                    format!("failed to start awb-app: {error:#}").into()
                 })
         }),
     )

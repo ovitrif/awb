@@ -6,10 +6,10 @@ use eframe::egui::{
 
 pub const WINDOW_WIDTH: f32 = 380.0;
 pub const WINDOW_HEIGHT: f32 = 340.0;
-pub const WINDOW_RADIUS: u8 = 14;
+/// The beak rises above the rounded body and points at the menu bar icon.
+pub const BEAK_HEIGHT: f32 = 9.0;
+pub const WINDOW_FULL_HEIGHT: f32 = WINDOW_HEIGHT + BEAK_HEIGHT;
 
-pub const BG: Color32 = Color32::from_rgb(0x1F, 0x20, 0x25);
-pub const WINDOW_STROKE: Color32 = Color32::from_rgba_premultiplied(0x14, 0x14, 0x14, 0x14);
 pub const HAIRLINE: Color32 = Color32::from_rgba_premultiplied(0x0D, 0x0D, 0x0D, 0x0D);
 
 pub const TEXT_STRONG: Color32 = Color32::from_rgb(0xF2, 0xF3, 0xF7);

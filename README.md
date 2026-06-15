@@ -32,7 +32,7 @@ enabled, on the same Wi-Fi network as your Mac.
 ## Menu bar app
 
 ```sh
-awb tray
+awb app
 ```
 
 The awb icon appears in the menu bar. Left-click toggles the popover: connected devices
@@ -40,7 +40,7 @@ with one-click mirroring, a Logs tab, scrcpy settings, and QR pairing for new ph
 Right-click offers Show, Pair, Refresh, and Quit.
 
 macOS release archives also contain `AWB.app` for /Applications and login items; it is the
-same tray app in a bundle.
+same menu bar app in a bundle.
 
 ## CLI
 
@@ -59,7 +59,7 @@ Useful commands and flags:
 awb status --json        # ADB, scrcpy, and device status for scripts and UIs
 awb reset-adb            # kill and restart the local ADB server
 awb completions zsh      # print zsh completions
-awb tray                 # launch the menu bar app
+awb app                  # launch the menu bar app
 awb --connect-only       # pair and connect without the scrcpy menu
 awb --background         # start scrcpy detached and exit
 awb --foreground         # start scrcpy and wait until it exits
@@ -73,7 +73,7 @@ awb --adb /path/to/adb --scrcpy /path/to/scrcpy
 ```
 
 By default scrcpy launches borderless at 480x1071 with `--stay-awake` and no audio; pass
-`--plain-window` for scrcpy's regular decorated window. The tray app stores its scrcpy
+`--plain-window` for scrcpy's regular decorated window. The menu bar app stores its scrcpy
 options in `~/.config/awb/config.toml`.
 
 ## Build from source
@@ -81,12 +81,12 @@ options in `~/.config/awb/config.toml`.
 ```sh
 git clone https://github.com/ovitrif/awb.git
 cd awb
-cargo build --release            # target/release/awb and target/release/awb-tray
-scripts/bundle-app.sh            # optional: wraps awb-tray into target/bundle/AWB.app
+cargo build --release            # target/release/awb and target/release/awb-app
+scripts/bundle-app.sh            # optional: wraps awb-app into target/bundle/AWB.app
 ```
 
 The workspace has three crates: `awb-core` (ADB, scrcpy, QR, and Bonjour logic), `awb`
-(the CLI), and `awb-tray` (the menu bar app, built from the design in `DESIGN.pen`).
+(the CLI), and `awb-app` (the menu bar app, built from the design in `DESIGN.pen`).
 
 ## License
 

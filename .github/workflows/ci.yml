@@ -34,7 +34,7 @@ jobs:
 
       - name: Bundle AWB.app
         run: |
-          cargo build --release -p awb-tray
+          cargo build --release -p awb-app
           scripts/bundle-app.sh
 
   check-linux-cli:

@@ -510,16 +510,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "awb-core"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "qrcode",
- "rand",
-]
-
-[[package]]
-name = "awb-tray"
+name = "awb-app"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -532,6 +523,15 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tray-icon",
  "winit",
+]
+
+[[package]]
+name = "awb-core"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "qrcode",
+ "rand",
 ]
 
 [[package]]

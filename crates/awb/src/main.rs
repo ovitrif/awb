@@ -20,7 +20,7 @@ use clap_complete::Shell;
 use serde::Serialize;
 
 const BINARY_NAME: &str = "awb";
-const TRAY_BINARY_NAME: &str = "awb-tray";
+const APP_BINARY_NAME: &str = "awb-app";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -163,7 +163,7 @@ enum CliCommand {
     Completions(CompletionArgs),
 
     #[command(about = "Launch the awb menu bar app")]
-    Tray,
+    App,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -425,18 +425,18 @@ fn handle_cli_command(command: &CliCommand, args: &Args) -> Result<()> {
             reset_adb_server(&adb)
         }
         CliCommand::Completions(args) => print_completions(args),
-        CliCommand::Tray => launch_tray(),
+        CliCommand::App => launch_app(),
     }
 }
 
-fn launch_tray() -> Result<()> {
-    let tray_path = env::current_exe()
+fn launch_app() -> Result<()> {
+    let app_path = env::current_exe()
         .ok()
-        .and_then(|exe| Some(exe.parent()?.join(TRAY_BINARY_NAME)))
+        .and_then(|exe| Some(exe.parent()?.join(APP_BINARY_NAME)))
         .filter(|path| path.is_file())
-        .unwrap_or_else(|| PathBuf::from(TRAY_BINARY_NAME));
+        .unwrap_or_else(|| PathBuf::from(APP_BINARY_NAME));
 
-    let child = ProcessCommand::new(&tray_path)
+    let child = ProcessCommand::new(&app_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -444,7 +444,7 @@ fn launch_tray() -> Result<()> {
         .with_context(|| {
             format!(
                 "could not launch {}. Install it next to awb or put it on PATH",
-                tray_path.display()
+                app_path.display()
             )
         })?;
 
@@ -1985,6 +1985,12 @@ mod tests {
             }
             _ => panic!("expected completions command"),
         }
+    }
+
+    #[test]
+    fn parses_app_command() {
+        let args = Args::try_parse_from(["awb", "app"]).unwrap();
+        assert!(matches!(args.command, Some(CliCommand::App)));
     }
 
     #[test]
