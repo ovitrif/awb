@@ -479,7 +479,6 @@ fn connect_after_pairing(
     cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<adb::AdbDevice> {
     let deadline = Instant::now() + Duration::from_secs(60);
-    let mut tried = std::collections::HashSet::new();
 
     loop {
         ensure_not_cancelled(cancel)?;
@@ -506,11 +505,10 @@ fn connect_after_pairing(
             endpoints = found;
         }
 
+        // Retry every candidate each pass: a phone's endpoint can refuse the
+        // first connect and accept a few seconds later, so we must not skip a
+        // candidate permanently before the deadline.
         for endpoint in endpoints {
-            if !tried.insert(endpoint.clone()) {
-                continue;
-            }
-
             ensure_not_cancelled(cancel)?;
 
             if let Ok(output) = adb.connect(&endpoint) {

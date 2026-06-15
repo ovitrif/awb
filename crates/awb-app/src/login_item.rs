@@ -8,9 +8,8 @@
 mod imp {
     use std::process::Command;
 
-    /// Matched case-insensitively against login item names, so it also matches
-    /// `AWB` (the bundle) and `awb-app` (the bare binary).
-    const MATCH: &str = "awb";
+    /// Display name for the login item AWB registers.
+    const ITEM_NAME: &str = "awb";
 
     /// The enclosing `.app` bundle when present, otherwise the bare executable.
     /// Login Items shows whichever path is registered.
@@ -37,20 +36,28 @@ mod imp {
     }
 
     pub fn is_enabled() -> bool {
-        osascript("tell application \"System Events\" to get the name of every login item")
-            .map(|names| names.to_lowercase().contains(MATCH))
-            .unwrap_or(false)
+        let Some(path) = app_path() else {
+            return false;
+        };
+        // `get the path of every login item` returns a comma-separated list.
+        osascript("tell application \"System Events\" to get the path of every login item")
+            .is_some_and(|paths| paths.split(',').any(|entry| entry.trim() == path))
     }
 
     pub fn set_enabled(enabled: bool) {
-        // Always clear stale entries first so we never stack duplicates.
+        let Some(path) = app_path() else {
+            return;
+        };
+
+        // Remove only AWB's own entry, matched by the exact registered path, so
+        // toggling never deletes an unrelated login item.
         let _ = osascript(&format!(
-            "tell application \"System Events\" to delete (every login item whose name contains \"{MATCH}\")"
+            "tell application \"System Events\" to delete (every login item whose path is \"{path}\")"
         ));
 
-        if enabled && let Some(path) = app_path() {
+        if enabled {
             let _ = osascript(&format!(
-                "tell application \"System Events\" to make login item at end with properties {{name:\"{MATCH}\", path:\"{path}\", hidden:true}}"
+                "tell application \"System Events\" to make login item at end with properties {{name:\"{ITEM_NAME}\", path:\"{path}\", hidden:true}}"
             ));
         }
     }
