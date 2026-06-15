@@ -18,6 +18,9 @@ use crate::theme::{self, icon, medium, regular, semibold};
 
 const FOCUS_GRACE: Duration = Duration::from_millis(300);
 const STATUS_POLL: Duration = Duration::from_secs(5);
+/// How long after launch to keep forcing the window hidden, in case the
+/// platform surfaces it despite `with_visible(false)`.
+const STARTUP_HIDE: Duration = Duration::from_millis(800);
 
 static STATUS_EVENTS: Mutex<Vec<MenuBarIconEvent>> = Mutex::new(Vec::new());
 static MENU_EVENTS: Mutex<Vec<MenuEvent>> = Mutex::new(Vec::new());
@@ -53,6 +56,7 @@ pub struct App {
     shown_at: Instant,
     focus_hidden_at: Option<Instant>,
     last_poll: Instant,
+    created_at: Instant,
     open_at_login: Option<bool>,
     pending_show: bool,
 }
@@ -138,6 +142,7 @@ impl App {
             shown_at: Instant::now(),
             focus_hidden_at: None,
             last_poll: Instant::now(),
+            created_at: Instant::now(),
             open_at_login: None,
             pending_show: false,
         })
@@ -279,6 +284,13 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Some setups surface the window on launch despite `with_visible(false)`;
+        // keep it hidden until the user opens it from the menu bar icon.
+        if !self.visible && self.created_at.elapsed() < STARTUP_HIDE {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+
         // Apply a queued move before the window is shown (see `show`).
         if self.pending_show {
             self.pending_show = false;
