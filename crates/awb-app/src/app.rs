@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -59,6 +60,7 @@ pub struct App {
     created_at: Instant,
     open_at_login: Option<bool>,
     pending_show: bool,
+    auto_mirrored: HashSet<String>,
 }
 
 impl App {
@@ -145,6 +147,7 @@ impl App {
             created_at: Instant::now(),
             open_at_login: None,
             pending_show: false,
+            auto_mirrored: HashSet::new(),
         })
     }
 
@@ -271,6 +274,47 @@ impl App {
         self.settings.window_height = self.height_text.trim().parse().unwrap_or(0);
         self.settings.save();
     }
+
+    /// Auto-start mirroring for newly connected physical phones (never
+    /// emulators) when the setting is on and scrcpy is available.
+    fn maybe_auto_mirror(&mut self, ctx: &Context) {
+        if !self.settings.auto_mirror {
+            self.auto_mirrored.clear();
+            return;
+        }
+
+        let (snapshot, mirroring) = {
+            let state = self.shared.lock().unwrap();
+            (
+                state.snapshot.clone(),
+                state.mirrors.keys().cloned().collect::<HashSet<String>>(),
+            )
+        };
+        let Some(snapshot) = snapshot else { return };
+        if !snapshot.scrcpy.available {
+            return;
+        }
+
+        // Forget devices that have disconnected so a later reconnect re-mirrors.
+        let present: HashSet<&str> = snapshot.devices.iter().map(|d| d.serial.as_str()).collect();
+        self.auto_mirrored
+            .retain(|serial| present.contains(serial.as_str()));
+
+        for device in &snapshot.devices {
+            if device.ready
+                && !device.is_emulator
+                && !mirroring.contains(&device.serial)
+                && self.auto_mirrored.insert(device.serial.clone())
+            {
+                backend::start_mirror(
+                    self.shared.clone(),
+                    ctx.clone(),
+                    device.clone(),
+                    self.settings.scrcpy_options(),
+                );
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -301,12 +345,23 @@ impl eframe::App for App {
         self.handle_events(ctx);
         self.handle_focus(ctx);
 
-        if self.visible {
-            if self.last_poll.elapsed() > STATUS_POLL {
-                self.last_poll = Instant::now();
-                backend::refresh_status(self.shared.clone(), ctx.clone());
-            }
-            ctx.request_repaint_after(Duration::from_secs(1));
+        // Poll while the popover is open, or in the background when auto-mirror
+        // must watch for newly connected phones.
+        let watching = self.visible || self.settings.auto_mirror;
+        if watching && self.last_poll.elapsed() > STATUS_POLL {
+            self.last_poll = Instant::now();
+            backend::refresh_status(self.shared.clone(), ctx.clone());
+        }
+
+        self.maybe_auto_mirror(ctx);
+
+        if watching {
+            let interval = if self.visible {
+                Duration::from_secs(1)
+            } else {
+                STATUS_POLL
+            };
+            ctx.request_repaint_after(interval);
         }
 
         let pairing_done = {
@@ -538,6 +593,8 @@ impl App {
             changed |= check_item(ui, "Top", &mut self.settings.always_on_top);
             ui.add_space(20.0);
             changed |= check_item(ui, "Plain", &mut self.settings.plain_window);
+            ui.add_space(20.0);
+            changed |= check_item(ui, "Auto-mirror", &mut self.settings.auto_mirror);
         });
 
         if changed {

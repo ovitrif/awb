@@ -12,6 +12,8 @@ pub struct Settings {
     pub window_height: u32,
     pub always_on_top: bool,
     pub plain_window: bool,
+    /// Auto-start mirroring when a physical phone connects (never emulators).
+    pub auto_mirror: bool,
 }
 
 impl Default for Settings {
@@ -24,6 +26,7 @@ impl Default for Settings {
             window_height: defaults.window_height,
             always_on_top: true,
             plain_window: false,
+            auto_mirror: false,
         }
     }
 }

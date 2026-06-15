@@ -29,6 +29,7 @@ pub struct DeviceInfo {
     pub name: String,
     pub ready: bool,
     pub state: String,
+    pub is_emulator: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +183,7 @@ fn collect_snapshot() -> Snapshot {
                     .map(|device| DeviceInfo {
                         ready: device.state == adb::DeviceState::Device,
                         state: state_label(&device.state).to_string(),
+                        is_emulator: is_emulator(&device),
                         name: device
                             .model
                             .as_deref()
@@ -199,6 +201,14 @@ fn collect_snapshot() -> Snapshot {
         scrcpy: scrcpy_info,
         devices,
     }
+}
+
+fn is_emulator(device: &adb::AdbDevice) -> bool {
+    device.serial.starts_with("emulator-")
+        || device
+            .model
+            .as_deref()
+            .is_some_and(|model| model.contains("sdk_gphone"))
 }
 
 fn state_label(state: &adb::DeviceState) -> &str {
