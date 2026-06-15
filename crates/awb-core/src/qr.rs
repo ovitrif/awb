@@ -58,10 +58,16 @@ pub struct QrModules {
 }
 
 fn pairing_instance_name() -> String {
-    machine_name_candidates()
+    // A unique per-session suffix: pairing discovers the phone by matching this
+    // mDNS instance, so a deterministic (hostname-only) name could collide with
+    // a stale advertisement and pair against the wrong endpoint.
+    let suffix = safe_random(6).to_ascii_lowercase();
+    let base = machine_name_candidates()
         .into_iter()
         .find_map(|candidate| sanitize_pairing_instance(&candidate))
-        .unwrap_or_else(|| format!("awb-{}", safe_random(6).to_ascii_lowercase()))
+        .unwrap_or_else(|| "awb".to_string());
+    let base: String = base.chars().take(56).collect();
+    format!("{base}-{suffix}")
 }
 
 fn machine_name_candidates() -> Vec<String> {
@@ -149,6 +155,14 @@ mod tests {
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric()
                     || matches!(character, ':' | ';' | '-' | '_'))
+        );
+    }
+
+    #[test]
+    fn generated_instances_are_unique_per_session() {
+        assert_ne!(
+            PairingQr::generate().instance,
+            PairingQr::generate().instance
         );
     }
 
