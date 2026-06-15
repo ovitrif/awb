@@ -11,7 +11,8 @@ pub struct Settings {
     pub window_width: u32,
     pub window_height: u32,
     pub always_on_top: bool,
-    pub plain_window: bool,
+    /// Launch scrcpy as a borderless (plain) window with no title bar.
+    pub borderless: bool,
     /// Auto-start mirroring when a physical phone connects (never emulators).
     pub auto_mirror: bool,
 }
@@ -25,7 +26,7 @@ impl Default for Settings {
             window_width: defaults.window_width,
             window_height: defaults.window_height,
             always_on_top: true,
-            plain_window: false,
+            borderless: true,
             auto_mirror: false,
         }
     }
@@ -34,7 +35,7 @@ impl Default for Settings {
 impl Settings {
     pub fn scrcpy_options(&self) -> ScrcpyOptions {
         ScrcpyOptions {
-            borderless: !self.plain_window,
+            borderless: self.borderless,
             always_on_top: self.always_on_top,
             window_title: self.window_title.clone(),
             window_width: self.window_width,

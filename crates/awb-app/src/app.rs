@@ -592,7 +592,7 @@ impl App {
         ui.horizontal(|ui| {
             changed |= check_item(ui, "Always on top", &mut self.settings.always_on_top);
             ui.add_space(20.0);
-            changed |= check_item(ui, "Plain", &mut self.settings.plain_window);
+            changed |= check_item(ui, "Borderless", &mut self.settings.borderless);
             ui.add_space(20.0);
             changed |= check_item(ui, "Auto mirror", &mut self.settings.auto_mirror);
         });
