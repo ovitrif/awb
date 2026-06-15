@@ -8,10 +8,6 @@ awb handles mDNS discovery, `adb pair`, `adb connect`, and reconnects, then laun
 [scrcpy](https://github.com/Genymobile/scrcpy) screen mirroring if you want it. It ships as
 two small native binaries: the `awb` CLI and a menu bar app.
 
-| Devices | Pairing | Settings |
-| --- | --- | --- |
-| ![Devices](docs/screenshot-devices.png) | ![Pairing](docs/screenshot-pair.png) | ![Settings](docs/screenshot-settings.png) |
-
 ## Install
 
 ```sh
