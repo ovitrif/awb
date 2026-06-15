@@ -7,8 +7,11 @@ use eframe::egui::{
     ViewportCommand, vec2,
 };
 use egui_phosphor::regular as ph;
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use menu_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use menu_icon::{
+    MouseButton, MouseButtonState, TrayIcon as MenuBarIcon, TrayIconBuilder as MenuBarIconBuilder,
+    TrayIconEvent as MenuBarIconEvent,
+};
 
 use crate::backend::{self, PairingPhase, Shared, Snapshot};
 use crate::config::Settings;
@@ -19,7 +22,7 @@ use crate::theme::{self, icon, medium, regular, semibold};
 const FOCUS_GRACE: Duration = Duration::from_millis(300);
 const STATUS_POLL: Duration = Duration::from_secs(5);
 
-static STATUS_EVENTS: Mutex<Vec<TrayIconEvent>> = Mutex::new(Vec::new());
+static STATUS_EVENTS: Mutex<Vec<MenuBarIconEvent>> = Mutex::new(Vec::new());
 static MENU_EVENTS: Mutex<Vec<MenuEvent>> = Mutex::new(Vec::new());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +47,7 @@ pub struct App {
     tab: Tab,
     logo: TextureHandle,
     shell: TextureHandle,
-    _status_icon: TrayIcon,
+    _status_icon: MenuBarIcon,
     show_item: MenuItem,
     pair_id: MenuId,
     refresh_id: MenuId,
@@ -94,8 +97,8 @@ impl App {
 
         let icon_raster = glyph::menubar_icon(44);
         let icon =
-            tray_icon::Icon::from_rgba(icon_raster.rgba, icon_raster.width, icon_raster.height)?;
-        let status_icon = TrayIconBuilder::new()
+            menu_icon::Icon::from_rgba(icon_raster.rgba, icon_raster.width, icon_raster.height)?;
+        let status_icon = MenuBarIconBuilder::new()
             .with_icon(icon)
             .with_icon_as_template(true)
             .with_menu(Box::new(menu))
@@ -104,7 +107,7 @@ impl App {
             .build()?;
 
         let status_ctx = ctx.clone();
-        TrayIconEvent::set_event_handler(Some(move |event| {
+        MenuBarIconEvent::set_event_handler(Some(move |event| {
             STATUS_EVENTS.lock().unwrap().push(event);
             status_ctx.request_repaint();
         }));
@@ -147,7 +150,7 @@ impl App {
         })
     }
 
-    fn show(&mut self, ctx: &Context, anchor: Option<tray_icon::Rect>) {
+    fn show(&mut self, ctx: &Context, anchor: Option<menu_icon::Rect>) {
         if let Some(rect) = anchor {
             let scale = ctx
                 .input(|i| i.viewport().native_pixels_per_point)
@@ -194,7 +197,7 @@ impl App {
         self.show_item.set_text("Show awb");
     }
 
-    fn toggle(&mut self, ctx: &Context, anchor: Option<tray_icon::Rect>) {
+    fn toggle(&mut self, ctx: &Context, anchor: Option<menu_icon::Rect>) {
         if self.visible {
             self.hide(ctx);
         } else if self
@@ -238,9 +241,10 @@ impl App {
             }
         }
 
-        let status_events: Vec<TrayIconEvent> = std::mem::take(&mut *STATUS_EVENTS.lock().unwrap());
+        let status_events: Vec<MenuBarIconEvent> =
+            std::mem::take(&mut *STATUS_EVENTS.lock().unwrap());
         for event in status_events {
-            if let TrayIconEvent::Click {
+            if let MenuBarIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 rect,
