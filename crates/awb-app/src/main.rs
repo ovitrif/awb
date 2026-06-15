@@ -35,6 +35,16 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    if let Some(index) = args.iter().position(|arg| arg == "--render-menubar") {
+        let path = args
+            .get(index + 1)
+            .map(String::as_str)
+            .unwrap_or("menubar.png");
+        std::fs::write(path, glyph::menubar_preview_png()).expect("write menubar preview");
+        println!("wrote {path}");
+        return Ok(());
+    }
+
     let viewport = egui::ViewportBuilder::default()
         .with_title("awb")
         .with_inner_size([theme::WINDOW_WIDTH, theme::WINDOW_FULL_HEIGHT])

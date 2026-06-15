@@ -56,6 +56,7 @@ pub struct App {
     show_on_launch: bool,
     pinned: bool,
     open_at_login: Option<bool>,
+    pending_show: bool,
 }
 
 impl App {
@@ -91,7 +92,7 @@ impl App {
             &quit_item,
         ])?;
 
-        let icon_raster = glyph::menubar_icon(22);
+        let icon_raster = glyph::menubar_icon(44);
         let icon =
             tray_icon::Icon::from_rgba(icon_raster.rgba, icon_raster.width, icon_raster.height)?;
         let status_icon = TrayIconBuilder::new()
@@ -142,6 +143,7 @@ impl App {
             show_on_launch: std::env::args().any(|arg| arg == "--show"),
             pinned: std::env::args().any(|arg| arg == "--show"),
             open_at_login: None,
+            pending_show: false,
         })
     }
 
@@ -168,10 +170,16 @@ impl App {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(
                 [x.max(8.0) as f32, y as f32].into(),
             ));
+            // Reveal on the next frame so the move lands first; a freshly
+            // created window would otherwise flash at its default centered
+            // position on the very first open.
+            self.pending_show = true;
+            ctx.request_repaint();
+        } else {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
 
-        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
         self.visible = true;
         self.shown_at = Instant::now();
         self.focus_hidden_at = None;
@@ -180,6 +188,7 @@ impl App {
     }
 
     fn hide(&mut self, ctx: &Context) {
+        self.pending_show = false;
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         self.visible = false;
         self.show_item.set_text("Show awb");
@@ -273,6 +282,13 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Apply a queued move before the window is shown (see `show`).
+        if self.pending_show {
+            self.pending_show = false;
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
+
         if self.show_on_launch {
             self.show_on_launch = false;
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition([400.0, 60.0].into()));
@@ -533,6 +549,11 @@ impl App {
         }
 
         ui.add_space(12.0);
+        divider(ui);
+        ui.add_space(12.0);
+
+        ui.add(Label::new(semibold("General", 12.5, theme::TEXT_BRIGHT)).selectable(false));
+        ui.add_space(10.0);
         // Queried lazily: the System Events lookup prompts for Automation
         // access the first time, so we defer it until Settings is opened.
         let mut open_at_login = match self.open_at_login {

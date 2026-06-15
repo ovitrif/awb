@@ -3,9 +3,13 @@
 
 use kurbo::{BezPath, PathEl};
 use tiny_skia::{
-    Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, Point,
-    RadialGradient, Shader, SpreadMode, Stroke, Transform,
+    Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, PixmapPaint, Point,
+    PremultipliedColorU8, RadialGradient, Shader, SpreadMode, Stroke, Transform,
 };
+
+/// Visual bounds of the glyph inside the 100-unit viewBox: [x, y, w, h]. The
+/// dome bottom sits at y=75 and the outer Wi-Fi wave peaks at y=24.
+const GLYPH_BOUNDS: [f32; 4] = [9.81, 24.0, 80.38, 51.0];
 
 /// Monochrome menu bar glyph: dome with punched-out eyes under two Wi-Fi arcs.
 const MENUBAR_GLYPH: &str = "M25 75a25 25 0 0 1 50 0z m-4.94-23.4a38 38 0 0 1 59.88 0l-5.51 4.31a31 31 0 0 0-48.86 0z m-10.25-8a51 51 0 0 1 80.38 0l-5.52 4.31a44 44 0 0 0-69.34 0z m28.69 19.4a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z m16 0a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z";
@@ -29,17 +33,94 @@ pub struct Raster {
     pub rgba: Vec<u8>,
 }
 
-/// Menu bar icon glyph as a black template image; macOS recolors it for the
-/// current menu bar appearance.
-pub fn menubar_icon(size: u32) -> Raster {
-    let mut pixmap = Pixmap::new(size, size).expect("menu bar icon pixmap");
-    let transform = Transform::from_scale(size as f32 / VIEWBOX, size as f32 / VIEWBOX);
+/// Menu bar icon: the glyph as a black template image, tightly fit to its
+/// bounds and rendered taller than its slot so macOS downscales it into a crisp
+/// white (dark mode) or black (light mode) status item. Width follows the
+/// glyph's aspect ratio so the Wi-Fi waves are not squeezed.
+pub fn menubar_icon(height: u32) -> Raster {
+    let [gx, gy, gw, gh] = GLYPH_BOUNDS;
+    let h = height as f32;
+    let pad = h * 0.14;
+    let scale = (h - 2.0 * pad) / gh;
+    let width = (gw * scale + 2.0 * pad).ceil() as u32;
+
+    let mut pixmap = Pixmap::new(width, height).expect("menu bar icon pixmap");
+    let transform =
+        Transform::from_scale(scale, scale).post_translate(pad - gx * scale, pad - gy * scale);
     fill_path(&mut pixmap, MENUBAR_GLYPH, Color::BLACK, transform);
 
     Raster {
-        width: size,
-        height: size,
+        width,
+        height,
         rgba: pixmap.take(),
+    }
+}
+
+/// Side-by-side preview of how macOS recolors the menu bar template: white on a
+/// dark bar, black on a light bar. For `awb-app --render-menubar`.
+pub fn menubar_preview_png() -> Vec<u8> {
+    let icon = menubar_icon(36);
+    let zoom = 6;
+    let inset = 28;
+    let cell_w = icon.width * zoom + inset * 2;
+    let cell_h = icon.height * zoom + inset * 2;
+
+    let mut pixmap = Pixmap::new(cell_w * 2, cell_h).expect("preview pixmap");
+    fill_cell(&mut pixmap, 0.0, cell_w as f32, cell_h as f32, "#1D1D1F");
+    fill_cell(
+        &mut pixmap,
+        cell_w as f32,
+        cell_w as f32,
+        cell_h as f32,
+        "#ECECEE",
+    );
+
+    let paint = PixmapPaint::default();
+    let place = |dx: u32| {
+        Transform::from_scale(zoom as f32, zoom as f32).post_translate(dx as f32, inset as f32)
+    };
+    pixmap.draw_pixmap(
+        0,
+        0,
+        recolor(&icon, 0xFF).as_ref(),
+        &paint,
+        place(inset),
+        None,
+    );
+    pixmap.draw_pixmap(
+        0,
+        0,
+        recolor(&icon, 0x00).as_ref(),
+        &paint,
+        place(cell_w + inset),
+        None,
+    );
+
+    pixmap.encode_png().expect("preview png")
+}
+
+fn recolor(icon: &Raster, level: u8) -> Pixmap {
+    let mut pixmap = Pixmap::new(icon.width, icon.height).expect("recolor pixmap");
+    for (pixel, chunk) in pixmap
+        .pixels_mut()
+        .iter_mut()
+        .zip(icon.rgba.chunks_exact(4))
+    {
+        let alpha = chunk[3];
+        let value = ((u16::from(level) * u16::from(alpha)) / 255) as u8;
+        *pixel = PremultipliedColorU8::from_rgba(value, value, value, alpha)
+            .expect("valid premultiplied gray");
+    }
+    pixmap
+}
+
+fn fill_cell(pixmap: &mut Pixmap, x: f32, w: f32, h: f32, hex: &str) {
+    let bytes = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
+    let color = Color::from_rgba8((bytes >> 16) as u8, (bytes >> 8) as u8, bytes as u8, 0xFF);
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    if let Some(rect) = tiny_skia::Rect::from_xywh(x, 0.0, w, h) {
+        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
     }
 }
 
