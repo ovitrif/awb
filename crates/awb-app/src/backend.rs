@@ -498,11 +498,17 @@ fn connect_after_pairing(
                 .map(|service| service.address)
                 .collect();
 
-        if endpoints.is_empty()
-            && let Ok(found) =
-                dnssd::discover_connect_endpoints(pairing_endpoint, Duration::from_secs(2))
+        // ADB can surface only a stale connect candidate while macOS Bonjour
+        // sees the live endpoint, so always merge Bonjour results rather than
+        // falling back to them only when ADB returned nothing.
+        if let Ok(found) =
+            dnssd::discover_connect_endpoints(pairing_endpoint, Duration::from_secs(2))
         {
-            endpoints = found;
+            for endpoint in found {
+                if !endpoints.contains(&endpoint) {
+                    endpoints.push(endpoint);
+                }
+            }
         }
 
         // Retry every candidate each pass: a phone's endpoint can refuse the
