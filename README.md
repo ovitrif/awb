@@ -1,76 +1,90 @@
-# airadb
+# awb
 
-Interactive Android wireless debugging pairing for macOS.
+Android Wireless Bridge for macOS: pair, connect, and mirror Android phones over Wi-Fi
+without remembering a single `adb` command.
 
-`airadb` wraps the ADB wireless debugging flow so you do not have to remember the pairing and connect commands. It guides you through a progressive terminal flow with QR pairing, live waits, retry options, and manual fallbacks when Android exposes a stale endpoint. Once the phone is ready, it can launch `scrcpy`.
+awb wraps Android's wireless debugging flow behind a QR code. Scan it with your phone and
+awb handles mDNS discovery, `adb pair`, `adb connect`, and reconnects, then launches
+[scrcpy](https://github.com/Genymobile/scrcpy) screen mirroring if you want it. It ships as
+two small native binaries: the `awb` CLI and a menu bar app.
 
 ## Install
 
-Install the latest GitHub release:
-
 ```sh
-curl -fsSL https://github.com/ovitrif/airadb/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ovitrif/awb/releases/latest/download/install.sh | sh
 ```
 
-Pin a release or install somewhere else:
+Pin a release or choose the install directory:
 
 ```sh
-curl -fsSL https://github.com/ovitrif/airadb/releases/latest/download/install.sh | \
-  AIRADB_INSTALL_TAG=v0.1.15 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
+curl -fsSL https://github.com/ovitrif/awb/releases/latest/download/install.sh | \
+  AWB_INSTALL_TAG=v2.0.0 AWB_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
-Or build from source:
+Requirements: `adb` on your PATH (Android SDK platform-tools). `scrcpy` is optional and
+only needed for screen mirroring. The phone needs Android 11+ with developer options
+enabled, on the same Wi-Fi network as your Mac.
+
+## Menu bar app
 
 ```sh
-git clone https://github.com/ovitrif/airadb.git
-cd airadb
-cargo build --release
+awb app
 ```
 
-## Usage
+The awb icon appears in the menu bar. Left-click toggles the popover: connected devices
+with one-click mirroring, a Logs tab, scrcpy settings, and QR pairing for new phones.
+Right-click offers Show, Pair, Refresh, and Quit.
 
-After installing, run:
+macOS release archives also contain `AWB.app` for /Applications and login items; it is the
+same menu bar app in a bundle.
+
+## CLI
 
 ```sh
-airadb
+awb
 ```
 
-The installer also sets up `aw` as a short alias for `airadb`. Remember it as
-**android wifi**:
+Running `awb` with no arguments checks ADB, shows a QR code, and guides the phone from
+`Developer options -> Wireless debugging -> Pair device with QR code` to a connected
+device, with live waits, retries, and manual IP:port fallbacks when discovery misbehaves.
+Once connected it offers to start scrcpy.
+
+Useful commands and flags:
 
 ```sh
-aw
+awb status --json        # ADB, scrcpy, and device status for scripts and UIs
+awb reset-adb            # kill and restart the local ADB server
+awb completions zsh      # print zsh completions
+awb app                  # launch the menu bar app
+awb --connect-only       # pair and connect without the scrcpy menu
+awb --background         # start scrcpy detached and exit
+awb --foreground         # start scrcpy and wait until it exits
+awb --stable             # scrcpy + keepalive watch + reconnects + Wi-Fi diagnostics
+awb --watch --wifi-doctor
+awb --timeout 120        # wait longer than the 60-second default
+awb --device-serial SERIAL --background
+awb --window-title "Pixel 10 Pro" --window-width 480 --window-height 1071
+awb --plain-window --always-on-top
+awb --adb /path/to/adb --scrcpy /path/to/scrcpy
 ```
 
-Or from a source checkout:
+By default scrcpy launches borderless at 480x1071 with `--stay-awake` and no audio; pass
+`--plain-window` for scrcpy's regular decorated window. The menu bar app stores its scrcpy
+options in `~/.config/awb/config.toml`.
+
+## Build from source
 
 ```sh
-cargo run
+git clone https://github.com/ovitrif/awb.git
+cd awb
+cargo build --release            # target/release/awb and target/release/awb-app
+scripts/bundle-app.sh            # optional: wraps awb-app into target/bundle/AWB.app
 ```
 
-`airadb` expects `adb` to be installed and available on your `PATH`. If ADB stops responding, startup checks, the ADB mDNS probe, and device scans time out and airadb attempts one server restart instead of waiting forever. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu or with `--background` / `--foreground`. The default wait time for pairing and connection discovery is 60 seconds. By default, scrcpy launches with a borderless Pixel-style window title, a 480x1071 window, and `--stay-awake`; pass `--plain-window` to use scrcpy's regular decorated window.
+The workspace has three crates: `awb-core` (ADB, scrcpy, QR, and Bonjour logic), `awb`
+(the CLI), and `awb-app` (the menu bar app, built from the design in `DESIGN.pen`).
 
-On your Android phone:
+## License
 
-1. Go to Developer options -> Wireless debugging.
-2. Tap Pair device with QR code.
-3. Scan the QR code shown by `airadb`.
-
-Once ADB is connected, `airadb` shows options to start `scrcpy` and close the CLI, start `scrcpy` and wait until it exits, or close without launching anything. The first option auto-starts after 5 seconds unless you interact with the menu. Use `--background` or `--foreground` to skip that final menu. If a device is already connected through ADB, `airadb` skips pairing and offers the `scrcpy` options immediately unless a launch flag was provided.
-
-Useful options:
-
-```sh
-airadb --reset-adb
-airadb --timeout 120 # wait longer than the 60-second default
-airadb --background # start scrcpy without waiting for it
-airadb --foreground # start scrcpy and wait until it exits
-airadb --stable # start scrcpy, ADB keepalive, reconnects, stay-awake and Wi-Fi diagnostics
-airadb --watch --wifi-doctor # supervise wireless ADB and print Wi-Fi changes
-airadb --window-width 480 --window-height 1071
-airadb --plain-window --always-on-top --window-title "Pixel 10 Pro"
-airadb --adb /path/to/adb --scrcpy /path/to/scrcpy
-airadb install-shell # install the aw alias and zsh completions
-airadb completions zsh --name aw
-airadb --help
-```
+MIT. Bundled [Inter](https://rsms.me/inter/) font is licensed under the SIL OFL 1.1;
+icons are [Phosphor](https://phosphoricons.com/) (MIT).

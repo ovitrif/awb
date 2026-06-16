@@ -48,8 +48,7 @@ pub fn discover_connect_endpoints(pairing_address: &str, timeout: Duration) -> R
         }
     }
 
-    endpoints.sort_by_key(|endpoint| endpoint_host(endpoint) != pairing_host);
-    Ok(endpoints)
+    Ok(connect_endpoints_for_pairing_host(endpoints, &pairing_host))
 }
 
 fn browse_connect_instances(timeout: Duration) -> Result<Vec<String>> {
@@ -169,6 +168,13 @@ fn endpoint_host(endpoint: &str) -> String {
         .unwrap_or_else(|| endpoint.to_string())
 }
 
+fn connect_endpoints_for_pairing_host(endpoints: Vec<String>, pairing_host: &str) -> Vec<String> {
+    endpoints
+        .into_iter()
+        .filter(|endpoint| endpoint_host(endpoint) == pairing_host)
+        .collect()
+}
+
 fn is_ipv4_address(value: &str) -> bool {
     let mut parts = value.split('.');
 
@@ -223,5 +229,19 @@ DATE: ---Wed 06 May 2026---
 "#;
 
         assert_eq!(parse_ipv4_address(output).as_deref(), Some("192.168.68.54"));
+    }
+
+    #[test]
+    fn filters_connect_endpoints_to_pairing_host() {
+        assert_eq!(
+            connect_endpoints_for_pairing_host(
+                vec![
+                    "192.168.68.54:37197".to_string(),
+                    "192.168.68.99:37197".to_string(),
+                ],
+                "192.168.68.54",
+            ),
+            vec!["192.168.68.54:37197"]
+        );
     }
 }

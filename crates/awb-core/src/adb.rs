@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -56,8 +56,14 @@ pub struct AdbDevice {
 
 impl AdbDevice {
     pub fn display_name(&self) -> String {
-        match &self.model {
-            Some(model) => format!("{} {}", self.serial, model.replace('_', " ")),
+        let model = self.model.as_ref().map(|model| model.replace('_', " "));
+
+        if is_mdns_wireless_serial(&self.serial) {
+            return model.unwrap_or_else(|| "Wireless ADB device".to_string());
+        }
+
+        match model {
+            Some(model) => format!("{} {}", self.serial, model),
             None => self.serial.clone(),
         }
     }
@@ -104,6 +110,10 @@ impl Adb {
         Ok(Self {
             path: resolve_program("adb", override_path)?,
         })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn version(&self) -> Result<CommandResult> {
@@ -168,6 +178,19 @@ impl Adb {
         Ok(output)
     }
 
+    pub fn disconnect(&self, endpoint: &str) -> Result<CommandResult> {
+        let output = self.run_with_timeout(["disconnect", endpoint], ADB_PAIR_CONNECT_TIMEOUT)?;
+
+        if !output.status.success() {
+            bail!(
+                "adb disconnect failed: {}",
+                fallback_message(&output.combined_output())
+            );
+        }
+
+        Ok(output)
+    }
+
     pub fn reconnect_offline(&self) -> Result<CommandResult> {
         self.run(["reconnect", "offline"])
     }
@@ -226,13 +249,13 @@ impl Adb {
                 "shell",
                 "uiautomator",
                 "dump",
-                "/sdcard/airadb-window.xml",
+                "/sdcard/awb-window.xml",
             ])?,
         )?;
 
         let cat_output = ensure_success(
-            "adb exec-out cat /sdcard/airadb-window.xml",
-            self.run(["-s", serial, "exec-out", "cat", "/sdcard/airadb-window.xml"])?,
+            "adb exec-out cat /sdcard/awb-window.xml",
+            self.run(["-s", serial, "exec-out", "cat", "/sdcard/awb-window.xml"])?,
         )?;
 
         Ok(cat_output.combined_output())
@@ -311,10 +334,10 @@ fn timeout_hint(stderr: &str) -> String {
     let stderr = stderr.trim();
 
     if stderr.is_empty() {
-        ". Try `airadb --reset-adb` or `adb kill-server` if ADB is wedged.".to_string()
+        ". Try `awb --reset-adb` or `adb kill-server` if ADB is wedged.".to_string()
     } else {
         format!(
-            ": {}. Try `airadb --reset-adb` or `adb kill-server` if ADB is wedged.",
+            ": {}. Try `awb --reset-adb` or `adb kill-server` if ADB is wedged.",
             fallback_message(stderr)
         )
     }
@@ -354,17 +377,7 @@ pub fn connect_service_candidates(
         return same_host;
     }
 
-    let new_services: Vec<_> = connect_services
-        .iter()
-        .filter(|service| !baseline_services.contains(service))
-        .cloned()
-        .collect();
-
-    if !new_services.is_empty() {
-        return new_services;
-    }
-
-    connect_services
+    Vec::new()
 }
 
 pub fn matching_ready_device(
@@ -407,6 +420,67 @@ pub fn matching_ready_device(
     None
 }
 
+pub fn matching_ready_device_for_connect_service(
+    devices: &[AdbDevice],
+    service: &MdnsService,
+    baseline_serials: &HashSet<String>,
+) -> Option<AdbDevice> {
+    devices
+        .iter()
+        .filter(|device| device.state == DeviceState::Device)
+        .filter(|device| !baseline_serials.contains(&device.serial))
+        .find(|device| device_matches_connect_service(device, service))
+        .cloned()
+}
+
+pub fn dedupe_ready_devices(devices: Vec<AdbDevice>, services: &[MdnsService]) -> Vec<AdbDevice> {
+    let mut deduped = Vec::new();
+    let mut wireless_positions = HashMap::new();
+
+    for device in devices {
+        let Some(key) = wireless_transport_key(&device, services) else {
+            deduped.push(device);
+            continue;
+        };
+
+        if let Some(index) = wireless_positions.get(&key).copied() {
+            if preferred_wireless_alias(&device, &deduped[index]) {
+                deduped[index] = device;
+            }
+        } else {
+            wireless_positions.insert(key, deduped.len());
+            deduped.push(device);
+        }
+    }
+
+    deduped
+}
+
+pub fn duplicate_wireless_endpoint_aliases(
+    devices: &[AdbDevice],
+    services: &[MdnsService],
+) -> Vec<String> {
+    services
+        .iter()
+        .filter(|service| service.is_connect_service())
+        .filter_map(|service| {
+            let has_endpoint_alias = devices.iter().any(|device| {
+                device.state == DeviceState::Device && device.serial == service.address
+            });
+            let has_mdns_alias = devices.iter().any(|device| {
+                device.state == DeviceState::Device
+                    && serial_matches_connect_service(&device.serial, service)
+            });
+
+            if has_endpoint_alias && has_mdns_alias {
+                Some(service.address.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 pub fn connect_serial_from_output(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let line = line.trim();
@@ -416,6 +490,25 @@ pub fn connect_serial_from_output(output: &str) -> Option<String> {
 
         serial.split_whitespace().next().map(ToString::to_string)
     })
+}
+
+pub fn pairing_error_is_retryable(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+
+    [
+        "protocol fault",
+        "couldn't read status",
+        "could not read status",
+        "connection refused",
+        "connection reset",
+        "failed to connect",
+        "network is unreachable",
+        "no route to host",
+        "timed out",
+        "timeout",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 pub fn endpoint_host(endpoint: &str) -> String {
@@ -437,6 +530,61 @@ pub fn connect_services(services: &[MdnsService]) -> HashSet<MdnsService> {
         .filter(|service| service.is_connect_service())
         .cloned()
         .collect()
+}
+
+pub fn device_matches_connect_service(device: &AdbDevice, service: &MdnsService) -> bool {
+    device.serial == service.address || serial_matches_connect_service(&device.serial, service)
+}
+
+fn wireless_transport_key(device: &AdbDevice, services: &[MdnsService]) -> Option<String> {
+    if device.state != DeviceState::Device {
+        return None;
+    }
+
+    services
+        .iter()
+        .filter(|service| service.is_connect_service())
+        .find(|service| device_matches_connect_service(device, service))
+        .map(|service| service.address.clone())
+}
+
+pub fn serial_matches_connect_service(serial: &str, service: &MdnsService) -> bool {
+    let serial = normalize_mdns_serial(serial);
+    let service_serial = connect_service_serial(service);
+
+    serial == service_serial
+}
+
+pub fn connect_service_serial(service: &MdnsService) -> String {
+    format!(
+        "{}.{}",
+        service.instance.trim_end_matches('.'),
+        normalize_service_type(&service.service_type)
+    )
+}
+
+pub fn normalize_mdns_serial(serial: &str) -> String {
+    serial
+        .trim()
+        .trim_end_matches(".local")
+        .trim_end_matches('.')
+        .to_string()
+}
+
+pub fn is_mdns_wireless_serial(serial: &str) -> bool {
+    normalize_mdns_serial(serial).ends_with(CONNECT_SERVICE_TYPE)
+}
+
+fn preferred_wireless_alias(candidate: &AdbDevice, current: &AdbDevice) -> bool {
+    is_mdns_wireless_serial(&candidate.serial) && is_endpoint_serial(&current.serial)
+}
+
+fn is_endpoint_serial(serial: &str) -> bool {
+    let Some((_host, port)) = serial.rsplit_once(':') else {
+        return false;
+    };
+
+    port.parse::<u16>().is_ok()
 }
 
 pub fn error_is_timeout(error: &anyhow::Error) -> bool {
@@ -678,6 +826,19 @@ ignored _printer._tcp 192.168.1.10:1234
     }
 
     #[test]
+    fn classifies_transient_pairing_errors() {
+        assert!(pairing_error_is_retryable(
+            "adb pair failed: error: protocol fault (couldn't read status message): Undefined error: 0"
+        ));
+        assert!(pairing_error_is_retryable(
+            "adb pair failed: failed to connect to 192.168.68.54:37197"
+        ));
+        assert!(!pairing_error_is_retryable(
+            "adb pair failed: wrong password or connection was dropped"
+        ));
+    }
+
+    #[test]
     fn extracts_endpoint_host() {
         assert_eq!(endpoint_host("192.168.1.23:40233"), "192.168.1.23");
         assert_eq!(endpoint_host("[fe80::1]:40233"), "fe80::1");
@@ -712,6 +873,20 @@ ignored _printer._tcp 192.168.1.10:1234
     }
 
     #[test]
+    fn connect_candidates_do_not_fallback_to_other_hosts() {
+        let new_other_host = MdnsService {
+            instance: "adb-other".to_string(),
+            service_type: CONNECT_SERVICE_TYPE.to_string(),
+            address: "192.168.1.99:33333".to_string(),
+        };
+
+        let candidates =
+            connect_service_candidates(&[new_other_host], "192.168.1.23:37199", &HashSet::new());
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
     fn matching_ready_device_prefers_expected_serial_then_host() {
         let baseline = HashSet::from(["R5CT123ABC".to_string()]);
         let devices = parse_devices(
@@ -726,6 +901,77 @@ R5CT123ABC device product:foo model:Old_Device device:bar transport_id:1
             .expect("expected matching same-host wireless device");
 
         assert_eq!(matched.serial, "192.168.1.23:40233");
+    }
+
+    #[test]
+    fn matches_ready_mdns_device_for_connect_service() {
+        let service = MdnsService {
+            instance: "adb-5C020DLCH0007Q-tfPgZw".to_string(),
+            service_type: CONNECT_SERVICE_TYPE.to_string(),
+            address: "192.168.68.59:36375".to_string(),
+        };
+        let devices = parse_devices(
+            r#"
+List of devices attached
+adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp device product:foo model:Pixel_10_Pro device:bar
+"#,
+        );
+
+        let matched =
+            matching_ready_device_for_connect_service(&devices, &service, &HashSet::new())
+                .expect("expected mDNS ADB transport to match its service");
+
+        assert_eq!(
+            matched.serial,
+            "adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp"
+        );
+        assert_eq!(matched.display_name(), "Pixel 10 Pro");
+    }
+
+    #[test]
+    fn dedupes_ip_and_mdns_aliases_for_same_wireless_transport() {
+        let service = MdnsService {
+            instance: "adb-5C020DLCH0007Q-tfPgZw".to_string(),
+            service_type: CONNECT_SERVICE_TYPE.to_string(),
+            address: "192.168.68.59:36375".to_string(),
+        };
+        let devices = parse_devices(
+            r#"
+List of devices attached
+192.168.68.59:36375 device product:foo model:Pixel_10_Pro device:bar
+adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp device product:foo model:Pixel_10_Pro device:bar
+"#,
+        );
+
+        let deduped = dedupe_ready_devices(devices, &[service]);
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(
+            deduped[0].serial,
+            "adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp"
+        );
+        assert_eq!(deduped[0].display_name(), "Pixel 10 Pro");
+    }
+
+    #[test]
+    fn identifies_duplicate_endpoint_aliases_to_disconnect() {
+        let service = MdnsService {
+            instance: "adb-5C020DLCH0007Q-tfPgZw".to_string(),
+            service_type: CONNECT_SERVICE_TYPE.to_string(),
+            address: "192.168.68.59:36375".to_string(),
+        };
+        let devices = parse_devices(
+            r#"
+List of devices attached
+192.168.68.59:36375 device product:foo model:Pixel_10_Pro device:bar
+adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp device product:foo model:Pixel_10_Pro device:bar
+"#,
+        );
+
+        assert_eq!(
+            duplicate_wireless_endpoint_aliases(&devices, &[service]),
+            vec!["192.168.68.59:36375"]
+        );
     }
 
     #[test]

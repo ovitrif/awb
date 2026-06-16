@@ -1,36 +1,31 @@
-mod adb;
-mod command_path;
-mod dnssd;
-mod qr;
-mod scrcpy;
 mod ui;
 
 use std::collections::HashSet;
 use std::env;
-use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command as ProcessCommand, ExitCode};
+use std::path::PathBuf;
+use std::process::{Child, Command as ProcessCommand, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use adb::Adb;
 use anyhow::{Context, Result, bail};
+use awb_core::adb::{self, Adb};
+use awb_core::pairing_flow::{self, AlreadyConnectedChoice, PairingEvent, PairingFlowDelegate};
+use awb_core::scrcpy::{
+    DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, Scrcpy, ScrcpyOptions, ScrcpyRunMode,
+};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
-use qr::PairingQr;
-use scrcpy::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, Scrcpy, ScrcpyOptions, ScrcpyRunMode};
+use serde::Serialize;
 
-const BINARY_NAME: &str = "airadb";
-const ALIAS_NAME: &str = "aw";
-const ALIAS_MEMORY: &str = "aw = android wifi";
+const BINARY_NAME: &str = "awb";
+const APP_BINARY_NAME: &str = "awb-app";
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "airadb",
+    name = "awb",
     version,
-    about = "Interactive QR pairing for Android wireless debugging.",
-    after_help = "Tip: `aw` is the short alias for airadb: android wifi."
+    about = "awb (Android Wireless Bridge): interactive QR pairing for Android wireless debugging."
 )]
 struct Args {
     #[command(subcommand)]
@@ -55,6 +50,13 @@ struct Args {
 
     #[arg(long, help = "Kill and restart the local ADB server before pairing")]
     reset_adb: bool,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["background", "foreground", "stable"],
+        help = "Connect or pair a phone without starting scrcpy or showing the scrcpy menu"
+    )]
+    connect_only: bool,
 
     #[arg(
         long,
@@ -137,69 +139,47 @@ struct Args {
     )]
     keep_screen_awake: bool,
 
+    #[arg(
+        long,
+        value_name = "SERIAL",
+        help = "Use a specific connected ADB device serial instead of prompting"
+    )]
+    device_serial: Option<String>,
+
     #[arg(long, help = "Print Wi-Fi status after connecting and when it changes")]
     wifi_doctor: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
 enum CliCommand {
+    #[command(about = "Print local ADB, scrcpy, and connected device status")]
+    Status(StatusArgs),
+
+    #[command(about = "Kill and restart the local ADB server")]
+    ResetAdb,
+
     #[command(about = "Print shell completions")]
     Completions(CompletionArgs),
 
-    #[command(
-        about = "Install the aw alias and zsh completions",
-        after_help = "Remember: aw = android wifi."
-    )]
-    InstallShell(InstallShellArgs),
+    #[command(about = "Launch the awb menu bar app")]
+    App,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct StatusArgs {
+    #[arg(long, help = "Print status as JSON for desktop UI and automation")]
+    json: bool,
 }
 
 #[derive(Debug, Clone, clap::Args)]
 struct CompletionArgs {
     #[arg(value_enum, default_value_t = CompletionShell::Zsh)]
     shell: CompletionShell,
-
-    #[arg(long, value_enum, default_value_t = CompletionName::Airadb)]
-    name: CompletionName,
-}
-
-#[derive(Debug, Clone, clap::Args)]
-struct InstallShellArgs {
-    #[arg(
-        long,
-        value_name = "DIR",
-        help = "Directory where the aw alias should be installed"
-    )]
-    bin_dir: Option<PathBuf>,
-
-    #[arg(
-        long,
-        value_name = "DIR",
-        help = "Directory where zsh completion files should be installed"
-    )]
-    zsh_completion_dir: Option<PathBuf>,
-
-    #[arg(long, help = "Replace an existing aw file or symlink")]
-    force: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CompletionShell {
     Zsh,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum CompletionName {
-    Airadb,
-    Aw,
-}
-
-impl CompletionName {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Airadb => BINARY_NAME,
-            Self::Aw => ALIAS_NAME,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -212,11 +192,6 @@ enum StartupDeviceChoice {
     Connected(ConnectedPhone),
     PairNew,
     Close,
-}
-
-enum PairingWaitOutcome {
-    PairingEndpoint(String),
-    AlreadyConnected(ConnectedPhone),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +212,43 @@ impl ConnectedAction {
     fn starts_scrcpy(self) -> bool {
         matches!(self, Self::StartBackground | Self::StartForeground)
     }
+}
+
+#[derive(Debug, Serialize)]
+struct StatusSnapshot {
+    awb_version: &'static str,
+    adb: AdbStatus,
+    scrcpy: ToolStatus,
+    devices: Vec<DeviceStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdbStatus {
+    path: Option<String>,
+    available: bool,
+    version: Option<String>,
+    mdns_available: Option<bool>,
+    error: Option<String>,
+    mdns_error: Option<String>,
+    devices_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolStatus {
+    path: Option<String>,
+    available: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceStatus {
+    serial: String,
+    state: String,
+    display_name: String,
+    product: Option<String>,
+    model: Option<String>,
+    device: Option<String>,
+    transport_id: Option<String>,
 }
 
 impl Args {
@@ -299,12 +311,12 @@ fn run() -> Result<()> {
     let args = Args::parse();
 
     if let Some(command) = args.command.as_ref() {
-        return handle_cli_command(command);
+        return handle_cli_command(command, &args);
     }
 
     let timeout = Duration::from_secs(args.timeout);
 
-    ui::title("airadb", "Android wireless debugging companion");
+    ui::title("awb", "Android Wireless Bridge");
     ui::status("Checking ADB...");
     let adb = Adb::resolve(args.adb.clone())?;
 
@@ -318,10 +330,19 @@ fn run() -> Result<()> {
 
     ensure_adb_mdns_ready(&adb)?;
 
-    let phone = match startup_device_choice(&adb)? {
-        StartupDeviceChoice::Connected(phone) => phone,
-        StartupDeviceChoice::PairNew => retrying_pairing_flow(&adb, timeout)?,
-        StartupDeviceChoice::Close => return Ok(()),
+    let phone = if let Some(serial) = args.device_serial.as_deref() {
+        connected_phone_for_serial(&adb, serial)?
+    } else if args.connect_only {
+        match connect_only_phone(&adb, timeout)? {
+            Some(phone) => phone,
+            None => return Ok(()),
+        }
+    } else {
+        match startup_device_choice(&adb)? {
+            StartupDeviceChoice::Connected(phone) => phone,
+            StartupDeviceChoice::PairNew => retrying_pairing_flow(&adb, timeout)?,
+            StartupDeviceChoice::Close => return Ok(()),
+        }
     };
 
     ui::success(format!("Connected to {}", phone.display_name));
@@ -390,244 +411,227 @@ fn check_adb_mdns(adb: &Adb) -> Result<()> {
     }
 }
 
-fn handle_cli_command(command: &CliCommand) -> Result<()> {
+fn handle_cli_command(command: &CliCommand, args: &Args) -> Result<()> {
     match command {
+        CliCommand::Status(status_args) => print_status(args, status_args),
+        CliCommand::ResetAdb => {
+            let adb = Adb::resolve(args.adb.clone())?;
+            reset_adb_server(&adb)
+        }
         CliCommand::Completions(args) => print_completions(args),
-        CliCommand::InstallShell(args) => install_shell(args),
+        CliCommand::App => launch_app(),
     }
 }
 
-fn print_completions(args: &CompletionArgs) -> Result<()> {
-    let mut command = Args::command().bin_name(args.name.as_str());
-    let mut stdout = io::stdout();
+fn launch_app() -> Result<()> {
+    let app_path = env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(APP_BINARY_NAME)))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(APP_BINARY_NAME));
 
-    match args.shell {
-        CompletionShell::Zsh => {
-            clap_complete::generate(Shell::Zsh, &mut command, args.name.as_str(), &mut stdout);
-        }
-    }
-
-    Ok(())
-}
-
-fn install_shell(args: &InstallShellArgs) -> Result<()> {
-    let airadb_path = airadb_binary_path(args.bin_dir.as_deref())?;
-    let bin_dir = args
-        .bin_dir
-        .clone()
-        .or_else(|| airadb_path.parent().map(Path::to_path_buf))
-        .context("could not resolve the airadb binary directory")?;
-    fs::create_dir_all(&bin_dir)
-        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
-
-    let alias_path = bin_dir.join(ALIAS_NAME);
-    install_alias(&airadb_path, &alias_path, args.force)?;
-
-    let completion_dir = zsh_completion_dir(args.zsh_completion_dir.as_deref())?;
-    install_zsh_completion(CompletionName::Airadb, &completion_dir)?;
-    install_zsh_completion(CompletionName::Aw, &completion_dir)?;
+    let child = ProcessCommand::new(&app_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "could not launch {}. Install it next to awb or put it on PATH",
+                app_path.display()
+            )
+        })?;
 
     ui::success(format!(
-        "Installed `{ALIAS_NAME}` alias at {} ({ALIAS_MEMORY}).",
-        alias_path.display()
+        "Launched the awb menu bar app (pid {}).",
+        child.id()
     ));
-    ui::success(format!(
-        "Installed zsh completions in {}.",
-        completion_dir.display()
-    ));
-
-    if !zsh_fpath_contains(&completion_dir) {
-        ui::warn(format!(
-            "zsh may not load completions until this is in fpath: fpath=({} $fpath)",
-            shell_quote(&completion_dir)
-        ));
-    }
-
     Ok(())
 }
 
-fn airadb_binary_path(bin_dir: Option<&Path>) -> Result<PathBuf> {
-    if let Some(bin_dir) = bin_dir {
-        let installed_path = bin_dir.join(BINARY_NAME);
-        if installed_path.exists() {
-            return Ok(installed_path);
+fn print_status(args: &Args, status_args: &StatusArgs) -> Result<()> {
+    let snapshot = collect_status(args);
+
+    if status_args.json {
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        return Ok(());
+    }
+
+    ui::title("awb", "Local status");
+    print_tool_status(
+        "ADB",
+        &snapshot.adb.path,
+        snapshot.adb.available,
+        &snapshot.adb.error,
+    );
+
+    if let Some(mdns_available) = snapshot.adb.mdns_available {
+        if mdns_available {
+            ui::success("ADB mDNS is available.");
+        } else if let Some(error) = &snapshot.adb.mdns_error {
+            ui::warn(format!("ADB mDNS is unavailable: {error}"));
         }
     }
 
-    env::current_exe().context("could not resolve the current executable path")
-}
+    print_tool_status(
+        "scrcpy",
+        &snapshot.scrcpy.path,
+        snapshot.scrcpy.available,
+        &snapshot.scrcpy.error,
+    );
 
-fn install_alias(airadb_path: &Path, alias_path: &Path, force: bool) -> Result<()> {
-    if symlink_metadata(alias_path).is_some() {
-        if path_points_to(alias_path, airadb_path) {
-            return Ok(());
-        }
-
-        if !force {
-            bail!(
-                "{} already exists. Re-run with --force to replace it.",
-                alias_path.display()
-            );
-        }
-
-        remove_alias(alias_path)?;
-    }
-
-    create_alias_symlink(airadb_path, alias_path)
-        .with_context(|| format!("failed to create {}", alias_path.display()))
-}
-
-fn symlink_metadata(path: &Path) -> Option<fs::Metadata> {
-    fs::symlink_metadata(path).ok()
-}
-
-fn remove_alias(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
-
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        bail!("{} is a directory; refusing to replace it", path.display());
-    }
-
-    fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))
-}
-
-#[cfg(unix)]
-fn create_alias_symlink(airadb_path: &Path, alias_path: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(airadb_path, alias_path)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn create_alias_symlink(airadb_path: &Path, alias_path: &Path) -> Result<()> {
-    fs::copy(airadb_path, alias_path)?;
-    Ok(())
-}
-
-fn path_points_to(path: &Path, target: &Path) -> bool {
-    if let Ok(link_target) = fs::read_link(path) {
-        if link_target == target {
-            return true;
-        }
-
-        if let Some(parent) = path.parent() {
-            if parent.join(link_target) == target {
-                return true;
+    match snapshot.devices.as_slice() {
+        [] if snapshot.adb.devices_error.is_none() => ui::status("No connected ADB devices."),
+        [] => {}
+        devices => {
+            ui::status("Connected ADB devices:");
+            for device in devices {
+                println!("  {} ({})", device.display_name, device.state);
             }
         }
     }
 
-    match (fs::canonicalize(path), fs::canonicalize(target)) {
-        (Ok(path), Ok(target)) => path == target,
-        _ => false,
+    if let Some(error) = &snapshot.adb.devices_error {
+        ui::warn(format!("could not list devices: {error}"));
+    }
+
+    Ok(())
+}
+
+fn print_tool_status(name: &str, path: &Option<String>, available: bool, error: &Option<String>) {
+    match (available, path, error) {
+        (true, Some(path), _) => ui::success(format!("{name}: {path}")),
+        (true, None, _) => ui::success(format!("{name}: available")),
+        (false, _, Some(error)) => ui::warn(format!("{name}: {error}")),
+        (false, _, None) => ui::warn(format!("{name}: unavailable")),
     }
 }
 
-fn zsh_completion_dir(override_dir: Option<&Path>) -> Result<PathBuf> {
-    if let Some(dir) = override_dir {
-        fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
-        return Ok(dir.to_path_buf());
-    }
-
-    if let Some(dir) = writable_zsh_fpath_dir() {
-        return Ok(dir);
-    }
-
-    let dir = home_dir().join(".zfunc");
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    Ok(dir)
-}
-
-fn writable_zsh_fpath_dir() -> Option<PathBuf> {
-    zsh_fpath_dirs()
-        .into_iter()
-        .find(|path| is_writable_directory(path))
-}
-
-fn zsh_fpath_contains(dir: &Path) -> bool {
-    let canonical_dir = fs::canonicalize(dir).ok();
-
-    zsh_fpath_dirs().iter().any(|entry| {
-        if entry == dir {
-            return true;
-        }
-
-        match (&canonical_dir, fs::canonicalize(entry).ok()) {
-            (Some(dir), Some(entry)) => dir == &entry,
-            _ => false,
-        }
-    })
-}
-
-fn zsh_fpath_dirs() -> Vec<PathBuf> {
-    let Ok(output) = ProcessCommand::new("zsh")
-        .args(["-lc", "print -rC1 -- $fpath"])
-        .output()
-    else {
-        return Vec::new();
+fn collect_status(args: &Args) -> StatusSnapshot {
+    let mut adb_status = AdbStatus {
+        path: None,
+        available: false,
+        version: None,
+        mdns_available: None,
+        error: None,
+        mdns_error: None,
+        devices_error: None,
     };
+    let mut devices = Vec::new();
 
-    if !output.status.success() {
-        return Vec::new();
-    }
+    match Adb::resolve(args.adb.clone()) {
+        Ok(adb) => {
+            adb_status.path = Some(adb.path().display().to_string());
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(PathBuf::from)
-        .collect()
-}
+            match adb.version() {
+                Ok(output) => {
+                    adb_status.available = true;
+                    adb_status.version = first_non_empty_line(&output.combined_output());
+                }
+                Err(error) => adb_status.error = Some(format!("{error:#}")),
+            }
 
-fn is_writable_directory(path: &Path) -> bool {
-    if !path.is_dir() {
-        return false;
-    }
+            if adb_status.available {
+                let (mdns_available, mdns_error) = collect_adb_mdns_status(&adb);
+                adb_status.mdns_available = mdns_available;
+                adb_status.mdns_error = mdns_error;
 
-    let test_path = path.join(format!(".airadb-write-test-{}", std::process::id()));
-
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&test_path)
-    {
-        Ok(_) => {
-            let _ = fs::remove_file(test_path);
-            true
+                match adb.devices() {
+                    Ok(adb_devices) => {
+                        devices = adb_devices.into_iter().map(DeviceStatus::from).collect();
+                    }
+                    Err(error) => adb_status.devices_error = Some(format!("{error:#}")),
+                }
+            }
         }
-        Err(_) => false,
+        Err(error) => adb_status.error = Some(format!("{error:#}")),
+    }
+
+    StatusSnapshot {
+        awb_version: env!("CARGO_PKG_VERSION"),
+        adb: adb_status,
+        scrcpy: collect_scrcpy_status(args),
+        devices,
     }
 }
 
-fn install_zsh_completion(name: CompletionName, dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    let file = dir.join(format!("_{}", name.as_str()));
-    fs::write(&file, zsh_completion(name))
-        .with_context(|| format!("failed to write {}", file.display()))
+fn collect_adb_mdns_status(adb: &Adb) -> (Option<bool>, Option<String>) {
+    match adb.mdns_check() {
+        Ok(output) if output.status.success() => (Some(true), None),
+        Ok(output) => (
+            Some(false),
+            Some(fallback_status_message(&output.combined_output())),
+        ),
+        Err(error) => (Some(false), Some(format!("{error:#}"))),
+    }
 }
 
-fn zsh_completion(name: CompletionName) -> Vec<u8> {
-    let mut command = Args::command().bin_name(name.as_str());
-    let mut buffer = Vec::new();
-    clap_complete::generate(Shell::Zsh, &mut command, name.as_str(), &mut buffer);
-    buffer
+fn collect_scrcpy_status(args: &Args) -> ToolStatus {
+    match Scrcpy::resolve(args.scrcpy.clone(), args.no_scrcpy_check) {
+        Ok(scrcpy) => ToolStatus {
+            path: Some(scrcpy.path().display().to_string()),
+            available: true,
+            error: None,
+        },
+        Err(error) => ToolStatus {
+            path: None,
+            available: false,
+            error: Some(format!("{error:#}")),
+        },
+    }
 }
 
-fn home_dir() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+fn first_non_empty_line(value: &str) -> Option<String> {
+    value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
 }
 
-fn shell_quote(path: &Path) -> String {
-    let value = path.display().to_string();
+fn fallback_status_message(output: &str) -> String {
+    let output = output.trim();
 
-    if value.chars().all(|character| {
-        character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
-    }) {
-        return value;
+    if output.is_empty() {
+        "command exited without output".to_string()
+    } else {
+        output.to_string()
+    }
+}
+
+impl From<adb::AdbDevice> for DeviceStatus {
+    fn from(device: adb::AdbDevice) -> Self {
+        let state = match &device.state {
+            adb::DeviceState::Device => "device",
+            adb::DeviceState::Offline => "offline",
+            adb::DeviceState::Unauthorized => "unauthorized",
+            adb::DeviceState::Other(value) => value,
+        }
+        .to_string();
+
+        Self {
+            serial: device.serial.clone(),
+            state,
+            display_name: device.display_name(),
+            product: device.product,
+            model: device.model,
+            device: device.device,
+            transport_id: device.transport_id,
+        }
+    }
+}
+
+fn print_completions(args: &CompletionArgs) -> Result<()> {
+    let mut command = Args::command().bin_name(BINARY_NAME);
+    let mut stdout = io::stdout();
+
+    match args.shell {
+        CompletionShell::Zsh => {
+            clap_complete::generate(Shell::Zsh, &mut command, BINARY_NAME, &mut stdout);
+        }
     }
 
-    format!("'{}'", value.replace('\'', "'\\''"))
+    Ok(())
 }
 
 fn prepare_connected_phone(
@@ -681,6 +685,10 @@ fn should_request_stay_awake(args: &Args, action: ConnectedAction) -> bool {
 }
 
 fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
+    if args.connect_only {
+        return Ok(ConnectedAction::Close);
+    }
+
     match args.scrcpy_launch_mode() {
         ScrcpyLaunchMode::Background => return Ok(ConnectedAction::StartBackground),
         ScrcpyLaunchMode::Foreground => return Ok(ConnectedAction::StartForeground),
@@ -690,7 +698,7 @@ fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
     let background_label = if args.watch_enabled() {
         "Start scrcpy and keep watching ADB"
     } else {
-        "Start scrcpy and close airadb"
+        "Start scrcpy and close awb"
     };
 
     match ui::menu_with_default(
@@ -705,10 +713,31 @@ fn connected_phone_action(args: &Args) -> Result<ConnectedAction> {
     }
 }
 
+fn connect_only_phone(adb: &Adb, timeout: Duration) -> Result<Option<ConnectedPhone>> {
+    ui::status("Checking for already-connected phones...");
+    let ready_phones = wait_for_startup_connected_phones(adb, Duration::from_secs(2))?;
+
+    match ready_phones.len() {
+        0 => retrying_pairing_flow(adb, timeout).map(Some),
+        1 => {
+            let phone = ready_phones[0].clone();
+            ui::success(format!(
+                "ADB is already connected to {}.",
+                phone.display_name
+            ));
+            Ok(Some(phone))
+        }
+        count => {
+            ui::success(format!("ADB is already connected to {count} devices."));
+            Ok(None)
+        }
+    }
+}
+
 fn start_scrcpy_background(phone: &ConnectedPhone, args: &Args) -> Result<()> {
     let scrcpy = resolve_scrcpy(args)?;
     let pid = scrcpy.launch_background(&phone.serial, &args.scrcpy_options())?;
-    ui::success(format!("Started scrcpy (pid {pid}); airadb can close now."));
+    ui::success(format!("Started scrcpy (pid {pid}); awb can close now."));
     Ok(())
 }
 
@@ -727,7 +756,7 @@ fn watch_connected_phone(
         "Watch mode",
         [
             "Sending ADB keepalives to detect stale wireless transports.",
-            "When the device drops, airadb tries adb reconnect and mDNS endpoints.",
+            "When the device drops, awb tries adb reconnect and mDNS endpoints.",
             "Press either ⌃ + C, ESC, C or X to stop watching.",
         ],
     );
@@ -830,14 +859,14 @@ fn spawn_supervised_scrcpy(
 
 fn reconnect_watched_phone(adb: &Adb, current_serial: &str) -> Result<ConnectedPhone> {
     ui::status("Trying to reconnect wireless ADB...");
+    let baseline_devices = adb::ready_device_serials(&adb.devices().unwrap_or_default());
     let _ = adb.reconnect_offline();
 
-    if let Some(phone) = ready_phone_matching(adb, current_serial)? {
+    if let Some(phone) = ready_phone_matching(adb, current_serial, &baseline_devices)? {
         return Ok(phone);
     }
 
     let timeout = Duration::from_secs(10);
-    let baseline_devices = HashSet::new();
 
     if is_plausible_endpoint(current_serial) {
         if let Ok(device) = connect_to_endpoint(adb, current_serial, &baseline_devices, timeout) {
@@ -863,26 +892,100 @@ fn reconnect_watched_phone(adb: &Adb, current_serial: &str) -> Result<ConnectedP
     bail!("no reconnectable wireless debugging endpoint was found")
 }
 
-fn ready_phone_matching(adb: &Adb, expected_serial: &str) -> Result<Option<ConnectedPhone>> {
-    let baseline_devices = HashSet::new();
+fn ready_phone_matching(
+    adb: &Adb,
+    expected_serial: &str,
+    _baseline_devices: &HashSet<String>,
+) -> Result<Option<ConnectedPhone>> {
     let devices = adb.devices()?;
+    let services = adb.mdns_services().unwrap_or_default();
 
     Ok(
-        adb::matching_ready_device(&devices, expected_serial, &baseline_devices).map(|device| {
-            ConnectedPhone {
+        strict_ready_device_for_tracked_serial(&devices, expected_serial, &services).map(
+            |device| ConnectedPhone {
                 serial: device.serial.clone(),
                 display_name: device.display_name(),
-            }
-        }),
+            },
+        ),
     )
 }
 
+fn strict_ready_device_for_tracked_serial(
+    devices: &[adb::AdbDevice],
+    expected_serial: &str,
+    services: &[adb::MdnsService],
+) -> Option<adb::AdbDevice> {
+    let expected_host = adb::endpoint_host(expected_serial);
+
+    if let Some(device) = devices
+        .iter()
+        .filter(|device| device.state == adb::DeviceState::Device)
+        .find(|device| {
+            device.serial == expected_serial || adb::endpoint_host(&device.serial) == expected_host
+        })
+        .cloned()
+    {
+        return Some(device);
+    }
+
+    services
+        .iter()
+        .filter(|service| {
+            service.is_connect_service()
+                && (adb::serial_matches_connect_service(expected_serial, service)
+                    || adb::endpoint_host(&service.address) == expected_host)
+        })
+        .find_map(|service| {
+            adb::matching_ready_device_for_connect_service(devices, service, &HashSet::new())
+        })
+}
+
+fn connected_phone_for_serial(adb: &Adb, serial: &str) -> Result<ConnectedPhone> {
+    // Require the exact serial, not the fuzzy `matching_ready_device` fallback,
+    // which would otherwise select an unrelated sole ready device.
+    adb.devices()?
+        .into_iter()
+        .find(|device| device.serial == serial && device.state == adb::DeviceState::Device)
+        .map(|device| ConnectedPhone {
+            display_name: device.display_name(),
+            serial: device.serial,
+        })
+        .with_context(|| {
+            format!("ADB device {serial} is not connected or is not in the ready device state")
+        })
+}
+
 fn reconnect_endpoints(adb: &Adb, current_serial: &str) -> Vec<String> {
-    let host = adb::endpoint_host(current_serial);
     let services = adb.mdns_services().unwrap_or_default();
-    let connect_endpoints: Vec<String> = services
+    reconnect_endpoints_from_services(current_serial, &services)
+}
+
+fn reconnect_endpoints_from_services(
+    current_serial: &str,
+    services: &[adb::MdnsService],
+) -> Vec<String> {
+    let host = adb::endpoint_host(current_serial);
+    let connect_services: Vec<_> = services
         .iter()
         .filter(|service| service.is_connect_service())
+        .collect();
+
+    let matching_mdns_serial: Vec<String> = connect_services
+        .iter()
+        .filter(|service| adb::serial_matches_connect_service(current_serial, service))
+        .map(|service| service.address.clone())
+        .collect();
+
+    if !matching_mdns_serial.is_empty() {
+        return matching_mdns_serial;
+    }
+
+    if adb::is_mdns_wireless_serial(current_serial) {
+        return Vec::new();
+    }
+
+    let connect_endpoints: Vec<String> = connect_services
+        .iter()
         .map(|service| service.address.clone())
         .collect();
 
@@ -892,11 +995,7 @@ fn reconnect_endpoints(adb: &Adb, current_serial: &str) -> Vec<String> {
         .cloned()
         .collect();
 
-    if same_host.is_empty() {
-        connect_endpoints
-    } else {
-        same_host
-    }
+    same_host
 }
 
 fn report_wifi_status(adb: &Adb, serial: &str, last_status: &mut Option<String>) {
@@ -987,17 +1086,56 @@ fn wait_for_startup_connected_phones(adb: &Adb, timeout: Duration) -> Result<Vec
 }
 
 fn ready_connected_phones(adb: &Adb) -> Result<Vec<ConnectedPhone>> {
-    let phones = adb
-        .devices()?
+    let mut devices = adb.devices()?;
+    let services = if devices
+        .iter()
+        .any(|device| device.state == adb::DeviceState::Device)
+    {
+        adb.mdns_services().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    if disconnect_duplicate_wireless_aliases(adb, &devices, &services) {
+        devices = adb.devices().unwrap_or(devices);
+    }
+
+    Ok(connected_phones_from_devices(devices, &services))
+}
+
+fn connected_phones_from_devices(
+    devices: Vec<adb::AdbDevice>,
+    services: &[adb::MdnsService],
+) -> Vec<ConnectedPhone> {
+    adb::dedupe_ready_devices(devices, services)
         .into_iter()
         .filter(|device| device.state == adb::DeviceState::Device)
         .map(|device| ConnectedPhone {
             serial: device.serial.clone(),
             display_name: device.display_name(),
         })
-        .collect();
+        .collect()
+}
 
-    Ok(phones)
+fn disconnect_duplicate_wireless_aliases(
+    adb: &Adb,
+    devices: &[adb::AdbDevice],
+    services: &[adb::MdnsService],
+) -> bool {
+    let aliases = adb::duplicate_wireless_endpoint_aliases(devices, services);
+
+    for alias in &aliases {
+        ui::status(format!("Removing duplicate ADB transport {alias}..."));
+
+        match adb.disconnect(alias) {
+            Ok(_) => ui::success(format!("Removed duplicate ADB transport {alias}.")),
+            Err(error) => ui::warn(format!(
+                "could not remove duplicate ADB transport {alias}: {error:#}"
+            )),
+        }
+    }
+
+    !aliases.is_empty()
 }
 
 fn reset_adb_server(adb: &Adb) -> Result<()> {
@@ -1171,10 +1309,18 @@ fn wait_for_ready_device(
     loop {
         countdown.tick(remaining_until(deadline))?;
 
-        if let Some(device) = adb::matching_ready_device(
-            &adb.devices().unwrap_or_default(),
+        let mut devices = adb.devices().unwrap_or_default();
+        let services = adb.mdns_services().unwrap_or_default();
+
+        if disconnect_duplicate_wireless_aliases(adb, &devices, &services) {
+            devices = adb.devices().unwrap_or(devices);
+        }
+
+        if let Some(device) = matching_ready_device_from_snapshot(
+            &devices,
             expected_serial,
             baseline_devices,
+            &services,
         ) {
             countdown.finish();
             ui::success(format!("ADB device is ready: {}", device.display_name()));
@@ -1193,501 +1339,159 @@ fn wait_for_ready_device(
     }
 }
 
-fn pair_and_connect(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone> {
-    let baseline_services = adb::connect_services(&adb.mdns_services().unwrap_or_default());
-    let baseline_devices = adb::ready_device_serials(&adb.devices().unwrap_or_default());
-    let qr = PairingQr::generate();
-
-    ui::section(
-        "Pair with QR code",
-        [
-            "On your Android phone, go to Developer options -> Wireless debugging.",
-            "Tap \"Pair device with QR code\".",
-            "Scan the QR code below.",
-        ],
-    );
-    ui::print_qr(&qr.render_terminal()?);
-    ui::blank_line();
-    ui::status(ui::CANCEL_HINT);
-
-    let pairing_address = match wait_for_pairing_endpoint(adb, &qr.instance, timeout)? {
-        PairingWaitOutcome::PairingEndpoint(pairing_address) => pairing_address,
-        PairingWaitOutcome::AlreadyConnected(phone) => return Ok(phone),
-    };
-
-    ui::success("Phone found. Completing ADB pairing...");
-    adb.pair(&pairing_address, &qr.secret)?;
-
-    ui::status("Looking for the wireless debugging connection endpoint...");
-    let device = connect_and_wait_for_device(
-        adb,
-        &pairing_address,
-        &baseline_services,
-        &baseline_devices,
-        timeout,
-    )?;
-
-    Ok(ConnectedPhone {
-        serial: device.serial.clone(),
-        display_name: device.display_name(),
-    })
-}
-
-fn wait_for_pairing_endpoint(
-    adb: &Adb,
-    instance: &str,
-    timeout: Duration,
-) -> Result<PairingWaitOutcome> {
-    let deadline = Instant::now() + timeout;
-    let mut countdown = ui::Countdown::new("Waiting for QR scan");
-    let mut reported_direct_check = false;
-    let mut reported_device_check_error = false;
-    let mut reported_adb_error = false;
-    let mut reported_bonjour_error = false;
-    let mut offered_multiple_existing_devices = false;
-
-    loop {
-        countdown.tick(remaining_until(deadline))?;
-
-        match ready_connected_phones(adb) {
-            Ok(ready_phones) => {
-                if !ready_phones.is_empty() {
-                    countdown.finish();
-                }
-
-                if let Some(phone) = already_connected_phone_choice(
-                    ready_phones,
-                    &mut offered_multiple_existing_devices,
-                )? {
-                    countdown.finish();
-                    return Ok(PairingWaitOutcome::AlreadyConnected(phone));
-                }
-            }
-            Err(error) if !reported_device_check_error => {
-                countdown.finish();
-                ui::warn(format!("could not check existing ADB devices: {error:#}"));
-                reported_device_check_error = true;
-            }
-            Err(_) => {}
-        }
-
-        match adb.mdns_services() {
-            Ok(services) => {
-                if let Some(service) = services
-                    .into_iter()
-                    .find(|service| service.instance == instance && service.is_pairing_service())
-                {
-                    countdown.finish();
-                    return Ok(PairingWaitOutcome::PairingEndpoint(service.address));
-                }
-            }
-            Err(error) if !reported_adb_error => {
-                countdown.finish();
-                ui::warn(format!("adb mDNS lookup failed: {error:#}"));
-                reported_adb_error = true;
-            }
-            Err(_) => {}
-        }
-
-        if !reported_direct_check {
-            countdown.finish();
-            ui::status("Also checking macOS Bonjour directly for the QR pairing service...");
-            reported_direct_check = true;
-        }
-
-        match dnssd::discover_pairing_endpoint(instance, Duration::from_secs(2)) {
-            Ok(Some(endpoint)) => {
-                countdown.finish();
-                ui::success("Phone found through macOS Bonjour.");
-                return Ok(PairingWaitOutcome::PairingEndpoint(endpoint));
-            }
-            Ok(None) => {}
-            Err(error) if !reported_bonjour_error => {
-                countdown.finish();
-                ui::warn(format!("Bonjour pairing lookup failed: {error:#}"));
-                reported_bonjour_error = true;
-            }
-            Err(_) => {}
-        }
-
-        if Instant::now() >= deadline {
-            countdown.finish();
-            bail!(
-                "timed out waiting for the phone to advertise the QR pairing service `{instance}`"
-            );
-        }
-
-        if let Err(error) = ui::sleep_or_cancel(poll_delay(deadline, Duration::from_millis(500))) {
-            countdown.finish();
-            return Err(error);
-        }
-    }
-}
-
-fn already_connected_phone_choice(
-    ready_phones: Vec<ConnectedPhone>,
-    offered_multiple_existing_devices: &mut bool,
-) -> Result<Option<ConnectedPhone>> {
-    match ready_phones.len() {
-        0 => Ok(None),
-        1 => {
-            let phone = ready_phones[0].clone();
-            ui::success(format!(
-                "ADB already sees {}; skipping QR scan.",
-                phone.display_name
-            ));
-            Ok(Some(phone))
-        }
-        _ if *offered_multiple_existing_devices => Ok(None),
-        _ => {
-            ui::status("ADB already sees multiple ready devices.");
-
-            let mut options: Vec<String> = ready_phones
-                .iter()
-                .map(|phone| format!("Use {}", phone.display_name))
-                .collect();
-            options.push("Keep waiting for QR scan".to_string());
-
-            let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
-            let selected = ui::menu(&option_refs)?;
-            *offered_multiple_existing_devices = true;
-
-            if selected <= ready_phones.len() {
-                Ok(Some(ready_phones[selected - 1].clone()))
-            } else {
-                Ok(None)
-            }
-        }
-    }
-}
-
-fn connect_and_wait_for_device(
-    adb: &Adb,
-    pairing_address: &str,
-    baseline_services: &HashSet<adb::MdnsService>,
+fn matching_ready_device_from_snapshot(
+    devices: &[adb::AdbDevice],
+    expected_serial: &str,
     baseline_devices: &HashSet<String>,
-    timeout: Duration,
-) -> Result<adb::AdbDevice> {
-    let deadline = Instant::now() + timeout;
-    let mut countdown = ui::Countdown::new("Connection endpoint wait");
-    let mut expected_serial = pairing_address.to_string();
-    let mut announced_endpoints = HashSet::new();
-    let mut reported_waiting_for_endpoint = false;
-    let mut attempt = 0;
-    let mut last_candidate_summary = String::new();
-    let mut last_bonjour_check = None;
-    let mut reported_connect_mdns_error = false;
-
-    loop {
-        countdown.tick(remaining_until(deadline))?;
-
-        let ready_devices = adb.devices().unwrap_or_default();
-
-        if let Some(device) =
-            adb::matching_ready_device(&ready_devices, &expected_serial, baseline_devices)
-        {
-            countdown.finish();
-            ui::success(format!("ADB device is ready: {}", device.display_name()));
-            return Ok(device);
-        }
-
-        let ready_device_count = ready_devices
-            .iter()
-            .filter(|device| device.state == adb::DeviceState::Device)
-            .count();
-
-        if ready_device_count > 0 {
-            countdown.finish();
-            ui::status(format!(
-                "ADB sees {ready_device_count} ready device(s), but not the just-paired phone yet."
-            ));
-        }
-
-        let services = match adb.mdns_services() {
-            Ok(services) => services,
-            Err(error) => {
-                if !reported_connect_mdns_error {
-                    countdown.finish();
-                    ui::warn(format!("adb mDNS connect lookup failed: {error:#}"));
-                    reported_connect_mdns_error = true;
-                }
-
-                Vec::new()
-            }
-        };
-        let candidates =
-            adb::connect_service_candidates(&services, pairing_address, baseline_services);
-        let candidate_summary = endpoint_summary(&candidates);
-
-        if candidates.is_empty() && !reported_waiting_for_endpoint {
-            countdown.finish();
-            ui::status("Waiting for the phone to advertise its connection endpoint...");
-            ui::status(ui::CANCEL_HINT);
-            reported_waiting_for_endpoint = true;
-        } else if !candidates.is_empty() && candidate_summary != last_candidate_summary {
-            countdown.finish();
-            ui::status(format!(
-                "Connect endpoint candidate(s): {candidate_summary}"
-            ));
-            last_candidate_summary = candidate_summary;
-        }
-
-        if candidates.is_empty() && should_check_bonjour(last_bonjour_check) {
-            last_bonjour_check = Some(Instant::now());
-            countdown.finish();
-
-            if let Some(device) =
-                try_direct_bonjour_connect(adb, pairing_address, baseline_devices, None, timeout)?
-            {
-                return Ok(device);
-            }
-        }
-
-        for service in candidates {
-            if announced_endpoints.insert(service.address.clone()) {
-                countdown.finish();
-                ui::status(format!("Connecting to {}...", service.address));
-            }
-
-            attempt += 1;
-            countdown.finish();
-            ui::status(format!(
-                "Attempt {attempt}: adb connect {}",
-                service.address
-            ));
-
-            match adb.connect(&service.address) {
-                Ok(output) => {
-                    expected_serial = adb::connect_serial_from_output(&output.combined_output())
-                        .unwrap_or_else(|| service.address.clone());
-
-                    countdown.finish();
-                    ui::status("Verifying the device is ready...");
-
-                    if let Some(device) = adb::matching_ready_device(
-                        &adb.devices().unwrap_or_default(),
-                        &expected_serial,
-                        baseline_devices,
-                    ) {
-                        countdown.finish();
-                        return Ok(device);
-                    }
-                }
-                Err(error) => {
-                    countdown.finish();
-                    ui::warn(format!(
-                        "ADB mDNS endpoint {} failed: {error:#}",
-                        service.address
-                    ));
-
-                    if let Some(device) = try_direct_bonjour_connect(
-                        adb,
-                        pairing_address,
-                        baseline_devices,
-                        Some(&service.address),
-                        timeout,
-                    )? {
-                        return Ok(device);
-                    }
-
-                    if let Some(device) = try_ui_hierarchy_connect(adb, baseline_devices, timeout)?
-                    {
-                        return Ok(device);
-                    }
-
-                    ui::warn("Automatic discovery did not find a working endpoint.");
-                    return manual_connect_device(adb, baseline_devices, timeout);
-                }
-            }
-        }
-
-        if Instant::now() >= deadline {
-            countdown.finish();
-            if let Some(device) = try_ui_hierarchy_connect(adb, baseline_devices, timeout)? {
-                return Ok(device);
-            }
-
-            ui::warn(
-                "Automatic discovery timed out before finding a connectable wireless debugging endpoint.",
-            );
-            return manual_connect_device(adb, baseline_devices, timeout);
-        }
-
-        if let Err(error) = ui::sleep_or_cancel(poll_delay(deadline, Duration::from_secs(2))) {
-            countdown.finish();
-            return Err(error);
-        }
-    }
-}
-
-fn try_direct_bonjour_connect(
-    adb: &Adb,
-    pairing_address: &str,
-    baseline_devices: &HashSet<String>,
-    skipped_endpoint: Option<&str>,
-    timeout: Duration,
-) -> Result<Option<adb::AdbDevice>> {
-    ui::status("Checking macOS Bonjour directly for wireless debugging endpoints...");
-
-    let endpoints = match dnssd::discover_connect_endpoints(pairing_address, Duration::from_secs(6))
-    {
-        Ok(endpoints) => endpoints,
-        Err(error) => {
-            ui::warn(format!("Bonjour connect lookup failed: {error:#}"));
-            return Ok(None);
-        }
-    };
-
-    if endpoints.is_empty() {
-        ui::status("No Bonjour connect endpoints found outside ADB.");
-        return Ok(None);
+    services: &[adb::MdnsService],
+) -> Option<adb::AdbDevice> {
+    if let Some(device) = adb::matching_ready_device(devices, expected_serial, baseline_devices) {
+        return Some(device);
     }
 
-    ui::status(format!(
-        "Bonjour endpoint candidate(s): {}",
-        endpoints.join(", ")
-    ));
-
-    let verify_timeout = if timeout < Duration::from_secs(1) {
-        Duration::from_secs(1)
-    } else {
-        timeout.min(Duration::from_secs(8))
-    };
-
-    for endpoint in endpoints {
-        if skipped_endpoint == Some(endpoint.as_str()) {
-            ui::status(format!("Skipping {endpoint}; ADB already tried it."));
-            continue;
-        }
-
-        match connect_to_endpoint(adb, &endpoint, baseline_devices, verify_timeout) {
-            Ok(device) => return Ok(Some(device)),
-            Err(error) => ui::warn(format!("Bonjour endpoint {endpoint} failed: {error:#}")),
-        }
-    }
-
-    Ok(None)
-}
-
-fn try_ui_hierarchy_connect(
-    adb: &Adb,
-    baseline_devices: &HashSet<String>,
-    timeout: Duration,
-) -> Result<Option<adb::AdbDevice>> {
-    let ready_devices: Vec<_> = adb
-        .devices()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|device| device.state == adb::DeviceState::Device)
-        .collect();
-
-    if ready_devices.is_empty() {
-        ui::status("No existing ADB transport is available for screen parsing.");
-        return Ok(None);
-    }
-
-    ui::status("Trying to read the visible phone screen through ADB...");
-    let mut seen_endpoints = HashSet::new();
-    let verify_timeout = if timeout < Duration::from_secs(1) {
-        Duration::from_secs(1)
-    } else {
-        timeout.min(Duration::from_secs(8))
-    };
-
-    for device in ready_devices {
-        ui::status(format!(
-            "Reading UI hierarchy from {}...",
-            device.display_name()
-        ));
-
-        let hierarchy = match adb.dump_ui_hierarchy(&device.serial) {
-            Ok(hierarchy) => hierarchy,
-            Err(error) => {
-                ui::warn(format!(
-                    "Could not read UI hierarchy from {}: {error:#}",
-                    device.display_name()
-                ));
-                continue;
-            }
-        };
-
-        let endpoints = extract_ipv4_endpoints(&hierarchy);
-
-        if endpoints.is_empty() {
-            ui::status(format!(
-                "No IP:port text found on {}.",
-                device.display_name()
-            ));
-            continue;
-        }
-
-        ui::status(format!(
-            "Screen endpoint candidate(s): {}",
-            endpoints.join(", ")
-        ));
-
-        for endpoint in endpoints {
-            if !seen_endpoints.insert(endpoint.clone()) {
-                continue;
-            }
-
-            match connect_to_endpoint(adb, &endpoint, baseline_devices, verify_timeout) {
-                Ok(device) => return Ok(Some(device)),
-                Err(error) => ui::warn(format!("Screen endpoint {endpoint} failed: {error:#}")),
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-fn should_check_bonjour(last_check: Option<Instant>) -> bool {
-    match last_check {
-        Some(last_check) => last_check.elapsed() >= Duration::from_secs(10),
-        None => true,
-    }
-}
-
-fn extract_ipv4_endpoints(input: &str) -> Vec<String> {
-    let mut endpoints = Vec::new();
-
-    for token in input.split(|character: char| {
-        !(character.is_ascii_digit() || character == '.' || character == ':')
-    }) {
-        let token = token.trim_matches('.');
-
-        if is_ipv4_endpoint(token) && !endpoints.iter().any(|endpoint| endpoint == token) {
-            endpoints.push(token.to_string());
-        }
-    }
-
-    endpoints
-}
-
-fn is_ipv4_endpoint(endpoint: &str) -> bool {
-    let Some((host, port)) = endpoint.rsplit_once(':') else {
-        return false;
-    };
-
-    if !matches!(port.parse::<u16>(), Ok(port) if port > 0) {
-        return false;
-    }
-
-    let mut host_parts = host.split('.');
-
-    host_parts.clone().count() == 4 && host_parts.all(|part| part.parse::<u8>().is_ok())
-}
-
-fn endpoint_summary(services: &[adb::MdnsService]) -> String {
-    if services.is_empty() {
-        return "none".to_string();
-    }
+    let expected_host = adb::endpoint_host(expected_serial);
 
     services
         .iter()
-        .map(|service| service.address.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+        .filter(|service| {
+            service.is_connect_service() && adb::endpoint_host(&service.address) == expected_host
+        })
+        .find_map(|service| {
+            adb::matching_ready_device_for_connect_service(devices, service, baseline_devices)
+        })
+}
+
+fn pair_and_connect(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone> {
+    let mut delegate = CliPairingDelegate::default();
+    let phone = pairing_flow::pair_and_connect(adb, timeout, &mut delegate)?;
+    delegate.finish_countdown();
+
+    Ok(ConnectedPhone {
+        serial: phone.serial,
+        display_name: phone.display_name,
+    })
+}
+
+#[derive(Default)]
+struct CliPairingDelegate {
+    countdown: Option<(String, ui::Countdown)>,
+    offered_multiple_existing_devices: bool,
+}
+
+impl CliPairingDelegate {
+    fn finish_countdown(&mut self) {
+        if let Some((_label, countdown)) = &mut self.countdown {
+            countdown.finish();
+        }
+        self.countdown = None;
+    }
+
+    fn tick_countdown(&mut self, label: &str, deadline: Instant) -> Result<()> {
+        let recreate = self
+            .countdown
+            .as_ref()
+            .is_none_or(|(current_label, _)| current_label != label);
+
+        if recreate {
+            self.finish_countdown();
+            self.countdown = Some((label.to_string(), ui::Countdown::new(label)));
+        }
+
+        if let Some((_label, countdown)) = &mut self.countdown {
+            countdown.tick(remaining_until(deadline))?;
+        }
+
+        Ok(())
+    }
+}
+
+impl PairingFlowDelegate for CliPairingDelegate {
+    fn on_event(&mut self, event: PairingEvent) -> Result<()> {
+        match event {
+            PairingEvent::Section { title, lines } => {
+                self.finish_countdown();
+                ui::section(title, lines);
+            }
+            PairingEvent::QrReady(qr) => {
+                self.finish_countdown();
+                ui::print_qr(&qr.render_terminal()?);
+                ui::blank_line();
+                ui::status(ui::CANCEL_HINT);
+            }
+            PairingEvent::Progress(progress) => {
+                if let Some(deadline) = progress.deadline {
+                    self.tick_countdown(&progress.title, deadline)?;
+                } else {
+                    self.finish_countdown();
+                    ui::status(progress.title);
+                    if !progress.detail.is_empty() {
+                        ui::status(progress.detail);
+                    }
+                }
+            }
+            PairingEvent::Status(message) => {
+                self.finish_countdown();
+                ui::status(message);
+            }
+            PairingEvent::Success(message) => {
+                self.finish_countdown();
+                ui::success(message);
+            }
+            PairingEvent::Warning(message) => {
+                self.finish_countdown();
+                ui::warn(message);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn sleep(&mut self, duration: Duration) -> Result<()> {
+        ui::sleep_or_cancel(duration)
+    }
+
+    fn choose_already_connected(
+        &mut self,
+        phones: &[pairing_flow::ConnectedPhone],
+    ) -> Result<AlreadyConnectedChoice> {
+        match phones.len() {
+            0 => Ok(AlreadyConnectedChoice::KeepWaiting),
+            1 => Ok(AlreadyConnectedChoice::Use(0)),
+            _ if self.offered_multiple_existing_devices => Ok(AlreadyConnectedChoice::KeepWaiting),
+            _ => {
+                self.finish_countdown();
+                ui::status("ADB already sees multiple ready devices.");
+
+                let mut options: Vec<String> = phones
+                    .iter()
+                    .map(|phone| format!("Use {}", phone.display_name))
+                    .collect();
+                options.push("Keep waiting for QR scan".to_string());
+
+                let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
+                let selected = ui::menu(&option_refs)?;
+                self.offered_multiple_existing_devices = true;
+
+                if selected <= phones.len() {
+                    Ok(AlreadyConnectedChoice::Use(selected - 1))
+                } else {
+                    Ok(AlreadyConnectedChoice::KeepWaiting)
+                }
+            }
+        }
+    }
+
+    fn manual_connect_endpoint(&mut self) -> Result<Option<String>> {
+        self.finish_countdown();
+        ui::section(
+            "Manual connection",
+            [
+                "On your Android phone, go back to the main Wireless debugging screen.",
+                "Copy the value shown as \"IP address & Port\".",
+            ],
+        );
+        prompt_endpoint("Enter phone IP:port").map(Some)
+    }
 }
 
 fn remaining_until(deadline: Instant) -> Duration {
@@ -1704,16 +1508,16 @@ mod tests {
 
     #[test]
     fn parses_scrcpy_launch_flags() {
-        let default_args = Args::try_parse_from(["airadb"]).unwrap();
+        let default_args = Args::try_parse_from(["awb"]).unwrap();
         assert_eq!(default_args.scrcpy_launch_mode(), ScrcpyLaunchMode::Menu);
 
-        let background_args = Args::try_parse_from(["airadb", "--background"]).unwrap();
+        let background_args = Args::try_parse_from(["awb", "--background"]).unwrap();
         assert_eq!(
             background_args.scrcpy_launch_mode(),
             ScrcpyLaunchMode::Background
         );
 
-        let foreground_args = Args::try_parse_from(["airadb", "--foreground"]).unwrap();
+        let foreground_args = Args::try_parse_from(["awb", "--foreground"]).unwrap();
         assert_eq!(
             foreground_args.scrcpy_launch_mode(),
             ScrcpyLaunchMode::Foreground
@@ -1722,7 +1526,7 @@ mod tests {
 
     #[test]
     fn stable_mode_enables_supervision_defaults() {
-        let args = Args::try_parse_from(["airadb", "--stable"]).unwrap();
+        let args = Args::try_parse_from(["awb", "--stable"]).unwrap();
 
         assert_eq!(args.scrcpy_launch_mode(), ScrcpyLaunchMode::Background);
         assert!(args.watch_enabled());
@@ -1731,8 +1535,107 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_endpoints_match_tracked_mdns_serial() {
+        let services = [
+            mdns_connect_service("adb-pixel-one", "192.168.68.59:36375"),
+            mdns_connect_service("adb-pixel-two", "192.168.68.99:40222"),
+        ];
+
+        assert_eq!(
+            reconnect_endpoints_from_services("adb-pixel-one._adb-tls-connect._tcp", &services),
+            vec!["192.168.68.59:36375"]
+        );
+    }
+
+    #[test]
+    fn reconnect_endpoints_do_not_fallback_for_unknown_mdns_serial() {
+        let services = [
+            mdns_connect_service("adb-pixel-one", "192.168.68.59:36375"),
+            mdns_connect_service("adb-pixel-two", "192.168.68.99:40222"),
+        ];
+
+        assert_eq!(
+            reconnect_endpoints_from_services("adb-missing._adb-tls-connect._tcp", &services),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn reconnect_endpoints_still_match_ip_serial_by_host() {
+        let services = [
+            mdns_connect_service("adb-pixel-one", "192.168.68.59:36375"),
+            mdns_connect_service("adb-pixel-two", "192.168.68.99:40222"),
+        ];
+
+        assert_eq!(
+            reconnect_endpoints_from_services("192.168.68.59:40123", &services),
+            vec!["192.168.68.59:36375"]
+        );
+    }
+
+    #[test]
+    fn reconnect_endpoints_do_not_fallback_for_ip_serial_without_same_host() {
+        let services = [
+            mdns_connect_service("adb-pixel-one", "192.168.68.59:36375"),
+            mdns_connect_service("adb-pixel-two", "192.168.68.99:40222"),
+        ];
+
+        assert_eq!(
+            reconnect_endpoints_from_services("192.168.68.42:40123", &services),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn strict_watch_match_rejects_unrelated_sole_new_device() {
+        let devices = [adb_device("R5CT123ABC")];
+
+        assert!(
+            strict_ready_device_for_tracked_serial(&devices, "192.168.68.59:36375", &[]).is_none()
+        );
+    }
+
+    #[test]
+    fn strict_watch_match_accepts_same_host_wireless_device() {
+        let devices = [adb_device("192.168.68.59:40123")];
+
+        let matched = strict_ready_device_for_tracked_serial(&devices, "192.168.68.59:36375", &[])
+            .expect("same-host wireless serial should match tracked endpoint");
+
+        assert_eq!(matched.serial, "192.168.68.59:40123");
+    }
+
+    #[test]
+    fn strict_watch_match_accepts_tracked_mdns_alias() {
+        let service = mdns_connect_service("adb-pixel-one", "192.168.68.59:36375");
+        let devices = [adb_device("adb-pixel-one._adb-tls-connect._tcp")];
+
+        let matched = strict_ready_device_for_tracked_serial(
+            &devices,
+            "adb-pixel-one._adb-tls-connect._tcp",
+            &[service],
+        )
+        .expect("matching mDNS serial should match tracked endpoint");
+
+        assert_eq!(matched.serial, "adb-pixel-one._adb-tls-connect._tcp");
+    }
+
+    #[test]
+    fn connect_only_closes_without_scrcpy_menu() {
+        let args = Args::try_parse_from(["awb", "--connect-only"]).unwrap();
+
+        assert_eq!(args.scrcpy_launch_mode(), ScrcpyLaunchMode::Menu);
+        assert_eq!(
+            connected_phone_action(&args).unwrap(),
+            ConnectedAction::Close
+        );
+        assert!(Args::try_parse_from(["awb", "--connect-only", "--background"]).is_err());
+        assert!(Args::try_parse_from(["awb", "--connect-only", "--stable"]).is_err());
+    }
+
+    #[test]
     fn scrcpy_actions_request_stay_awake_by_default() {
-        let args = Args::try_parse_from(["airadb"]).unwrap();
+        let args = Args::try_parse_from(["awb"]).unwrap();
 
         assert!(should_request_stay_awake(
             &args,
@@ -1745,9 +1648,28 @@ mod tests {
         assert!(!should_request_stay_awake(&args, ConnectedAction::Close));
     }
 
+    fn mdns_connect_service(instance: &str, address: &str) -> adb::MdnsService {
+        adb::MdnsService {
+            instance: instance.to_string(),
+            service_type: "_adb-tls-connect._tcp".to_string(),
+            address: address.to_string(),
+        }
+    }
+
+    fn adb_device(serial: &str) -> adb::AdbDevice {
+        adb::AdbDevice {
+            serial: serial.to_string(),
+            state: adb::DeviceState::Device,
+            product: None,
+            model: Some("Pixel_10_Pro".to_string()),
+            device: None,
+            transport_id: None,
+        }
+    }
+
     #[test]
     fn explicit_keep_screen_awake_applies_without_scrcpy() {
-        let args = Args::try_parse_from(["airadb", "--keep-screen-awake"]).unwrap();
+        let args = Args::try_parse_from(["awb", "--keep-screen-awake"]).unwrap();
 
         assert!(should_request_stay_awake(&args, ConnectedAction::Close));
     }
@@ -1755,7 +1677,7 @@ mod tests {
     #[test]
     fn normalizes_keepalive_settings() {
         let args = Args::try_parse_from([
-            "airadb",
+            "awb",
             "--watch",
             "--keepalive-interval",
             "0",
@@ -1770,11 +1692,11 @@ mod tests {
 
     #[test]
     fn builds_scrcpy_options_from_args() {
-        let default_args = Args::try_parse_from(["airadb"]).unwrap();
+        let default_args = Args::try_parse_from(["awb"]).unwrap();
         assert_eq!(default_args.scrcpy_options(), ScrcpyOptions::default());
 
         let custom_args = Args::try_parse_from([
-            "airadb",
+            "awb",
             "--plain-window",
             "--always-on-top",
             "--window-title",
@@ -1800,36 +1722,35 @@ mod tests {
     }
 
     #[test]
-    fn rejects_conflicting_scrcpy_launch_flags() {
-        assert!(Args::try_parse_from(["airadb", "--background", "--foreground"]).is_err());
+    fn parses_explicit_device_serial() {
+        let args =
+            Args::try_parse_from(["awb", "--device-serial", "R5CT123ABC", "--background"]).unwrap();
+
+        assert_eq!(args.device_serial.as_deref(), Some("R5CT123ABC"));
+        assert_eq!(args.scrcpy_launch_mode(), ScrcpyLaunchMode::Background);
     }
 
     #[test]
-    fn parses_shell_integration_commands() {
-        let args = Args::try_parse_from(["airadb", "completions", "zsh", "--name", "aw"]).unwrap();
+    fn rejects_conflicting_scrcpy_launch_flags() {
+        assert!(Args::try_parse_from(["awb", "--background", "--foreground"]).is_err());
+    }
+
+    #[test]
+    fn parses_completions_command() {
+        let args = Args::try_parse_from(["awb", "completions", "zsh"]).unwrap();
 
         match args.command {
             Some(CliCommand::Completions(args)) => {
                 assert_eq!(args.shell, CompletionShell::Zsh);
-                assert_eq!(args.name, CompletionName::Aw);
             }
             _ => panic!("expected completions command"),
-        }
-
-        let args = Args::try_parse_from(["airadb", "install-shell", "--force"]).unwrap();
-
-        match args.command {
-            Some(CliCommand::InstallShell(args)) => assert!(args.force),
-            _ => panic!("expected install-shell command"),
         }
     }
 
     #[test]
-    fn generates_zsh_completion_for_aw_alias() {
-        let completion = String::from_utf8(zsh_completion(CompletionName::Aw)).unwrap();
-
-        assert!(completion.contains("#compdef aw"));
-        assert!(completion.contains("install-shell"));
+    fn parses_app_command() {
+        let args = Args::try_parse_from(["awb", "app"]).unwrap();
+        assert!(matches!(args.command, Some(CliCommand::App)));
     }
 
     #[test]
@@ -1840,29 +1761,5 @@ mod tests {
         assert!(!is_plausible_endpoint("192.168.68.54:notaport"));
         assert!(!is_plausible_endpoint("192.168.68.54:70000"));
         assert!(!is_plausible_endpoint("192.168.68.54:42209 extra"));
-    }
-
-    #[test]
-    fn extracts_ip_ports_from_ui_hierarchy_text() {
-        let hierarchy = r#"
-<node text="IP address &amp; Port" />
-<node text="192.168.68.54:37197" />
-<node bounds="[0,123][456,789]" />
-<node text="192.168.68.54:37197." />
-"#;
-
-        assert_eq!(
-            extract_ipv4_endpoints(hierarchy),
-            vec!["192.168.68.54:37197"]
-        );
-    }
-
-    #[test]
-    fn validates_strict_ipv4_endpoint_shape() {
-        assert!(is_ipv4_endpoint("192.168.68.54:37197"));
-        assert!(!is_ipv4_endpoint("localhost:5555"));
-        assert!(!is_ipv4_endpoint("192.168.68.54:0"));
-        assert!(!is_ipv4_endpoint("999.168.68.54:37197"));
-        assert!(!is_ipv4_endpoint("192.168.68.54:notaport"));
     }
 }

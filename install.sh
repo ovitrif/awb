@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-REPO="${AIRADB_INSTALL_REPO:-ovitrif/airadb}"
-BINARY="airadb"
-GITHUB_URL="${AIRADB_INSTALL_GITHUB_URL:-https://github.com}"
+REPO="${AWB_INSTALL_REPO:-ovitrif/awb}"
+BINARY="awb"
+GITHUB_URL="${AWB_INSTALL_GITHUB_URL:-https://github.com}"
 
 main() {
   os="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -60,27 +60,28 @@ main() {
 
   tar xzf "$archive"
   dir="${BINARY}-${tag}-${target}"
-  install -m 755 "${dir}/${BINARY}" "${install_dir}/${BINARY}"
 
-  echo "Installed to ${install_dir}/${BINARY}"
-  if "${install_dir}/${BINARY}" install-shell --bin-dir "$install_dir"; then
-    echo "Installed 'aw' alias (android wifi) and zsh completions when available."
-    echo "Run 'aw' to get started."
-  else
-    echo "Shell integration skipped. Run '${BINARY} install-shell --force' to retry." >&2
-    echo "Run '${BINARY}' to get started."
+  install -m 755 "${dir}/${BINARY}" "${install_dir}/${BINARY}"
+  echo "Installed ${install_dir}/${BINARY}"
+
+  if [ -f "${dir}/awb-app" ]; then
+    install -m 755 "${dir}/awb-app" "${install_dir}/awb-app"
+    echo "Installed ${install_dir}/awb-app (run 'awb app' for the menu bar app)"
   fi
+
+  echo "Run '${BINARY}' to get started."
+  echo "Optional zsh completions: ${BINARY} completions zsh > ~/.zfunc/_awb"
 }
 
 resolve_install_dir() {
-  if [ -n "${AIRADB_INSTALL_DIR:-}" ]; then
-    mkdir -p "$AIRADB_INSTALL_DIR" 2>/dev/null || true
-    if [ -w "$AIRADB_INSTALL_DIR" ]; then
-      printf '%s\n' "$AIRADB_INSTALL_DIR"
+  if [ -n "${AWB_INSTALL_DIR:-}" ]; then
+    mkdir -p "$AWB_INSTALL_DIR" 2>/dev/null || true
+    if [ -w "$AWB_INSTALL_DIR" ]; then
+      printf '%s\n' "$AWB_INSTALL_DIR"
       return
     fi
 
-    echo "AIRADB_INSTALL_DIR is not writable: ${AIRADB_INSTALL_DIR}" >&2
+    echo "AWB_INSTALL_DIR is not writable: ${AWB_INSTALL_DIR}" >&2
     exit 1
   fi
 
@@ -90,7 +91,7 @@ resolve_install_dir() {
     printf '%s\n' "$HOME/.local/bin"
   else
     echo "Cannot find writable install directory." >&2
-    echo "Run with sudo, set AIRADB_INSTALL_DIR, or create ~/.local/bin" >&2
+    echo "Run with sudo, set AWB_INSTALL_DIR, or create ~/.local/bin" >&2
     exit 1
   fi
 }
@@ -98,8 +99,8 @@ resolve_install_dir() {
 resolve_tag() {
   latest_url="$1"
 
-  if [ -n "${AIRADB_INSTALL_TAG:-}" ]; then
-    printf '%s\n' "$AIRADB_INSTALL_TAG"
+  if [ -n "${AWB_INSTALL_TAG:-}" ]; then
+    printf '%s\n' "$AWB_INSTALL_TAG"
     return
   fi
 

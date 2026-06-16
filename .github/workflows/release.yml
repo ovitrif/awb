@@ -34,7 +34,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: "1.92"
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
@@ -51,22 +51,29 @@ jobs:
         if: matrix.build_kind == 'zig'
         run: cargo install --locked cargo-zigbuild
 
-      - name: Build (zig)
+      - name: Build CLI (zig)
         if: matrix.build_kind == 'zig'
-        run: cargo zigbuild --release --target ${{ matrix.target }}
+        run: cargo zigbuild --release -p awb --target ${{ matrix.target }}
 
-      - name: Build (native)
+      - name: Build CLI and menu bar app (native)
         if: matrix.build_kind == 'native'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release -p awb -p awb-app --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME}"
           target="${{ matrix.target }}"
-          staging="airadb-${tag}-${target}"
+          staging="awb-${tag}-${target}"
           mkdir "$staging"
-          cp "target/${target}/release/airadb" "$staging/"
+          cp "target/${target}/release/awb" "$staging/"
+          if [[ "$target" == *apple-darwin ]]; then
+            # Render icons with a host-arch build so the cross-compiled target
+            # binary is never executed on this (arm64) runner.
+            cargo build --release -p awb-app
+            cp "target/${target}/release/awb-app" "$staging/"
+            scripts/bundle-app.sh "target/${target}/release/awb-app" "$staging" "target/release/awb-app"
+          fi
           tar czf "${staging}.tar.gz" "$staging"
           echo "ARCHIVE=${staging}.tar.gz" >> "$GITHUB_ENV"
 

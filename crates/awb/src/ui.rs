@@ -715,8 +715,8 @@ mod tests {
         });
 
         assert_eq!(
-            option_with_auto_default_suffix("Start scrcpy and close airadb", 0, &auto_default),
-            "Start scrcpy and close airadb..."
+            option_with_auto_default_suffix("Start scrcpy and close awb", 0, &auto_default),
+            "Start scrcpy and close awb..."
         );
         assert_eq!(
             option_with_auto_default_suffix("Start scrcpy and wait", 1, &auto_default),

@@ -1,0 +1,22 @@
+[package]
+name = "awb"
+description = "Interactive Android wireless debugging pairing for macOS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "awb"
+path = "src/main.rs"
+
+[dependencies]
+awb-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+crossterm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
