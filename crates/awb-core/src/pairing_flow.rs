@@ -443,7 +443,7 @@ where
             ready_devices = adb.devices().unwrap_or(ready_devices);
         }
 
-        if let Some(device) = matching_ready_device_from_snapshot(
+        if let Some(device) = matching_ready_device_before_connect(
             &ready_devices,
             &expected_serial,
             baseline_devices,
@@ -863,6 +863,36 @@ fn matching_ready_device_from_snapshot(
         })
 }
 
+fn matching_ready_device_before_connect(
+    devices: &[adb::AdbDevice],
+    expected_serial: &str,
+    baseline_devices: &HashSet<String>,
+    services: &[adb::MdnsService],
+) -> Option<adb::AdbDevice> {
+    let expected_host = adb::endpoint_host(expected_serial);
+
+    if let Some(device) = devices
+        .iter()
+        .filter(|device| device.state == adb::DeviceState::Device)
+        .filter(|device| !baseline_devices.contains(&device.serial))
+        .find(|device| {
+            device.serial == expected_serial || adb::endpoint_host(&device.serial) == expected_host
+        })
+        .cloned()
+    {
+        return Some(device);
+    }
+
+    services
+        .iter()
+        .filter(|service| {
+            service.is_connect_service() && adb::endpoint_host(&service.address) == expected_host
+        })
+        .find_map(|service| {
+            adb::matching_ready_device_for_connect_service(devices, service, baseline_devices)
+        })
+}
+
 fn connected_phones_from_devices(
     devices: Vec<adb::AdbDevice>,
     services: &[adb::MdnsService],
@@ -1049,6 +1079,58 @@ mod tests {
         assert!(!pairing_error_needs_adb_reset("connection refused"));
     }
 
+    #[test]
+    fn pre_connect_match_rejects_unrelated_sole_new_device() {
+        let devices = vec![adb_device("R5CT123ABC")];
+        let baseline_devices = HashSet::new();
+
+        assert!(
+            matching_ready_device_before_connect(
+                &devices,
+                "192.168.68.54:40367",
+                &baseline_devices,
+                &[]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn pre_connect_match_accepts_same_host_new_device() {
+        let devices = vec![adb_device("192.168.68.54:37197")];
+        let baseline_devices = HashSet::new();
+
+        let matched = matching_ready_device_before_connect(
+            &devices,
+            "192.168.68.54:40367",
+            &baseline_devices,
+            &[],
+        )
+        .expect("same-host wireless device should match before connect");
+
+        assert_eq!(matched.serial, "192.168.68.54:37197");
+    }
+
+    #[test]
+    fn pre_connect_match_accepts_mdns_connect_service_alias() {
+        let service = mdns_connect_service("adb-R5CT123ABC-Vn71rT", "192.168.68.54:37197");
+        let devices = vec![adb_device("adb-R5CT123ABC-Vn71rT._adb-tls-connect._tcp")];
+        let baseline_devices = HashSet::new();
+
+        let matched = matching_ready_device_before_connect(
+            &devices,
+            "192.168.68.54:40367",
+            &baseline_devices,
+            &[service],
+        )
+        .expect("mDNS alias on the pairing host should match before connect");
+
+        assert_eq!(
+            matched.serial,
+            "adb-R5CT123ABC-Vn71rT._adb-tls-connect._tcp"
+        );
+    }
+
     fn adb_device(serial: &str) -> adb::AdbDevice {
         adb::AdbDevice {
             serial: serial.to_string(),
@@ -1057,6 +1139,14 @@ mod tests {
             model: Some("Pixel_10_Pro".to_string()),
             device: None,
             transport_id: None,
+        }
+    }
+
+    fn mdns_connect_service(instance: &str, address: &str) -> adb::MdnsService {
+        adb::MdnsService {
+            instance: instance.to_string(),
+            service_type: "_adb-tls-connect._tcp".to_string(),
+            address: address.to_string(),
         }
     }
 }
