@@ -87,11 +87,13 @@ fn parse_wifi_device(output: &str) -> Option<String> {
             continue;
         }
 
-        if saw_wifi_port
-            && let Some(device) = line.strip_prefix("Device: ")
-            && !device.trim().is_empty()
-        {
-            return Some(device.trim().to_string());
+        if saw_wifi_port {
+            if let Some(device) = line.strip_prefix("Device: ") {
+                let device = device.trim();
+                if !device.is_empty() {
+                    return Some(device.to_string());
+                }
+            }
         }
     }
 
