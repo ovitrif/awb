@@ -570,13 +570,9 @@ impl PairingFlowDelegate for AppPairingDelegate<'_> {
 
     fn choose_already_connected(
         &mut self,
-        phones: &[pairing_flow::ConnectedPhone],
+        _phones: &[pairing_flow::ConnectedPhone],
     ) -> anyhow::Result<AlreadyConnectedChoice> {
-        if phones.len() == 1 {
-            Ok(AlreadyConnectedChoice::Use(0))
-        } else {
-            Ok(AlreadyConnectedChoice::KeepWaiting)
-        }
+        Ok(AlreadyConnectedChoice::KeepWaiting)
     }
 
     fn manual_connect_endpoint(&mut self) -> anyhow::Result<Option<String>> {

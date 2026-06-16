@@ -964,11 +964,7 @@ fn reconnect_endpoints_from_services(
         .cloned()
         .collect();
 
-    if same_host.is_empty() {
-        connect_endpoints
-    } else {
-        same_host
-    }
+    same_host
 }
 
 fn report_wifi_status(adb: &Adb, serial: &str, last_status: &mut Option<String>) {
@@ -1543,6 +1539,19 @@ mod tests {
         assert_eq!(
             reconnect_endpoints_from_services("192.168.68.59:40123", &services),
             vec!["192.168.68.59:36375"]
+        );
+    }
+
+    #[test]
+    fn reconnect_endpoints_do_not_fallback_for_ip_serial_without_same_host() {
+        let services = [
+            mdns_connect_service("adb-pixel-one", "192.168.68.59:36375"),
+            mdns_connect_service("adb-pixel-two", "192.168.68.99:40222"),
+        ];
+
+        assert_eq!(
+            reconnect_endpoints_from_services("192.168.68.42:40123", &services),
+            Vec::<String>::new()
         );
     }
 
