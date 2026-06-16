@@ -26,6 +26,7 @@ const STARTUP_HIDE: Duration = Duration::from_millis(800);
 static STATUS_EVENTS: Mutex<Vec<MenuBarIconEvent>> = Mutex::new(Vec::new());
 static MENU_EVENTS: Mutex<Vec<MenuEvent>> = Mutex::new(Vec::new());
 
+const POPOVER_GAP: f64 = 6.5;
 const WINDOW_MARGIN: f64 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,6 +35,42 @@ struct DisplayBounds {
     max_x: f64,
     min_y: f64,
     max_y: f64,
+    scale: f64,
+}
+
+impl DisplayBounds {
+    fn contains(&self, x: f64, y: f64) -> bool {
+        (self.min_x..=self.max_x).contains(&x) && (self.min_y..=self.max_y).contains(&y)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MenuAnchor {
+    rect_x: f64,
+    rect_y: f64,
+    rect_width: f64,
+    rect_height: f64,
+    click_x: f64,
+    click_y: f64,
+}
+
+impl MenuAnchor {
+    fn new(rect: menu_icon::Rect, click_x: f64, click_y: f64) -> Self {
+        Self {
+            rect_x: rect.position.x,
+            rect_y: rect.position.y,
+            rect_width: f64::from(rect.size.width),
+            rect_height: f64::from(rect.size.height),
+            click_x,
+            click_y,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LogicalMenuAnchor {
+    x: f64,
+    bottom_y: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,30 +198,15 @@ impl App {
         })
     }
 
-    fn show(&mut self, ctx: &Context, anchor: Option<menu_icon::Rect>) {
-        if let Some(rect) = anchor {
-            let scale = ctx
-                .input(|i| i.viewport().native_pixels_per_point)
-                .unwrap_or(2.0) as f64;
-            let bottom = rect.position.y + f64::from(rect.size.height);
-            // the status-item rect is in physical pixels; a logical menu bar bottom
-            // would sit under ~50 even on 1x displays.
-            let divisor = if bottom > 50.0 { scale } else { 1.0 };
-            let center_x = (rect.position.x + f64::from(rect.size.width) / 2.0) / divisor;
-            // Leave ~8px between the icon and the beak tip (the tip sits a
-            // touch below the window top).
-            let y = bottom / divisor + 6.5;
-            let x = clamped_window_x(
-                center_x - f64::from(theme::WINDOW_WIDTH) / 2.0,
-                center_x,
-                y,
-                f64::from(theme::WINDOW_WIDTH),
-                ctx.input(|i| {
-                    i.viewport()
-                        .monitor_size
-                        .map(|monitor| f64::from(monitor.x))
-                }),
-            );
+    fn show(&mut self, ctx: &Context, anchor: Option<MenuAnchor>) {
+        if let Some(anchor) = anchor {
+            let fallback_monitor_width = ctx.input(|i| {
+                i.viewport()
+                    .monitor_size
+                    .map(|monitor| f64::from(monitor.x))
+            });
+            let displays = active_display_bounds();
+            let (x, y) = popover_position(anchor, fallback_monitor_width, &displays);
 
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition([x as f32, y as f32].into()));
             // Reveal on the next frame so the move lands first; a freshly
@@ -211,7 +233,7 @@ impl App {
         self.show_item.set_text("Show awb");
     }
 
-    fn toggle(&mut self, ctx: &Context, anchor: Option<menu_icon::Rect>) {
+    fn toggle(&mut self, ctx: &Context, anchor: Option<MenuAnchor>) {
         if self.visible {
             self.hide(ctx);
         } else if self
@@ -262,10 +284,11 @@ impl App {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 rect,
+                position,
                 ..
             } = event
             {
-                self.toggle(ctx, Some(rect));
+                self.toggle(ctx, Some(MenuAnchor::new(rect, position.x, position.y)));
             }
         }
     }
@@ -330,23 +353,97 @@ impl App {
     }
 }
 
-fn clamped_window_x(
-    desired_x: f64,
-    anchor_x: f64,
-    anchor_y: f64,
-    window_width: f64,
+fn popover_position(
+    anchor: MenuAnchor,
     fallback_monitor_width: Option<f64>,
-) -> f64 {
-    let displays = active_display_bounds();
-    clamp_window_x_to_displays(
-        desired_x,
-        anchor_x,
-        anchor_y,
-        window_width,
+    displays: &[DisplayBounds],
+) -> (f64, f64) {
+    let anchor = logical_menu_anchor(anchor, displays);
+    let y = anchor.bottom_y + POPOVER_GAP;
+    let x = clamp_window_x_to_displays(
+        anchor.x - f64::from(theme::WINDOW_WIDTH) / 2.0,
+        anchor.x,
+        y,
+        f64::from(theme::WINDOW_WIDTH),
         WINDOW_MARGIN,
         fallback_monitor_width,
-        &displays,
-    )
+        displays,
+    );
+
+    (x, y)
+}
+
+fn logical_menu_anchor(anchor: MenuAnchor, displays: &[DisplayBounds]) -> LogicalMenuAnchor {
+    let display = display_for_physical_menu_anchor(anchor, displays);
+    let scale = display
+        .map(|display| display.scale)
+        .unwrap_or_else(|| inferred_status_scale(anchor.rect_height));
+
+    let click_x = anchor.click_x / scale;
+    let click_y = anchor.click_y / scale;
+    let rect_center_x = (anchor.rect_x + anchor.rect_width / 2.0) / scale;
+    let rect_bottom_y = (anchor.rect_y + anchor.rect_height) / scale;
+    let icon_height = (anchor.rect_height / scale).clamp(16.0, 36.0);
+
+    let rect_matches_click_display = display
+        .map(|display| {
+            display.contains(rect_center_x, rect_bottom_y)
+                && (rect_center_x - click_x).abs() <= 96.0
+        })
+        .unwrap_or(false);
+    let bottom_y = if rect_matches_click_display {
+        rect_bottom_y
+    } else {
+        click_y + icon_height / 2.0
+    };
+
+    LogicalMenuAnchor {
+        x: click_x,
+        bottom_y,
+    }
+}
+
+fn display_for_physical_menu_anchor(
+    anchor: MenuAnchor,
+    displays: &[DisplayBounds],
+) -> Option<DisplayBounds> {
+    displays
+        .iter()
+        .copied()
+        .filter(|display| {
+            let x = anchor.click_x / display.scale;
+            let y = anchor.click_y / display.scale;
+            display.contains(x, y)
+        })
+        .min_by(|left, right| {
+            score_display_for_menu_anchor(anchor, *left)
+                .total_cmp(&score_display_for_menu_anchor(anchor, *right))
+        })
+}
+
+fn score_display_for_menu_anchor(anchor: MenuAnchor, display: DisplayBounds) -> f64 {
+    let icon_height = anchor.rect_height / display.scale;
+    let height_score = if (16.0..=36.0).contains(&icon_height) {
+        (icon_height - 22.0).abs()
+    } else if icon_height < 16.0 {
+        100.0 + (16.0 - icon_height)
+    } else {
+        100.0 + (icon_height - 36.0)
+    };
+
+    let rect_center_x = (anchor.rect_x + anchor.rect_width / 2.0) / display.scale;
+    let rect_bottom_y = (anchor.rect_y + anchor.rect_height) / display.scale;
+    let rect_score = if display.contains(rect_center_x, rect_bottom_y) {
+        0.0
+    } else {
+        8.0
+    };
+
+    height_score + rect_score
+}
+
+fn inferred_status_scale(rect_height: f64) -> f64 {
+    if rect_height >= 36.0 { 2.0 } else { 1.0 }
 }
 
 fn clamp_window_x_to_displays(
@@ -406,6 +503,7 @@ fn fallback_display_bounds(
         max_x: min_x + width,
         min_y: f64::NEG_INFINITY,
         max_y: f64::INFINITY,
+        scale: 1.0,
     })
 }
 
@@ -420,11 +518,20 @@ fn active_display_bounds() -> Vec<DisplayBounds> {
     display_ids
         .into_iter()
         .filter_map(|id| {
-            let bounds = CGDisplay::new(id).bounds();
+            let display = CGDisplay::new(id);
+            let bounds = display.bounds();
             let min_x = bounds.origin.x;
             let min_y = bounds.origin.y;
             let max_x = min_x + bounds.size.width;
             let max_y = min_y + bounds.size.height;
+            let scale = display
+                .display_mode()
+                .and_then(|mode| {
+                    let width = mode.width();
+                    (width > 0).then_some(mode.pixel_width() as f64 / width as f64)
+                })
+                .filter(|scale| scale.is_finite() && *scale > 0.0)
+                .unwrap_or(1.0);
 
             if max_x <= min_x || max_y <= min_y {
                 None
@@ -434,6 +541,7 @@ fn active_display_bounds() -> Vec<DisplayBounds> {
                     max_x,
                     min_y,
                     max_y,
+                    scale,
                 })
             }
         })
@@ -1202,6 +1310,7 @@ mod tests {
             max_x: 1512.0,
             min_y: 0.0,
             max_y: 982.0,
+            scale: 2.0,
         }];
 
         let x = clamp_window_x_to_displays(1290.0, 1480.0, 24.0, WIDTH, MARGIN, None, &displays);
@@ -1217,18 +1326,86 @@ mod tests {
                 max_x: 1512.0,
                 min_y: 0.0,
                 max_y: 982.0,
+                scale: 2.0,
             },
             DisplayBounds {
                 min_x: 1512.0,
                 max_x: 3024.0,
                 min_y: 0.0,
                 max_y: 982.0,
+                scale: 2.0,
             },
         ];
 
         let x = clamp_window_x_to_displays(2010.0, 2200.0, 24.0, WIDTH, MARGIN, None, &displays);
 
         assert_eq!(x, 2010.0);
+    }
+
+    #[test]
+    fn anchors_to_clicked_display_when_status_rect_is_stale() {
+        let displays = [
+            DisplayBounds {
+                min_x: 0.0,
+                max_x: 1728.0,
+                min_y: 0.0,
+                max_y: 1117.0,
+                scale: 2.0,
+            },
+            DisplayBounds {
+                min_x: -567.0,
+                max_x: 2313.0,
+                min_y: -1620.0,
+                max_y: 0.0,
+                scale: 2.0,
+            },
+        ];
+        let anchor = MenuAnchor {
+            rect_x: 1640.0 * 2.0,
+            rect_y: 0.0,
+            rect_width: 32.0 * 2.0,
+            rect_height: 22.0 * 2.0,
+            click_x: -420.0 * 2.0,
+            click_y: -1610.0 * 2.0,
+        };
+
+        let (x, y) = popover_position(anchor, None, &displays);
+
+        assert_eq!(x, -559.0);
+        assert_eq!(y, -1592.5);
+    }
+
+    #[test]
+    fn prefers_status_icon_scale_for_overlapping_physical_coordinates() {
+        let displays = [
+            DisplayBounds {
+                min_x: 0.0,
+                max_x: 1512.0,
+                min_y: 0.0,
+                max_y: 982.0,
+                scale: 2.0,
+            },
+            DisplayBounds {
+                min_x: 1512.0,
+                max_x: 3024.0,
+                min_y: 0.0,
+                max_y: 982.0,
+                scale: 1.0,
+            },
+        ];
+        let anchor = MenuAnchor {
+            rect_x: 2184.0,
+            rect_y: 0.0,
+            rect_width: 32.0,
+            rect_height: 22.0,
+            click_x: 2200.0,
+            click_y: 12.0,
+        };
+
+        let logical = logical_menu_anchor(anchor, &displays);
+
+        assert_eq!(logical.x, 2200.0);
+        assert_eq!(logical.bottom_y, 22.0);
     }
 
     #[test]
