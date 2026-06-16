@@ -321,10 +321,9 @@ impl App {
 
         let (snapshot, mirroring) = {
             let state = self.shared.lock().unwrap();
-            (
-                state.snapshot.clone(),
-                state.mirrors.keys().cloned().collect::<HashSet<String>>(),
-            )
+            let mut mirroring = state.mirrors.keys().cloned().collect::<HashSet<String>>();
+            mirroring.extend(state.starting_mirrors.iter().cloned());
+            (state.snapshot.clone(), mirroring)
         };
         let Some(snapshot) = snapshot else { return };
         if !snapshot.scrcpy.available {
@@ -332,15 +331,19 @@ impl App {
         }
 
         // Forget devices that have disconnected so a later reconnect re-mirrors.
-        let present: HashSet<&str> = snapshot.devices.iter().map(|d| d.serial.as_str()).collect();
+        let present: HashSet<&str> = snapshot
+            .devices
+            .iter()
+            .map(|d| d.mirror_key.as_str())
+            .collect();
         self.auto_mirrored
             .retain(|serial| present.contains(serial.as_str()));
 
         for device in &snapshot.devices {
             if device.ready
                 && !device.is_emulator
-                && !mirroring.contains(&device.serial)
-                && self.auto_mirrored.insert(device.serial.clone())
+                && !mirroring.contains(&device.mirror_key)
+                && self.auto_mirrored.insert(device.mirror_key.clone())
             {
                 backend::start_mirror(
                     self.shared.clone(),
@@ -700,10 +703,9 @@ impl App {
     fn devices_tab(&mut self, ui: &mut Ui, ctx: &Context) {
         let (snapshot, mirrors): (Option<Snapshot>, Vec<String>) = {
             let state = self.shared.lock().unwrap();
-            (
-                state.snapshot.clone(),
-                state.mirrors.keys().cloned().collect(),
-            )
+            let mut mirrors = state.mirrors.keys().cloned().collect::<Vec<_>>();
+            mirrors.extend(state.starting_mirrors.iter().cloned());
+            (state.snapshot.clone(), mirrors)
         };
 
         let Some(snapshot) = snapshot else {
@@ -742,7 +744,7 @@ impl App {
                 divider(ui);
             }
 
-            let mirroring = mirrors.contains(&device.serial);
+            let mirroring = mirrors.contains(&device.mirror_key);
             let action = if mirroring {
                 RowAction::enabled(ph::STOP, theme::GREEN)
             } else if device.ready && scrcpy_ok {
@@ -758,7 +760,7 @@ impl App {
 
             if list_row(ui, ph::DEVICE_MOBILE, &device.name, &detail, Some(action)).clicked() {
                 if mirroring {
-                    backend::stop_mirror(&self.shared, &device.serial);
+                    backend::stop_mirror(&self.shared, &device.mirror_key);
                 } else {
                     backend::start_mirror(
                         self.shared.clone(),

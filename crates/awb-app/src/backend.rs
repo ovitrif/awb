@@ -1,7 +1,7 @@
 //! Background workers: status polling, QR pairing, and scrcpy mirrors.
 //! All state lives in `Shared` behind a mutex; workers repaint the UI on change.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +28,7 @@ pub struct ToolInfo {
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
     pub serial: String,
+    pub mirror_key: String,
     pub name: String,
     pub ready: bool,
     pub state: String,
@@ -60,6 +61,7 @@ pub struct Shared {
     pub logs: Vec<String>,
     pub pairing: Option<PairingSession>,
     pub mirrors: HashMap<String, Child>,
+    pub starting_mirrors: HashSet<String>,
 }
 
 impl Shared {
@@ -183,6 +185,7 @@ fn collect_snapshot() -> Snapshot {
                 adb::dedupe_ready_devices(devices, &services)
                     .into_iter()
                     .map(|device| DeviceInfo {
+                        mirror_key: mirror_key_for_device(&device, &services),
                         ready: device.state == adb::DeviceState::Device,
                         state: state_label(&device.state).to_string(),
                         is_emulator: is_emulator(&device),
@@ -222,19 +225,35 @@ fn state_label(state: &adb::DeviceState) -> &str {
     }
 }
 
+fn mirror_key_for_device(device: &adb::AdbDevice, services: &[adb::MdnsService]) -> String {
+    if let Some(service) = services
+        .iter()
+        .filter(|service| service.is_connect_service())
+        .find(|service| adb::device_matches_connect_service(device, service))
+    {
+        return adb::connect_service_serial(service);
+    }
+
+    if adb::is_mdns_wireless_serial(&device.serial) {
+        return adb::normalize_mdns_serial(&device.serial);
+    }
+
+    device.serial.clone()
+}
+
 impl Shared {
     pub fn reap_finished_mirrors(&mut self) {
         let mut finished = Vec::new();
 
-        for (serial, child) in self.mirrors.iter_mut() {
+        for (mirror_key, child) in self.mirrors.iter_mut() {
             if let Ok(Some(_)) = child.try_wait() {
-                finished.push(serial.clone());
+                finished.push(mirror_key.clone());
             }
         }
 
-        for serial in finished {
-            self.mirrors.remove(&serial);
-            self.log(format!("Mirror of {serial} ended"));
+        for mirror_key in finished {
+            self.mirrors.remove(&mirror_key);
+            self.log(format!("Mirror of {mirror_key} ended"));
         }
     }
 }
@@ -245,6 +264,19 @@ pub fn start_mirror(
     device: DeviceInfo,
     options: awb_core::scrcpy::ScrcpyOptions,
 ) {
+    let mirror_key = device.mirror_key.clone();
+    {
+        let mut state = shared.lock().unwrap();
+        if state.mirrors.contains_key(&mirror_key)
+            || !state.starting_mirrors.insert(mirror_key.clone())
+        {
+            state.log(format!("Already mirroring {}", device.name));
+            drop(state);
+            ctx.request_repaint();
+            return;
+        }
+    }
+
     thread::spawn(move || {
         let result = Scrcpy::resolve(None, false).and_then(|scrcpy| {
             let mut command = std::process::Command::new(scrcpy.path());
@@ -259,8 +291,14 @@ pub fn start_mirror(
         });
 
         let mut state = shared.lock().unwrap();
+        let start_still_wanted = state.starting_mirrors.remove(&mirror_key);
         match result {
-            Ok(mut child) if state.mirrors.contains_key(&device.serial) => {
+            Ok(mut child) if !start_still_wanted => {
+                let _ = child.kill();
+                let _ = child.wait();
+                state.log(format!("Cancelled mirror start for {}", device.name));
+            }
+            Ok(mut child) if state.mirrors.contains_key(&mirror_key) => {
                 // Another start won the race (e.g. a rapid double-click). Drop-
                 // ping a Child does not kill scrcpy, so stop this extra process
                 // rather than replacing — and losing track of — the tracked one.
@@ -278,9 +316,10 @@ pub fn start_mirror(
                     spawn_log_pump(shared.clone(), ctx.clone(), Box::new(BufReader::new(err)));
                 }
 
-                state.mirrors.insert(device.serial.clone(), child);
+                state.mirrors.insert(mirror_key, child);
             }
-            Err(error) => state.log(format!("Mirror failed: {error:#}")),
+            Err(error) if start_still_wanted => state.log(format!("Mirror failed: {error:#}")),
+            Err(_) => {}
         }
         drop(state);
         ctx.request_repaint();
@@ -307,6 +346,8 @@ pub fn stop_mirror(shared: &Arc<Mutex<Shared>>, serial: &str) {
         let _ = child.kill();
         let _ = child.wait();
         state.log(format!("Stopped mirror of {serial}"));
+    } else if state.starting_mirrors.remove(serial) {
+        state.log(format!("Cancelled mirror start for {serial}"));
     }
 }
 
@@ -320,6 +361,7 @@ pub fn stop_all_mirrors(shared: &Arc<Mutex<Shared>>) {
             let _ = child.wait();
         }
     }
+    state.starting_mirrors.clear();
 }
 
 pub fn start_pairing(shared: Arc<Mutex<Shared>>, ctx: Context) {
@@ -600,5 +642,55 @@ fn connect_after_pairing(
         }
 
         thread::sleep(Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mirror_key_collapses_endpoint_and_mdns_aliases() {
+        let service = mdns_connect_service("adb-5C020DLCH0007Q-tfPgZw", "192.168.68.59:36375");
+        let endpoint_device = adb_device("192.168.68.59:36375");
+        let mdns_device = adb_device("adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp");
+
+        assert_eq!(
+            mirror_key_for_device(&endpoint_device, std::slice::from_ref(&service)),
+            "adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp"
+        );
+        assert_eq!(
+            mirror_key_for_device(&mdns_device, &[service]),
+            "adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp"
+        );
+    }
+
+    #[test]
+    fn mirror_key_normalizes_mdns_serial_without_service_snapshot() {
+        let device = adb_device("adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp.local");
+
+        assert_eq!(
+            mirror_key_for_device(&device, &[]),
+            "adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp"
+        );
+    }
+
+    fn mdns_connect_service(instance: &str, address: &str) -> adb::MdnsService {
+        adb::MdnsService {
+            instance: instance.to_string(),
+            service_type: "_adb-tls-connect._tcp".to_string(),
+            address: address.to_string(),
+        }
+    }
+
+    fn adb_device(serial: &str) -> adb::AdbDevice {
+        adb::AdbDevice {
+            serial: serial.to_string(),
+            state: adb::DeviceState::Device,
+            product: None,
+            model: Some("Pixel_10_Pro".to_string()),
+            device: None,
+            transport_id: None,
+        }
     }
 }

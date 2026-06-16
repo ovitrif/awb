@@ -546,7 +546,7 @@ pub fn serial_matches_connect_service(serial: &str, service: &MdnsService) -> bo
     serial == service_serial
 }
 
-fn connect_service_serial(service: &MdnsService) -> String {
+pub fn connect_service_serial(service: &MdnsService) -> String {
     format!(
         "{}.{}",
         service.instance.trim_end_matches('.'),
@@ -554,7 +554,7 @@ fn connect_service_serial(service: &MdnsService) -> String {
     )
 }
 
-fn normalize_mdns_serial(serial: &str) -> String {
+pub fn normalize_mdns_serial(serial: &str) -> String {
     serial
         .trim()
         .trim_end_matches(".local")
