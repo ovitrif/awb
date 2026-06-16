@@ -18,6 +18,8 @@ use awb_core::wifi;
 use eframe::egui::Context;
 
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
+const PAIRING_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+const PAIRING_RETRY_DELAY: Duration = Duration::from_millis(800);
 
 #[derive(Debug, Clone)]
 pub struct ToolInfo {
@@ -473,7 +475,8 @@ fn run_pairing(
     let pairing_endpoints = wait_for_pairing_endpoints(&adb, qr, cancel)?;
     ensure_not_cancelled(cancel)?;
 
-    let pairing_endpoint = pair_with_pairing_endpoints(shared, ctx, &adb, &pairing_endpoints, qr)?;
+    let pairing_endpoint =
+        pair_with_pairing_endpoints(shared, ctx, &adb, pairing_endpoints, qr, cancel)?;
     ensure_not_cancelled(cancel)?;
 
     update_phase(
@@ -539,16 +542,15 @@ fn pair_with_pairing_endpoints(
     shared: &Arc<Mutex<Shared>>,
     ctx: &Context,
     adb: &Adb,
-    endpoints: &[String],
+    endpoints: Vec<String>,
     qr: &PairingQr,
+    cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<String> {
     let mut last_error = None;
+    let deadline = Instant::now() + PAIRING_RETRY_TIMEOUT;
 
-    for endpoint in endpoints {
-        shared
-            .lock()
-            .unwrap()
-            .log(format!("Pairing with endpoint {endpoint}"));
+    loop {
+        ensure_not_cancelled(cancel)?;
         update_phase(
             shared,
             ctx,
@@ -557,17 +559,46 @@ fn pair_with_pairing_endpoints(
             },
         );
 
-        match adb.pair(endpoint, &qr.secret) {
-            Ok(_) => return Ok(endpoint.clone()),
-            Err(error) => {
-                let message = format!("{error:#}");
-                shared
-                    .lock()
-                    .unwrap()
-                    .log(format!("Pairing endpoint {endpoint} failed: {message}"));
-                last_error = Some(message);
+        let mut retryable_failure = false;
+
+        for endpoint in endpoints.clone() {
+            ensure_not_cancelled(cancel)?;
+
+            shared
+                .lock()
+                .unwrap()
+                .log(format!("Pairing with endpoint {endpoint}"));
+
+            match adb.pair(&endpoint, &qr.secret) {
+                Ok(_) => return Ok(endpoint),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    retryable_failure |= adb::pairing_error_is_retryable(&message);
+                    shared
+                        .lock()
+                        .unwrap()
+                        .log(format!("Pairing endpoint {endpoint} failed: {message}"));
+                    last_error = Some(message);
+                }
             }
         }
+
+        if !retryable_failure || Instant::now() >= deadline {
+            break;
+        }
+
+        shared
+            .lock()
+            .unwrap()
+            .log("Pairing endpoint is visible but not ready yet; retrying...");
+        update_phase(
+            shared,
+            ctx,
+            PairingPhase::Connecting {
+                label: "Pairing with your phone... retrying".to_string(),
+            },
+        );
+        sleep_or_cancel(cancel, PAIRING_RETRY_DELAY)?;
     }
 
     anyhow::bail!(
@@ -576,6 +607,21 @@ fn pair_with_pairing_endpoints(
             .map(|error| format!("; last error: {error}"))
             .unwrap_or_default()
     )
+}
+
+fn sleep_or_cancel(cancel: &Arc<AtomicBool>, duration: Duration) -> anyhow::Result<()> {
+    let deadline = Instant::now() + duration;
+
+    while Instant::now() < deadline {
+        ensure_not_cancelled(cancel)?;
+        thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(100)),
+        );
+    }
+
+    Ok(())
 }
 
 fn connect_after_pairing(

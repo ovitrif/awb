@@ -1485,23 +1485,36 @@ fn wait_for_pairing_endpoint(
 
 fn pair_with_pairing_endpoints(adb: &Adb, endpoints: &[String], secret: &str) -> Result<String> {
     let mut last_error = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
 
     ui::success("Phone found. Completing ADB pairing...");
 
-    for endpoint in endpoints {
-        ui::status(format!("Pairing with {endpoint}..."));
+    loop {
+        let mut retryable_failure = false;
 
-        match adb.pair(endpoint, secret) {
-            Ok(_) => {
-                ui::success(format!("Pairing succeeded with {endpoint}."));
-                return Ok(endpoint.clone());
-            }
-            Err(error) => {
-                let message = format!("{error:#}");
-                ui::warn(format!("Pairing endpoint {endpoint} failed: {message}"));
-                last_error = Some(message);
+        for endpoint in endpoints {
+            ui::status(format!("Pairing with {endpoint}..."));
+
+            match adb.pair(endpoint, secret) {
+                Ok(_) => {
+                    ui::success(format!("Pairing succeeded with {endpoint}."));
+                    return Ok(endpoint.clone());
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    retryable_failure |= adb::pairing_error_is_retryable(&message);
+                    ui::warn(format!("Pairing endpoint {endpoint} failed: {message}"));
+                    last_error = Some(message);
+                }
             }
         }
+
+        if !retryable_failure || Instant::now() >= deadline {
+            break;
+        }
+
+        ui::status("Pairing endpoint is visible but not ready yet; retrying...");
+        ui::sleep_or_cancel(poll_delay(deadline, Duration::from_millis(800)))?;
     }
 
     bail!(

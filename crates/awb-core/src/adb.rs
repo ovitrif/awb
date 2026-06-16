@@ -502,6 +502,25 @@ pub fn connect_serial_from_output(output: &str) -> Option<String> {
     })
 }
 
+pub fn pairing_error_is_retryable(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+
+    [
+        "protocol fault",
+        "couldn't read status",
+        "could not read status",
+        "connection refused",
+        "connection reset",
+        "failed to connect",
+        "network is unreachable",
+        "no route to host",
+        "timed out",
+        "timeout",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
 pub fn endpoint_host(endpoint: &str) -> String {
     let endpoint = endpoint.trim();
 
@@ -814,6 +833,19 @@ ignored _printer._tcp 192.168.1.10:1234
             Some("192.168.1.23:40233")
         );
         assert_eq!(connect_serial_from_output("nope"), None);
+    }
+
+    #[test]
+    fn classifies_transient_pairing_errors() {
+        assert!(pairing_error_is_retryable(
+            "adb pair failed: error: protocol fault (couldn't read status message): Undefined error: 0"
+        ));
+        assert!(pairing_error_is_retryable(
+            "adb pair failed: failed to connect to 192.168.68.54:37197"
+        ));
+        assert!(!pairing_error_is_retryable(
+            "adb pair failed: wrong password or connection was dropped"
+        ));
     }
 
     #[test]
