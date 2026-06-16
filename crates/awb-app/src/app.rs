@@ -901,7 +901,7 @@ impl App {
         match phase {
             PairingPhase::Qr { modules, progress } => {
                 let content_height = 168.0 + 14.0 + 18.0 + 4.0 + 30.0 + 12.0 + 50.0;
-                center_pad(ui, content_height);
+                center_pad_at_least(ui, content_height, 24.0);
 
                 ui.vertical_centered(|ui| {
                     let (rect, _) = ui.allocate_exact_size(vec2(168.0, 168.0), Sense::hover());
@@ -1245,6 +1245,11 @@ fn nav_header(ui: &mut Ui, title: &str) -> egui::Response {
 fn center_pad(ui: &mut Ui, content_height: f32) {
     let pad = (ui.available_height() - content_height) / 2.0;
     ui.add_space(pad.max(0.0));
+}
+
+fn center_pad_at_least(ui: &mut Ui, content_height: f32, min_top: f32) {
+    let pad = (ui.available_height() - content_height) / 2.0;
+    ui.add_space(pad.max(min_top));
 }
 
 fn hint_label(ui: &mut Ui, text: &str, width: f32) {
