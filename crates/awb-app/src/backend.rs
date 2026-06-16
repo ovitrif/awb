@@ -11,8 +11,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use awb_core::adb::{self, Adb};
 use awb_core::dnssd;
+use awb_core::pairing;
 use awb_core::qr::{PairingQr, QrModules};
 use awb_core::scrcpy::Scrcpy;
+use awb_core::wifi;
 use eframe::egui::Context;
 
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
@@ -330,6 +332,20 @@ pub fn start_pairing(shared: Arc<Mutex<Shared>>, ctx: Context) {
             session.cancel.store(true, Ordering::Relaxed);
         }
 
+        if let Err(error) = wifi::ensure_pairing_wifi_ready() {
+            let message = format!("{error:#}");
+            state.pairing = Some(PairingSession {
+                phase: PairingPhase::Failed {
+                    message: message.clone(),
+                },
+                cancel: cancel.clone(),
+            });
+            state.log(format!("Pairing blocked: {message}"));
+            drop(state);
+            ctx.request_repaint();
+            return;
+        }
+
         let qr = PairingQr::generate();
         let modules = match qr.modules() {
             Ok(modules) => modules,
@@ -412,17 +428,10 @@ fn run_pairing(
     let baseline_services = adb::connect_services(&adb.mdns_services().unwrap_or_default());
     let baseline_devices = adb::ready_device_serials(&adb.devices().unwrap_or_default());
 
-    let pairing_endpoint = wait_for_pairing_endpoint(&adb, qr, cancel)?;
+    let pairing_endpoints = wait_for_pairing_endpoints(&adb, qr, cancel)?;
     ensure_not_cancelled(cancel)?;
 
-    update_phase(
-        shared,
-        ctx,
-        PairingPhase::Connecting {
-            label: "Pairing with your phone…".to_string(),
-        },
-    );
-    adb.pair(&pairing_endpoint, &qr.secret)?;
+    let pairing_endpoint = pair_with_pairing_endpoints(shared, ctx, &adb, &pairing_endpoints, qr)?;
     ensure_not_cancelled(cancel)?;
 
     update_phase(
@@ -457,28 +466,23 @@ fn ensure_not_cancelled(cancel: &Arc<AtomicBool>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn wait_for_pairing_endpoint(
+fn wait_for_pairing_endpoints(
     adb: &Adb,
     qr: &PairingQr,
     cancel: &Arc<AtomicBool>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Vec<String>> {
     let deadline = Instant::now() + PAIRING_TIMEOUT;
 
     loop {
         ensure_not_cancelled(cancel)?;
 
-        if let Ok(services) = adb.mdns_services()
-            && let Some(service) = services
-                .into_iter()
-                .find(|service| service.instance == qr.instance && service.is_pairing_service())
-        {
-            return Ok(service.address);
-        }
-
-        if let Ok(Some(endpoint)) =
-            dnssd::discover_pairing_endpoint(&qr.instance, Duration::from_secs(2))
-        {
-            return Ok(endpoint);
+        let discovery = pairing::discover_pairing_endpoint_candidates(
+            adb,
+            &qr.instance,
+            Duration::from_secs(2),
+        );
+        if !discovery.endpoints.is_empty() {
+            return Ok(discovery.endpoints);
         }
 
         if Instant::now() >= deadline {
@@ -487,6 +491,49 @@ fn wait_for_pairing_endpoint(
 
         thread::sleep(Duration::from_millis(400));
     }
+}
+
+fn pair_with_pairing_endpoints(
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &Context,
+    adb: &Adb,
+    endpoints: &[String],
+    qr: &PairingQr,
+) -> anyhow::Result<String> {
+    let mut last_error = None;
+
+    for endpoint in endpoints {
+        shared
+            .lock()
+            .unwrap()
+            .log(format!("Pairing with endpoint {endpoint}"));
+        update_phase(
+            shared,
+            ctx,
+            PairingPhase::Connecting {
+                label: "Pairing with your phone...".to_string(),
+            },
+        );
+
+        match adb.pair(endpoint, &qr.secret) {
+            Ok(_) => return Ok(endpoint.clone()),
+            Err(error) => {
+                let message = format!("{error:#}");
+                shared
+                    .lock()
+                    .unwrap()
+                    .log(format!("Pairing endpoint {endpoint} failed: {message}"));
+                last_error = Some(message);
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to pair with any discovered endpoint{}",
+        last_error
+            .map(|error| format!("; last error: {error}"))
+            .unwrap_or_default()
+    )
 }
 
 fn connect_after_pairing(

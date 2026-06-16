@@ -11,10 +11,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use awb_core::adb::{self, Adb};
 use awb_core::dnssd;
+use awb_core::pairing;
 use awb_core::qr::PairingQr;
 use awb_core::scrcpy::{
     DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, Scrcpy, ScrcpyOptions, ScrcpyRunMode,
 };
+use awb_core::wifi;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use serde::Serialize;
@@ -196,7 +198,7 @@ enum StartupDeviceChoice {
 }
 
 enum PairingWaitOutcome {
-    PairingEndpoint(String),
+    PairingEndpoints(Vec<String>),
     AlreadyConnected(ConnectedPhone),
 }
 
@@ -1313,6 +1315,8 @@ fn matching_ready_device_from_snapshot(
 }
 
 fn pair_and_connect(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone> {
+    wifi::ensure_pairing_wifi_ready()?;
+
     let baseline_services = adb::connect_services(&adb.mdns_services().unwrap_or_default());
     let baseline_devices = adb::ready_device_serials(&adb.devices().unwrap_or_default());
     let qr = PairingQr::generate();
@@ -1330,12 +1334,11 @@ fn pair_and_connect(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone> {
     ui::status(ui::CANCEL_HINT);
 
     let pairing_address = match wait_for_pairing_endpoint(adb, &qr.instance, timeout)? {
-        PairingWaitOutcome::PairingEndpoint(pairing_address) => pairing_address,
+        PairingWaitOutcome::PairingEndpoints(pairing_addresses) => {
+            pair_with_pairing_endpoints(adb, &pairing_addresses, &qr.secret)?
+        }
         PairingWaitOutcome::AlreadyConnected(phone) => return Ok(phone),
     };
-
-    ui::success("Phone found. Completing ADB pairing...");
-    adb.pair(&pairing_address, &qr.secret)?;
 
     ui::status("Looking for the wireless debugging connection endpoint...");
     let device = connect_and_wait_for_device(
@@ -1400,43 +1403,42 @@ fn wait_for_pairing_endpoint(
             Err(_) => {}
         }
 
-        match services_result {
-            Ok(services) => {
-                if let Some(service) = services
-                    .into_iter()
-                    .find(|service| service.instance == instance && service.is_pairing_service())
-                {
-                    countdown.finish();
-                    return Ok(PairingWaitOutcome::PairingEndpoint(service.address));
-                }
-            }
-            Err(error) if !reported_adb_error => {
-                countdown.finish();
-                ui::warn(format!("adb mDNS lookup failed: {error:#}"));
-                reported_adb_error = true;
-            }
-            Err(_) => {}
-        }
-
         if !reported_direct_check {
             countdown.finish();
             ui::status("Also checking macOS Bonjour directly for the QR pairing service...");
             reported_direct_check = true;
         }
 
-        match dnssd::discover_pairing_endpoint(instance, Duration::from_secs(2)) {
-            Ok(Some(endpoint)) => {
-                countdown.finish();
-                ui::success("Phone found through macOS Bonjour.");
-                return Ok(PairingWaitOutcome::PairingEndpoint(endpoint));
+        let discovery =
+            pairing::discover_pairing_endpoint_candidates(adb, instance, Duration::from_secs(2));
+
+        if !discovery.endpoints.is_empty() {
+            countdown.finish();
+            if discovery.endpoints.len() == 1 {
+                ui::success(format!("Phone found at {}.", discovery.endpoints[0]));
+            } else {
+                ui::success(format!(
+                    "Phone found at candidate endpoint(s): {}.",
+                    discovery.endpoints.join(", ")
+                ));
             }
-            Ok(None) => {}
-            Err(error) if !reported_bonjour_error => {
+            return Ok(PairingWaitOutcome::PairingEndpoints(discovery.endpoints));
+        }
+
+        if let Some(error) = discovery.adb_error {
+            if !reported_adb_error {
                 countdown.finish();
-                ui::warn(format!("Bonjour pairing lookup failed: {error:#}"));
+                ui::warn(format!("adb mDNS lookup failed: {error}"));
+                reported_adb_error = true;
+            }
+        }
+
+        if let Some(error) = discovery.bonjour_error {
+            if !reported_bonjour_error {
+                countdown.finish();
+                ui::warn(format!("Bonjour pairing lookup failed: {error}"));
                 reported_bonjour_error = true;
             }
-            Err(_) => {}
         }
 
         if Instant::now() >= deadline {
@@ -1451,6 +1453,35 @@ fn wait_for_pairing_endpoint(
             return Err(error);
         }
     }
+}
+
+fn pair_with_pairing_endpoints(adb: &Adb, endpoints: &[String], secret: &str) -> Result<String> {
+    let mut last_error = None;
+
+    ui::success("Phone found. Completing ADB pairing...");
+
+    for endpoint in endpoints {
+        ui::status(format!("Pairing with {endpoint}..."));
+
+        match adb.pair(endpoint, secret) {
+            Ok(_) => {
+                ui::success(format!("Pairing succeeded with {endpoint}."));
+                return Ok(endpoint.clone());
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                ui::warn(format!("Pairing endpoint {endpoint} failed: {message}"));
+                last_error = Some(message);
+            }
+        }
+    }
+
+    bail!(
+        "failed to pair with any discovered endpoint{}",
+        last_error
+            .map(|error| format!("; last error: {error}"))
+            .unwrap_or_default()
+    )
 }
 
 fn already_connected_phone_choice(
@@ -1506,6 +1537,7 @@ fn connect_and_wait_for_device(
     let mut last_candidate_summary = String::new();
     let mut last_bonjour_check = None;
     let mut reported_connect_mdns_error = false;
+    let mut reported_failed_connects = HashSet::new();
 
     loop {
         countdown.tick(remaining_until(deadline))?;
@@ -1633,29 +1665,25 @@ fn connect_and_wait_for_device(
                 }
                 Err(error) => {
                     countdown.finish();
-                    ui::warn(format!(
-                        "ADB mDNS endpoint {} failed: {error:#}",
-                        service.address
-                    ));
-
-                    if let Some(device) = try_direct_bonjour_connect(
-                        adb,
-                        pairing_address,
-                        baseline_devices,
-                        Some(&service.address),
-                        timeout,
-                    )? {
-                        return Ok(device);
+                    if reported_failed_connects.insert(service.address.clone()) {
+                        ui::warn(format!(
+                            "ADB mDNS endpoint {} failed: {error:#}",
+                            service.address
+                        ));
                     }
-
-                    if let Some(device) = try_ui_hierarchy_connect(adb, baseline_devices, timeout)?
-                    {
-                        return Ok(device);
-                    }
-
-                    ui::warn("Automatic discovery did not find a working endpoint.");
-                    return manual_connect_device(adb, baseline_devices, timeout);
                 }
+            }
+        }
+
+        if !reported_failed_connects.is_empty() {
+            if let Some(device) =
+                try_direct_bonjour_connect(adb, pairing_address, baseline_devices, None, timeout)?
+            {
+                return Ok(device);
+            }
+
+            if let Some(device) = try_ui_hierarchy_connect(adb, baseline_devices, timeout)? {
+                return Ok(device);
             }
         }
 
