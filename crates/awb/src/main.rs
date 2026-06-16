@@ -1788,15 +1788,11 @@ fn try_ui_hierarchy_connect(
     baseline_devices: &HashSet<String>,
     timeout: Duration,
 ) -> Result<Option<adb::AdbDevice>> {
-    let ready_devices: Vec<_> = adb
-        .devices()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|device| device.state == adb::DeviceState::Device)
-        .collect();
+    let ready_devices =
+        ui_hierarchy_candidate_devices(adb.devices().unwrap_or_default(), baseline_devices);
 
     if ready_devices.is_empty() {
-        ui::status("No existing ADB transport is available for screen parsing.");
+        ui::status("No new ADB transport is available for screen parsing.");
         return Ok(None);
     }
 
@@ -1853,6 +1849,17 @@ fn try_ui_hierarchy_connect(
     }
 
     Ok(None)
+}
+
+fn ui_hierarchy_candidate_devices(
+    devices: Vec<adb::AdbDevice>,
+    baseline_devices: &HashSet<String>,
+) -> Vec<adb::AdbDevice> {
+    devices
+        .into_iter()
+        .filter(|device| device.state == adb::DeviceState::Device)
+        .filter(|device| !baseline_devices.contains(&device.serial))
+        .collect()
 }
 
 fn should_check_bonjour(last_check: Option<Instant>) -> bool {
@@ -2131,11 +2138,38 @@ mod tests {
     }
 
     #[test]
+    fn ui_hierarchy_candidates_skip_baseline_devices() {
+        let baseline_devices = HashSet::from(["192.168.68.10:37197".to_string()]);
+        let devices = vec![
+            adb_device_with_state("192.168.68.10:37197", adb::DeviceState::Device),
+            adb_device_with_state("192.168.68.54:37197", adb::DeviceState::Device),
+            adb_device_with_state("R5CT123ABC", adb::DeviceState::Offline),
+            adb_device_with_state("R5CT456DEF", adb::DeviceState::Unauthorized),
+        ];
+
+        let candidates = ui_hierarchy_candidate_devices(devices, &baseline_devices);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].serial, "192.168.68.54:37197");
+    }
+
+    #[test]
     fn validates_strict_ipv4_endpoint_shape() {
         assert!(is_ipv4_endpoint("192.168.68.54:37197"));
         assert!(!is_ipv4_endpoint("localhost:5555"));
         assert!(!is_ipv4_endpoint("192.168.68.54:0"));
         assert!(!is_ipv4_endpoint("999.168.68.54:37197"));
         assert!(!is_ipv4_endpoint("192.168.68.54:notaport"));
+    }
+
+    fn adb_device_with_state(serial: &str, state: adb::DeviceState) -> adb::AdbDevice {
+        adb::AdbDevice {
+            serial: serial.to_string(),
+            state,
+            product: None,
+            model: None,
+            device: None,
+            transport_id: None,
+        }
     }
 }
