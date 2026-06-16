@@ -10,13 +10,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use awb_core::adb::{self, Adb};
-use awb_core::dnssd;
-use awb_core::pairing;
-use awb_core::qr::PairingQr;
+use awb_core::pairing_flow::{self, AlreadyConnectedChoice, PairingEvent, PairingFlowDelegate};
 use awb_core::scrcpy::{
     DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, Scrcpy, ScrcpyOptions, ScrcpyRunMode,
 };
-use awb_core::wifi;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use serde::Serialize;
@@ -195,11 +192,6 @@ enum StartupDeviceChoice {
     Connected(ConnectedPhone),
     PairNew,
     Close,
-}
-
-enum PairingWaitOutcome {
-    PairingEndpoints(Vec<String>),
-    AlreadyConnected(ConnectedPhone),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1343,585 +1335,136 @@ fn matching_ready_device_from_snapshot(
 }
 
 fn pair_and_connect(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone> {
-    wifi::ensure_pairing_wifi_ready()?;
-
-    let baseline_services = adb::connect_services(&adb.mdns_services().unwrap_or_default());
-    let baseline_devices = adb::ready_device_serials(&adb.devices().unwrap_or_default());
-    let qr = PairingQr::generate();
-
-    ui::section(
-        "Pair with QR code",
-        [
-            "On your Android phone, go to Developer options -> Wireless debugging.",
-            "Tap \"Pair device with QR code\".",
-            "Scan the QR code below.",
-        ],
-    );
-    ui::print_qr(&qr.render_terminal()?);
-    ui::blank_line();
-    ui::status(ui::CANCEL_HINT);
-
-    let pairing_address = match wait_for_pairing_endpoint(adb, &qr.instance, timeout)? {
-        PairingWaitOutcome::PairingEndpoints(pairing_addresses) => {
-            pair_with_pairing_endpoints(adb, &pairing_addresses, &qr.secret)?
-        }
-        PairingWaitOutcome::AlreadyConnected(phone) => return Ok(phone),
-    };
-
-    ui::status("Looking for the wireless debugging connection endpoint...");
-    let device = connect_and_wait_for_device(
-        adb,
-        &pairing_address,
-        &baseline_services,
-        &baseline_devices,
-        timeout,
-    )?;
+    let mut delegate = CliPairingDelegate::default();
+    let phone = pairing_flow::pair_and_connect(adb, timeout, &mut delegate)?;
+    delegate.finish_countdown();
 
     Ok(ConnectedPhone {
-        serial: device.serial.clone(),
-        display_name: device.display_name(),
+        serial: phone.serial,
+        display_name: phone.display_name,
     })
 }
 
-fn wait_for_pairing_endpoint(
-    adb: &Adb,
-    instance: &str,
-    timeout: Duration,
-) -> Result<PairingWaitOutcome> {
-    let deadline = Instant::now() + timeout;
-    let mut countdown = ui::Countdown::new("Waiting for QR scan");
-    let mut reported_direct_check = false;
-    let mut reported_device_check_error = false;
-    let mut reported_adb_error = false;
-    let mut reported_bonjour_error = false;
-    let mut offered_multiple_existing_devices = false;
+#[derive(Default)]
+struct CliPairingDelegate {
+    countdown: Option<(String, ui::Countdown)>,
+    offered_multiple_existing_devices: bool,
+}
 
-    loop {
-        countdown.tick(remaining_until(deadline))?;
-
-        let devices_result = adb.devices();
-        let services_result = adb.mdns_services();
-        let services = services_result.as_ref().map(Vec::as_slice).unwrap_or(&[]);
-
-        match devices_result {
-            Ok(mut devices) => {
-                if disconnect_duplicate_wireless_aliases(adb, &devices, services) {
-                    devices = adb.devices().unwrap_or(devices);
-                }
-
-                let ready_phones = connected_phones_from_devices(devices, services);
-
-                if !ready_phones.is_empty() {
-                    countdown.finish();
-                }
-
-                if let Some(phone) = already_connected_phone_choice(
-                    ready_phones,
-                    &mut offered_multiple_existing_devices,
-                )? {
-                    countdown.finish();
-                    return Ok(PairingWaitOutcome::AlreadyConnected(phone));
-                }
-            }
-            Err(error) if !reported_device_check_error => {
-                countdown.finish();
-                ui::warn(format!("could not check existing ADB devices: {error:#}"));
-                reported_device_check_error = true;
-            }
-            Err(_) => {}
-        }
-
-        if !reported_direct_check {
+impl CliPairingDelegate {
+    fn finish_countdown(&mut self) {
+        if let Some((_label, countdown)) = &mut self.countdown {
             countdown.finish();
-            ui::status("Also checking macOS Bonjour directly for the QR pairing service...");
-            reported_direct_check = true;
+        }
+        self.countdown = None;
+    }
+
+    fn tick_countdown(&mut self, label: &str, deadline: Instant) -> Result<()> {
+        let recreate = self
+            .countdown
+            .as_ref()
+            .is_none_or(|(current_label, _)| current_label != label);
+
+        if recreate {
+            self.finish_countdown();
+            self.countdown = Some((label.to_string(), ui::Countdown::new(label)));
         }
 
-        let discovery =
-            pairing::discover_pairing_endpoint_candidates(adb, instance, Duration::from_secs(2));
-
-        if !discovery.endpoints.is_empty() {
-            countdown.finish();
-            if discovery.endpoints.len() == 1 {
-                ui::success(format!("Phone found at {}.", discovery.endpoints[0]));
-            } else {
-                ui::success(format!(
-                    "Phone found at candidate endpoint(s): {}.",
-                    discovery.endpoints.join(", ")
-                ));
-            }
-            return Ok(PairingWaitOutcome::PairingEndpoints(discovery.endpoints));
+        if let Some((_label, countdown)) = &mut self.countdown {
+            countdown.tick(remaining_until(deadline))?;
         }
 
-        if let Some(error) = discovery.adb_error {
-            if !reported_adb_error {
-                countdown.finish();
-                ui::warn(format!("adb mDNS lookup failed: {error}"));
-                reported_adb_error = true;
-            }
-        }
-
-        if let Some(error) = discovery.bonjour_error {
-            if !reported_bonjour_error {
-                countdown.finish();
-                ui::warn(format!("Bonjour pairing lookup failed: {error}"));
-                reported_bonjour_error = true;
-            }
-        }
-
-        if Instant::now() >= deadline {
-            countdown.finish();
-            bail!(
-                "timed out waiting for the phone to advertise the QR pairing service `{instance}`"
-            );
-        }
-
-        if let Err(error) = ui::sleep_or_cancel(poll_delay(deadline, Duration::from_millis(500))) {
-            countdown.finish();
-            return Err(error);
-        }
+        Ok(())
     }
 }
 
-fn pair_with_pairing_endpoints(adb: &Adb, endpoints: &[String], secret: &str) -> Result<String> {
-    let mut last_error = None;
-    let deadline = Instant::now() + Duration::from_secs(30);
-
-    ui::success("Phone found. Completing ADB pairing...");
-
-    loop {
-        let mut retryable_failure = false;
-
-        for endpoint in endpoints {
-            ui::status(format!("Pairing with {endpoint}..."));
-
-            match adb.pair(endpoint, secret) {
-                Ok(_) => {
-                    ui::success(format!("Pairing succeeded with {endpoint}."));
-                    return Ok(endpoint.clone());
-                }
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    retryable_failure |= adb::pairing_error_is_retryable(&message);
-                    ui::warn(format!("Pairing endpoint {endpoint} failed: {message}"));
-                    last_error = Some(message);
-                }
+impl PairingFlowDelegate for CliPairingDelegate {
+    fn on_event(&mut self, event: PairingEvent) -> Result<()> {
+        match event {
+            PairingEvent::Section { title, lines } => {
+                self.finish_countdown();
+                ui::section(title, lines);
             }
-        }
-
-        if !retryable_failure || Instant::now() >= deadline {
-            break;
-        }
-
-        ui::status("Pairing endpoint is visible but not ready yet; retrying...");
-        ui::sleep_or_cancel(poll_delay(deadline, Duration::from_millis(800)))?;
-    }
-
-    bail!(
-        "failed to pair with any discovered endpoint{}",
-        last_error
-            .map(|error| format!("; last error: {error}"))
-            .unwrap_or_default()
-    )
-}
-
-fn already_connected_phone_choice(
-    ready_phones: Vec<ConnectedPhone>,
-    offered_multiple_existing_devices: &mut bool,
-) -> Result<Option<ConnectedPhone>> {
-    match ready_phones.len() {
-        0 => Ok(None),
-        1 => {
-            let phone = ready_phones[0].clone();
-            ui::success(format!(
-                "ADB already sees {}; skipping QR scan.",
-                phone.display_name
-            ));
-            Ok(Some(phone))
-        }
-        _ if *offered_multiple_existing_devices => Ok(None),
-        _ => {
-            ui::status("ADB already sees multiple ready devices.");
-
-            let mut options: Vec<String> = ready_phones
-                .iter()
-                .map(|phone| format!("Use {}", phone.display_name))
-                .collect();
-            options.push("Keep waiting for QR scan".to_string());
-
-            let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
-            let selected = ui::menu(&option_refs)?;
-            *offered_multiple_existing_devices = true;
-
-            if selected <= ready_phones.len() {
-                Ok(Some(ready_phones[selected - 1].clone()))
-            } else {
-                Ok(None)
+            PairingEvent::QrReady(qr) => {
+                self.finish_countdown();
+                ui::print_qr(&qr.render_terminal()?);
+                ui::blank_line();
+                ui::status(ui::CANCEL_HINT);
             }
-        }
-    }
-}
-
-fn connect_and_wait_for_device(
-    adb: &Adb,
-    pairing_address: &str,
-    baseline_services: &HashSet<adb::MdnsService>,
-    baseline_devices: &HashSet<String>,
-    timeout: Duration,
-) -> Result<adb::AdbDevice> {
-    let deadline = Instant::now() + timeout;
-    let mut countdown = ui::Countdown::new("Connection endpoint wait");
-    let mut expected_serial = pairing_address.to_string();
-    let mut announced_endpoints = HashSet::new();
-    let mut reported_waiting_for_endpoint = false;
-    let mut attempt = 0;
-    let mut last_candidate_summary = String::new();
-    let mut last_bonjour_check = None;
-    let mut reported_connect_mdns_error = false;
-    let mut reported_failed_connects = HashSet::new();
-
-    loop {
-        countdown.tick(remaining_until(deadline))?;
-
-        let mut ready_devices = adb.devices().unwrap_or_default();
-        let services = match adb.mdns_services() {
-            Ok(services) => services,
-            Err(error) => {
-                if !reported_connect_mdns_error {
-                    countdown.finish();
-                    ui::warn(format!("adb mDNS connect lookup failed: {error:#}"));
-                    reported_connect_mdns_error = true;
-                }
-
-                Vec::new()
-            }
-        };
-        let candidates =
-            adb::connect_service_candidates(&services, pairing_address, baseline_services);
-
-        if disconnect_duplicate_wireless_aliases(adb, &ready_devices, &services) {
-            ready_devices = adb.devices().unwrap_or(ready_devices);
-        }
-
-        if let Some(device) = matching_ready_device_from_snapshot(
-            &ready_devices,
-            &expected_serial,
-            baseline_devices,
-            &services,
-        ) {
-            countdown.finish();
-            ui::success(format!("ADB device is ready: {}", device.display_name()));
-            return Ok(device);
-        }
-
-        let ready_device_count = ready_devices
-            .iter()
-            .filter(|device| device.state == adb::DeviceState::Device)
-            .count();
-
-        if ready_device_count > 0 {
-            countdown.finish();
-            ui::status(format!(
-                "ADB sees {ready_device_count} ready device(s), but not the just-paired phone yet."
-            ));
-        }
-
-        let candidate_summary = endpoint_summary(&candidates);
-
-        for service in &candidates {
-            if let Some(device) = adb::matching_ready_device_for_connect_service(
-                &ready_devices,
-                service,
-                baseline_devices,
-            ) {
-                countdown.finish();
-                ui::success(format!(
-                    "ADB device is ready through mDNS: {}",
-                    device.display_name()
-                ));
-                return Ok(device);
-            }
-        }
-
-        if candidates.is_empty() && !reported_waiting_for_endpoint {
-            countdown.finish();
-            ui::status("Waiting for the phone to advertise its connection endpoint...");
-            ui::status(ui::CANCEL_HINT);
-            reported_waiting_for_endpoint = true;
-        } else if !candidates.is_empty() && candidate_summary != last_candidate_summary {
-            countdown.finish();
-            ui::status(format!(
-                "Connect endpoint candidate(s): {candidate_summary}"
-            ));
-            last_candidate_summary = candidate_summary;
-        }
-
-        if candidates.is_empty() && should_check_bonjour(last_bonjour_check) {
-            last_bonjour_check = Some(Instant::now());
-            countdown.finish();
-
-            if let Some(device) =
-                try_direct_bonjour_connect(adb, pairing_address, baseline_devices, None, timeout)?
-            {
-                return Ok(device);
-            }
-        }
-
-        for service in candidates {
-            if announced_endpoints.insert(service.address.clone()) {
-                countdown.finish();
-                ui::status(format!("Connecting to {}...", service.address));
-            }
-
-            attempt += 1;
-            countdown.finish();
-            ui::status(format!(
-                "Attempt {attempt}: adb connect {}",
-                service.address
-            ));
-
-            match adb.connect(&service.address) {
-                Ok(output) => {
-                    expected_serial = adb::connect_serial_from_output(&output.combined_output())
-                        .unwrap_or_else(|| service.address.clone());
-
-                    countdown.finish();
-                    ui::status("Verifying the device is ready...");
-
-                    let mut devices = adb.devices().unwrap_or_default();
-
-                    if disconnect_duplicate_wireless_aliases(adb, &devices, &services) {
-                        devices = adb.devices().unwrap_or(devices);
-                    }
-
-                    if let Some(device) = matching_ready_device_from_snapshot(
-                        &devices,
-                        &expected_serial,
-                        baseline_devices,
-                        &services,
-                    ) {
-                        countdown.finish();
-                        return Ok(device);
-                    }
-                }
-                Err(error) => {
-                    countdown.finish();
-                    if reported_failed_connects.insert(service.address.clone()) {
-                        ui::warn(format!(
-                            "ADB mDNS endpoint {} failed: {error:#}",
-                            service.address
-                        ));
+            PairingEvent::Progress(progress) => {
+                if let Some(deadline) = progress.deadline {
+                    self.tick_countdown(&progress.title, deadline)?;
+                } else {
+                    self.finish_countdown();
+                    ui::status(progress.title);
+                    if !progress.detail.is_empty() {
+                        ui::status(progress.detail);
                     }
                 }
             }
-        }
-
-        if !reported_failed_connects.is_empty() {
-            if let Some(device) =
-                try_direct_bonjour_connect(adb, pairing_address, baseline_devices, None, timeout)?
-            {
-                return Ok(device);
+            PairingEvent::Status(message) => {
+                self.finish_countdown();
+                ui::status(message);
             }
-
-            if let Some(device) = try_ui_hierarchy_connect(adb, baseline_devices, timeout)? {
-                return Ok(device);
+            PairingEvent::Success(message) => {
+                self.finish_countdown();
+                ui::success(message);
+            }
+            PairingEvent::Warning(message) => {
+                self.finish_countdown();
+                ui::warn(message);
             }
         }
 
-        if Instant::now() >= deadline {
-            countdown.finish();
-            if let Some(device) = try_ui_hierarchy_connect(adb, baseline_devices, timeout)? {
-                return Ok(device);
-            }
-
-            ui::warn(
-                "Automatic discovery timed out before finding a connectable wireless debugging endpoint.",
-            );
-            return manual_connect_device(adb, baseline_devices, timeout);
-        }
-
-        if let Err(error) = ui::sleep_or_cancel(poll_delay(deadline, Duration::from_secs(2))) {
-            countdown.finish();
-            return Err(error);
-        }
-    }
-}
-
-fn try_direct_bonjour_connect(
-    adb: &Adb,
-    pairing_address: &str,
-    baseline_devices: &HashSet<String>,
-    skipped_endpoint: Option<&str>,
-    timeout: Duration,
-) -> Result<Option<adb::AdbDevice>> {
-    ui::status("Checking macOS Bonjour directly for wireless debugging endpoints...");
-
-    let endpoints = match dnssd::discover_connect_endpoints(pairing_address, Duration::from_secs(6))
-    {
-        Ok(endpoints) => endpoints,
-        Err(error) => {
-            ui::warn(format!("Bonjour connect lookup failed: {error:#}"));
-            return Ok(None);
-        }
-    };
-
-    if endpoints.is_empty() {
-        ui::status("No Bonjour connect endpoints found outside ADB.");
-        return Ok(None);
+        Ok(())
     }
 
-    ui::status(format!(
-        "Bonjour endpoint candidate(s): {}",
-        endpoints.join(", ")
-    ));
-
-    let verify_timeout = if timeout < Duration::from_secs(1) {
-        Duration::from_secs(1)
-    } else {
-        timeout.min(Duration::from_secs(8))
-    };
-
-    for endpoint in endpoints {
-        if skipped_endpoint == Some(endpoint.as_str()) {
-            ui::status(format!("Skipping {endpoint}; ADB already tried it."));
-            continue;
-        }
-
-        match connect_to_endpoint(adb, &endpoint, baseline_devices, verify_timeout) {
-            Ok(device) => return Ok(Some(device)),
-            Err(error) => ui::warn(format!("Bonjour endpoint {endpoint} failed: {error:#}")),
-        }
+    fn sleep(&mut self, duration: Duration) -> Result<()> {
+        ui::sleep_or_cancel(duration)
     }
 
-    Ok(None)
-}
+    fn choose_already_connected(
+        &mut self,
+        phones: &[pairing_flow::ConnectedPhone],
+    ) -> Result<AlreadyConnectedChoice> {
+        match phones.len() {
+            0 => Ok(AlreadyConnectedChoice::KeepWaiting),
+            1 => Ok(AlreadyConnectedChoice::Use(0)),
+            _ if self.offered_multiple_existing_devices => Ok(AlreadyConnectedChoice::KeepWaiting),
+            _ => {
+                self.finish_countdown();
+                ui::status("ADB already sees multiple ready devices.");
 
-fn try_ui_hierarchy_connect(
-    adb: &Adb,
-    baseline_devices: &HashSet<String>,
-    timeout: Duration,
-) -> Result<Option<adb::AdbDevice>> {
-    let ready_devices =
-        ui_hierarchy_candidate_devices(adb.devices().unwrap_or_default(), baseline_devices);
+                let mut options: Vec<String> = phones
+                    .iter()
+                    .map(|phone| format!("Use {}", phone.display_name))
+                    .collect();
+                options.push("Keep waiting for QR scan".to_string());
 
-    if ready_devices.is_empty() {
-        ui::status("No new ADB transport is available for screen parsing.");
-        return Ok(None);
-    }
+                let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
+                let selected = ui::menu(&option_refs)?;
+                self.offered_multiple_existing_devices = true;
 
-    ui::status("Trying to read the visible phone screen through ADB...");
-    let mut seen_endpoints = HashSet::new();
-    let verify_timeout = if timeout < Duration::from_secs(1) {
-        Duration::from_secs(1)
-    } else {
-        timeout.min(Duration::from_secs(8))
-    };
-
-    for device in ready_devices {
-        ui::status(format!(
-            "Reading UI hierarchy from {}...",
-            device.display_name()
-        ));
-
-        let hierarchy = match adb.dump_ui_hierarchy(&device.serial) {
-            Ok(hierarchy) => hierarchy,
-            Err(error) => {
-                ui::warn(format!(
-                    "Could not read UI hierarchy from {}: {error:#}",
-                    device.display_name()
-                ));
-                continue;
-            }
-        };
-
-        let endpoints = extract_ipv4_endpoints(&hierarchy);
-
-        if endpoints.is_empty() {
-            ui::status(format!(
-                "No IP:port text found on {}.",
-                device.display_name()
-            ));
-            continue;
-        }
-
-        ui::status(format!(
-            "Screen endpoint candidate(s): {}",
-            endpoints.join(", ")
-        ));
-
-        for endpoint in endpoints {
-            if !seen_endpoints.insert(endpoint.clone()) {
-                continue;
-            }
-
-            match connect_to_endpoint(adb, &endpoint, baseline_devices, verify_timeout) {
-                Ok(device) => return Ok(Some(device)),
-                Err(error) => ui::warn(format!("Screen endpoint {endpoint} failed: {error:#}")),
+                if selected <= phones.len() {
+                    Ok(AlreadyConnectedChoice::Use(selected - 1))
+                } else {
+                    Ok(AlreadyConnectedChoice::KeepWaiting)
+                }
             }
         }
     }
 
-    Ok(None)
-}
-
-fn ui_hierarchy_candidate_devices(
-    devices: Vec<adb::AdbDevice>,
-    baseline_devices: &HashSet<String>,
-) -> Vec<adb::AdbDevice> {
-    devices
-        .into_iter()
-        .filter(|device| device.state == adb::DeviceState::Device)
-        .filter(|device| !baseline_devices.contains(&device.serial))
-        .collect()
-}
-
-fn should_check_bonjour(last_check: Option<Instant>) -> bool {
-    match last_check {
-        Some(last_check) => last_check.elapsed() >= Duration::from_secs(10),
-        None => true,
+    fn manual_connect_endpoint(&mut self) -> Result<Option<String>> {
+        self.finish_countdown();
+        ui::section(
+            "Manual connection",
+            [
+                "On your Android phone, go back to the main Wireless debugging screen.",
+                "Copy the value shown as \"IP address & Port\".",
+            ],
+        );
+        prompt_endpoint("Enter phone IP:port").map(Some)
     }
-}
-
-fn extract_ipv4_endpoints(input: &str) -> Vec<String> {
-    let mut endpoints = Vec::new();
-
-    for token in input.split(|character: char| {
-        !(character.is_ascii_digit() || character == '.' || character == ':')
-    }) {
-        let token = token.trim_matches('.');
-
-        if is_ipv4_endpoint(token) && !endpoints.iter().any(|endpoint| endpoint == token) {
-            endpoints.push(token.to_string());
-        }
-    }
-
-    endpoints
-}
-
-fn is_ipv4_endpoint(endpoint: &str) -> bool {
-    let Some((host, port)) = endpoint.rsplit_once(':') else {
-        return false;
-    };
-
-    if !matches!(port.parse::<u16>(), Ok(port) if port > 0) {
-        return false;
-    }
-
-    let mut host_parts = host.split('.');
-
-    host_parts.clone().count() == 4 && host_parts.all(|part| part.parse::<u8>().is_ok())
-}
-
-fn endpoint_summary(services: &[adb::MdnsService]) -> String {
-    if services.is_empty() {
-        return "none".to_string();
-    }
-
-    services
-        .iter()
-        .map(|service| service.address.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn remaining_until(deadline: Instant) -> Duration {
@@ -2133,56 +1676,5 @@ mod tests {
         assert!(!is_plausible_endpoint("192.168.68.54:notaport"));
         assert!(!is_plausible_endpoint("192.168.68.54:70000"));
         assert!(!is_plausible_endpoint("192.168.68.54:42209 extra"));
-    }
-
-    #[test]
-    fn extracts_ip_ports_from_ui_hierarchy_text() {
-        let hierarchy = r#"
-<node text="IP address &amp; Port" />
-<node text="192.168.68.54:37197" />
-<node bounds="[0,123][456,789]" />
-<node text="192.168.68.54:37197." />
-"#;
-
-        assert_eq!(
-            extract_ipv4_endpoints(hierarchy),
-            vec!["192.168.68.54:37197"]
-        );
-    }
-
-    #[test]
-    fn ui_hierarchy_candidates_skip_baseline_devices() {
-        let baseline_devices = HashSet::from(["192.168.68.10:37197".to_string()]);
-        let devices = vec![
-            adb_device_with_state("192.168.68.10:37197", adb::DeviceState::Device),
-            adb_device_with_state("192.168.68.54:37197", adb::DeviceState::Device),
-            adb_device_with_state("R5CT123ABC", adb::DeviceState::Offline),
-            adb_device_with_state("R5CT456DEF", adb::DeviceState::Unauthorized),
-        ];
-
-        let candidates = ui_hierarchy_candidate_devices(devices, &baseline_devices);
-
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].serial, "192.168.68.54:37197");
-    }
-
-    #[test]
-    fn validates_strict_ipv4_endpoint_shape() {
-        assert!(is_ipv4_endpoint("192.168.68.54:37197"));
-        assert!(!is_ipv4_endpoint("localhost:5555"));
-        assert!(!is_ipv4_endpoint("192.168.68.54:0"));
-        assert!(!is_ipv4_endpoint("999.168.68.54:37197"));
-        assert!(!is_ipv4_endpoint("192.168.68.54:notaport"));
-    }
-
-    fn adb_device_with_state(serial: &str, state: adb::DeviceState) -> adb::AdbDevice {
-        adb::AdbDevice {
-            serial: serial.to_string(),
-            state,
-            product: None,
-            model: None,
-            device: None,
-            transport_id: None,
-        }
     }
 }
