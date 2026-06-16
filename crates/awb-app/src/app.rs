@@ -26,6 +26,16 @@ const STARTUP_HIDE: Duration = Duration::from_millis(800);
 static STATUS_EVENTS: Mutex<Vec<MenuBarIconEvent>> = Mutex::new(Vec::new());
 static MENU_EVENTS: Mutex<Vec<MenuEvent>> = Mutex::new(Vec::new());
 
+const WINDOW_MARGIN: f64 = 8.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DisplayBounds {
+    min_x: f64,
+    max_x: f64,
+    min_y: f64,
+    max_y: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Main,
@@ -164,16 +174,19 @@ impl App {
             // Leave ~8px between the icon and the beak tip (the tip sits a
             // touch below the window top).
             let y = bottom / divisor + 6.5;
-            let mut x = center_x - f64::from(theme::WINDOW_WIDTH) / 2.0;
+            let x = clamped_window_x(
+                center_x - f64::from(theme::WINDOW_WIDTH) / 2.0,
+                center_x,
+                y,
+                f64::from(theme::WINDOW_WIDTH),
+                ctx.input(|i| {
+                    i.viewport()
+                        .monitor_size
+                        .map(|monitor| f64::from(monitor.x))
+                }),
+            );
 
-            if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
-                let max_x = f64::from(monitor.x) - f64::from(theme::WINDOW_WIDTH) - 8.0;
-                x = x.min(max_x);
-            }
-
-            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(
-                [x.max(8.0) as f32, y as f32].into(),
-            ));
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition([x as f32, y as f32].into()));
             // Reveal on the next frame so the move lands first; a freshly
             // created window would otherwise flash at its default centered
             // position on the very first open.
@@ -315,6 +328,121 @@ impl App {
             }
         }
     }
+}
+
+fn clamped_window_x(
+    desired_x: f64,
+    anchor_x: f64,
+    anchor_y: f64,
+    window_width: f64,
+    fallback_monitor_width: Option<f64>,
+) -> f64 {
+    let displays = active_display_bounds();
+    clamp_window_x_to_displays(
+        desired_x,
+        anchor_x,
+        anchor_y,
+        window_width,
+        WINDOW_MARGIN,
+        fallback_monitor_width,
+        &displays,
+    )
+}
+
+fn clamp_window_x_to_displays(
+    desired_x: f64,
+    anchor_x: f64,
+    anchor_y: f64,
+    window_width: f64,
+    margin: f64,
+    fallback_monitor_width: Option<f64>,
+    displays: &[DisplayBounds],
+) -> f64 {
+    let display = display_for_anchor(anchor_x, anchor_y, displays)
+        .or_else(|| fallback_display_bounds(anchor_x, fallback_monitor_width));
+    let Some(display) = display else {
+        return desired_x.max(margin);
+    };
+
+    let min_x = display.min_x + margin;
+    let max_x = display.max_x - window_width - margin;
+
+    if max_x < min_x {
+        min_x
+    } else {
+        desired_x.clamp(min_x, max_x)
+    }
+}
+
+fn display_for_anchor(
+    anchor_x: f64,
+    anchor_y: f64,
+    displays: &[DisplayBounds],
+) -> Option<DisplayBounds> {
+    displays
+        .iter()
+        .copied()
+        .find(|display| {
+            (display.min_x..=display.max_x).contains(&anchor_x)
+                && (display.min_y..=display.max_y).contains(&anchor_y)
+        })
+        .or_else(|| {
+            displays
+                .iter()
+                .copied()
+                .find(|display| (display.min_x..=display.max_x).contains(&anchor_x))
+        })
+}
+
+fn fallback_display_bounds(
+    anchor_x: f64,
+    fallback_monitor_width: Option<f64>,
+) -> Option<DisplayBounds> {
+    let width = fallback_monitor_width.filter(|width| *width > 1.0)?;
+    let min_x = (anchor_x / width).floor() * width;
+
+    Some(DisplayBounds {
+        min_x,
+        max_x: min_x + width,
+        min_y: f64::NEG_INFINITY,
+        max_y: f64::INFINITY,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn active_display_bounds() -> Vec<DisplayBounds> {
+    use core_graphics::display::CGDisplay;
+
+    let Ok(display_ids) = CGDisplay::active_displays() else {
+        return Vec::new();
+    };
+
+    display_ids
+        .into_iter()
+        .filter_map(|id| {
+            let bounds = CGDisplay::new(id).bounds();
+            let min_x = bounds.origin.x;
+            let min_y = bounds.origin.y;
+            let max_x = min_x + bounds.size.width;
+            let max_y = min_y + bounds.size.height;
+
+            if max_x <= min_x || max_y <= min_y {
+                None
+            } else {
+                Some(DisplayBounds {
+                    min_x,
+                    max_x,
+                    min_y,
+                    max_y,
+                })
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn active_display_bounds() -> Vec<DisplayBounds> {
+    Vec::new()
 }
 
 impl eframe::App for App {
@@ -1058,4 +1186,55 @@ fn pill_button(
     );
 
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WIDTH: f64 = 380.0;
+    const MARGIN: f64 = 8.0;
+
+    #[test]
+    fn clamps_primary_display_edges() {
+        let displays = [DisplayBounds {
+            min_x: 0.0,
+            max_x: 1512.0,
+            min_y: 0.0,
+            max_y: 982.0,
+        }];
+
+        let x = clamp_window_x_to_displays(1290.0, 1480.0, 24.0, WIDTH, MARGIN, None, &displays);
+
+        assert_eq!(x, 1124.0);
+    }
+
+    #[test]
+    fn keeps_popover_on_secondary_display() {
+        let displays = [
+            DisplayBounds {
+                min_x: 0.0,
+                max_x: 1512.0,
+                min_y: 0.0,
+                max_y: 982.0,
+            },
+            DisplayBounds {
+                min_x: 1512.0,
+                max_x: 3024.0,
+                min_y: 0.0,
+                max_y: 982.0,
+            },
+        ];
+
+        let x = clamp_window_x_to_displays(2010.0, 2200.0, 24.0, WIDTH, MARGIN, None, &displays);
+
+        assert_eq!(x, 2010.0);
+    }
+
+    #[test]
+    fn falls_back_to_anchor_coordinate_span_without_native_displays() {
+        let x = clamp_window_x_to_displays(2010.0, 2200.0, 24.0, WIDTH, MARGIN, Some(1512.0), &[]);
+
+        assert_eq!(x, 2010.0);
+    }
 }
