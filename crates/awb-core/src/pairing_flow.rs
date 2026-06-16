@@ -564,6 +564,13 @@ where
                     ) {
                         return Ok(device);
                     }
+
+                    if reported_failed_connects.insert(service.address.clone()) {
+                        delegate.on_event(PairingEvent::Warning(format!(
+                            "ADB mDNS endpoint {} connected but did not expose a matching ready device",
+                            service.address
+                        )))?;
+                    }
                 }
                 Err(error) => {
                     if reported_failed_connects.insert(service.address.clone()) {

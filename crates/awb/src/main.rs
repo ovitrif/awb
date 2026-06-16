@@ -895,18 +895,49 @@ fn reconnect_watched_phone(adb: &Adb, current_serial: &str) -> Result<ConnectedP
 fn ready_phone_matching(
     adb: &Adb,
     expected_serial: &str,
-    baseline_devices: &HashSet<String>,
+    _baseline_devices: &HashSet<String>,
 ) -> Result<Option<ConnectedPhone>> {
     let devices = adb.devices()?;
+    let services = adb.mdns_services().unwrap_or_default();
 
     Ok(
-        adb::matching_ready_device(&devices, expected_serial, baseline_devices).map(|device| {
-            ConnectedPhone {
+        strict_ready_device_for_tracked_serial(&devices, expected_serial, &services).map(
+            |device| ConnectedPhone {
                 serial: device.serial.clone(),
                 display_name: device.display_name(),
-            }
-        }),
+            },
+        ),
     )
+}
+
+fn strict_ready_device_for_tracked_serial(
+    devices: &[adb::AdbDevice],
+    expected_serial: &str,
+    services: &[adb::MdnsService],
+) -> Option<adb::AdbDevice> {
+    let expected_host = adb::endpoint_host(expected_serial);
+
+    if let Some(device) = devices
+        .iter()
+        .filter(|device| device.state == adb::DeviceState::Device)
+        .find(|device| {
+            device.serial == expected_serial || adb::endpoint_host(&device.serial) == expected_host
+        })
+        .cloned()
+    {
+        return Some(device);
+    }
+
+    services
+        .iter()
+        .filter(|service| {
+            service.is_connect_service()
+                && (adb::serial_matches_connect_service(expected_serial, service)
+                    || adb::endpoint_host(&service.address) == expected_host)
+        })
+        .find_map(|service| {
+            adb::matching_ready_device_for_connect_service(devices, service, &HashSet::new())
+        })
 }
 
 fn connected_phone_for_serial(adb: &Adb, serial: &str) -> Result<ConnectedPhone> {
@@ -1556,6 +1587,40 @@ mod tests {
     }
 
     #[test]
+    fn strict_watch_match_rejects_unrelated_sole_new_device() {
+        let devices = [adb_device("R5CT123ABC")];
+
+        assert!(
+            strict_ready_device_for_tracked_serial(&devices, "192.168.68.59:36375", &[]).is_none()
+        );
+    }
+
+    #[test]
+    fn strict_watch_match_accepts_same_host_wireless_device() {
+        let devices = [adb_device("192.168.68.59:40123")];
+
+        let matched = strict_ready_device_for_tracked_serial(&devices, "192.168.68.59:36375", &[])
+            .expect("same-host wireless serial should match tracked endpoint");
+
+        assert_eq!(matched.serial, "192.168.68.59:40123");
+    }
+
+    #[test]
+    fn strict_watch_match_accepts_tracked_mdns_alias() {
+        let service = mdns_connect_service("adb-pixel-one", "192.168.68.59:36375");
+        let devices = [adb_device("adb-pixel-one._adb-tls-connect._tcp")];
+
+        let matched = strict_ready_device_for_tracked_serial(
+            &devices,
+            "adb-pixel-one._adb-tls-connect._tcp",
+            &[service],
+        )
+        .expect("matching mDNS serial should match tracked endpoint");
+
+        assert_eq!(matched.serial, "adb-pixel-one._adb-tls-connect._tcp");
+    }
+
+    #[test]
     fn connect_only_closes_without_scrcpy_menu() {
         let args = Args::try_parse_from(["awb", "--connect-only"]).unwrap();
 
@@ -1588,6 +1653,17 @@ mod tests {
             instance: instance.to_string(),
             service_type: "_adb-tls-connect._tcp".to_string(),
             address: address.to_string(),
+        }
+    }
+
+    fn adb_device(serial: &str) -> adb::AdbDevice {
+        adb::AdbDevice {
+            serial: serial.to_string(),
+            state: adb::DeviceState::Device,
+            product: None,
+            model: Some("Pixel_10_Pro".to_string()),
+            device: None,
+            transport_id: None,
         }
     }
 
