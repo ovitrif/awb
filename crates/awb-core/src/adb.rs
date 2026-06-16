@@ -539,7 +539,7 @@ fn wireless_transport_key(device: &AdbDevice, services: &[MdnsService]) -> Optio
         .map(|service| service.address.clone())
 }
 
-fn serial_matches_connect_service(serial: &str, service: &MdnsService) -> bool {
+pub fn serial_matches_connect_service(serial: &str, service: &MdnsService) -> bool {
     let serial = normalize_mdns_serial(serial);
     let service_serial = connect_service_serial(service);
 
@@ -562,7 +562,7 @@ fn normalize_mdns_serial(serial: &str) -> String {
         .to_string()
 }
 
-fn is_mdns_wireless_serial(serial: &str) -> bool {
+pub fn is_mdns_wireless_serial(serial: &str) -> bool {
     normalize_mdns_serial(serial).ends_with(CONNECT_SERVICE_TYPE)
 }
 

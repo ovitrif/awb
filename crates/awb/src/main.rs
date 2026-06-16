@@ -867,14 +867,14 @@ fn spawn_supervised_scrcpy(
 
 fn reconnect_watched_phone(adb: &Adb, current_serial: &str) -> Result<ConnectedPhone> {
     ui::status("Trying to reconnect wireless ADB...");
+    let baseline_devices = adb::ready_device_serials(&adb.devices().unwrap_or_default());
     let _ = adb.reconnect_offline();
 
-    if let Some(phone) = ready_phone_matching(adb, current_serial)? {
+    if let Some(phone) = ready_phone_matching(adb, current_serial, &baseline_devices)? {
         return Ok(phone);
     }
 
     let timeout = Duration::from_secs(10);
-    let baseline_devices = HashSet::new();
 
     if is_plausible_endpoint(current_serial) {
         if let Ok(device) = connect_to_endpoint(adb, current_serial, &baseline_devices, timeout) {
@@ -900,12 +900,15 @@ fn reconnect_watched_phone(adb: &Adb, current_serial: &str) -> Result<ConnectedP
     bail!("no reconnectable wireless debugging endpoint was found")
 }
 
-fn ready_phone_matching(adb: &Adb, expected_serial: &str) -> Result<Option<ConnectedPhone>> {
-    let baseline_devices = HashSet::new();
+fn ready_phone_matching(
+    adb: &Adb,
+    expected_serial: &str,
+    baseline_devices: &HashSet<String>,
+) -> Result<Option<ConnectedPhone>> {
     let devices = adb.devices()?;
 
     Ok(
-        adb::matching_ready_device(&devices, expected_serial, &baseline_devices).map(|device| {
+        adb::matching_ready_device(&devices, expected_serial, baseline_devices).map(|device| {
             ConnectedPhone {
                 serial: device.serial.clone(),
                 display_name: device.display_name(),
@@ -930,11 +933,36 @@ fn connected_phone_for_serial(adb: &Adb, serial: &str) -> Result<ConnectedPhone>
 }
 
 fn reconnect_endpoints(adb: &Adb, current_serial: &str) -> Vec<String> {
-    let host = adb::endpoint_host(current_serial);
     let services = adb.mdns_services().unwrap_or_default();
-    let connect_endpoints: Vec<String> = services
+    reconnect_endpoints_from_services(current_serial, &services)
+}
+
+fn reconnect_endpoints_from_services(
+    current_serial: &str,
+    services: &[adb::MdnsService],
+) -> Vec<String> {
+    let host = adb::endpoint_host(current_serial);
+    let connect_services: Vec<_> = services
         .iter()
         .filter(|service| service.is_connect_service())
+        .collect();
+
+    let matching_mdns_serial: Vec<String> = connect_services
+        .iter()
+        .filter(|service| adb::serial_matches_connect_service(current_serial, service))
+        .map(|service| service.address.clone())
+        .collect();
+
+    if !matching_mdns_serial.is_empty() {
+        return matching_mdns_serial;
+    }
+
+    if adb::is_mdns_wireless_serial(current_serial) {
+        return Vec::new();
+    }
+
+    let connect_endpoints: Vec<String> = connect_services
+        .iter()
         .map(|service| service.address.clone())
         .collect();
 
@@ -1917,6 +1945,45 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_endpoints_match_tracked_mdns_serial() {
+        let services = [
+            mdns_connect_service("adb-pixel-one", "192.168.68.59:36375"),
+            mdns_connect_service("adb-pixel-two", "192.168.68.99:40222"),
+        ];
+
+        assert_eq!(
+            reconnect_endpoints_from_services("adb-pixel-one._adb-tls-connect._tcp", &services),
+            vec!["192.168.68.59:36375"]
+        );
+    }
+
+    #[test]
+    fn reconnect_endpoints_do_not_fallback_for_unknown_mdns_serial() {
+        let services = [
+            mdns_connect_service("adb-pixel-one", "192.168.68.59:36375"),
+            mdns_connect_service("adb-pixel-two", "192.168.68.99:40222"),
+        ];
+
+        assert_eq!(
+            reconnect_endpoints_from_services("adb-missing._adb-tls-connect._tcp", &services),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn reconnect_endpoints_still_match_ip_serial_by_host() {
+        let services = [
+            mdns_connect_service("adb-pixel-one", "192.168.68.59:36375"),
+            mdns_connect_service("adb-pixel-two", "192.168.68.99:40222"),
+        ];
+
+        assert_eq!(
+            reconnect_endpoints_from_services("192.168.68.59:40123", &services),
+            vec!["192.168.68.59:36375"]
+        );
+    }
+
+    #[test]
     fn connect_only_closes_without_scrcpy_menu() {
         let args = Args::try_parse_from(["awb", "--connect-only"]).unwrap();
 
@@ -1942,6 +2009,14 @@ mod tests {
             ConnectedAction::StartForeground
         ));
         assert!(!should_request_stay_awake(&args, ConnectedAction::Close));
+    }
+
+    fn mdns_connect_service(instance: &str, address: &str) -> adb::MdnsService {
+        adb::MdnsService {
+            instance: instance.to_string(),
+            service_type: "_adb-tls-connect._tcp".to_string(),
+            address: address.to_string(),
+        }
     }
 
     #[test]
