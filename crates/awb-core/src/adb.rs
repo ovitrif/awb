@@ -377,17 +377,7 @@ pub fn connect_service_candidates(
         return same_host;
     }
 
-    let new_services: Vec<_> = connect_services
-        .iter()
-        .filter(|service| !baseline_services.contains(service))
-        .cloned()
-        .collect();
-
-    if !new_services.is_empty() {
-        return new_services;
-    }
-
-    connect_services
+    Vec::new()
 }
 
 pub fn matching_ready_device(
@@ -880,6 +870,20 @@ ignored _printer._tcp 192.168.1.10:1234
         );
 
         assert_eq!(candidates, vec![new_same_host]);
+    }
+
+    #[test]
+    fn connect_candidates_do_not_fallback_to_other_hosts() {
+        let new_other_host = MdnsService {
+            instance: "adb-other".to_string(),
+            service_type: CONNECT_SERVICE_TYPE.to_string(),
+            address: "192.168.1.99:33333".to_string(),
+        };
+
+        let candidates =
+            connect_service_candidates(&[new_other_host], "192.168.1.23:37199", &HashSet::new());
+
+        assert!(candidates.is_empty());
     }
 
     #[test]

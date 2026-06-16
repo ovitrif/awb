@@ -436,6 +436,10 @@ fn pairing_worker(
     }
 
     let mut state = shared.lock().unwrap();
+    if !pairing_session_owns_cancel(&state, &cancel) {
+        return;
+    }
+
     match result {
         Ok(device_name) => {
             state.log(format!("Paired and connected to {device_name}"));
@@ -454,6 +458,13 @@ fn pairing_worker(
         }
     }
     ctx.request_repaint();
+}
+
+fn pairing_session_owns_cancel(state: &Shared, cancel: &Arc<AtomicBool>) -> bool {
+    state
+        .pairing
+        .as_ref()
+        .is_some_and(|session| Arc::ptr_eq(&session.cancel, cancel))
 }
 
 fn set_phase(state: &mut Shared, phase: PairingPhase) {
@@ -747,6 +758,24 @@ mod tests {
             ),
             vec!["192.168.68.54:37197"]
         );
+    }
+
+    #[test]
+    fn pairing_session_ownership_uses_cancel_token_identity() {
+        let active_cancel = Arc::new(AtomicBool::new(false));
+        let stale_cancel = Arc::new(AtomicBool::new(false));
+        let state = Shared {
+            pairing: Some(PairingSession {
+                phase: PairingPhase::Connecting {
+                    label: "Pairing".to_string(),
+                },
+                cancel: active_cancel.clone(),
+            }),
+            ..Shared::default()
+        };
+
+        assert!(pairing_session_owns_cancel(&state, &active_cancel));
+        assert!(!pairing_session_owns_cancel(&state, &stale_cancel));
     }
 
     fn mdns_connect_service(instance: &str, address: &str) -> adb::MdnsService {
