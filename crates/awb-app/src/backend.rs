@@ -20,6 +20,7 @@ use eframe::egui::Context;
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
 const PAIRING_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const PAIRING_RETRY_DELAY: Duration = Duration::from_millis(800);
+static ADB_WORK_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct ToolInfo {
@@ -118,6 +119,13 @@ impl Shared {
             self.logs.drain(..overflow);
         }
     }
+
+    fn pairing_busy(&self) -> bool {
+        matches!(
+            self.pairing.as_ref().map(|session| &session.phase),
+            Some(PairingPhase::Qr { .. } | PairingPhase::Connecting { .. })
+        )
+    }
 }
 
 fn clock() -> String {
@@ -166,6 +174,9 @@ pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
         if state.refreshing {
             return;
         }
+        if state.pairing_busy() {
+            return;
+        }
         state.refreshing = true;
     }
     ctx.request_repaint();
@@ -183,6 +194,7 @@ pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
 }
 
 fn collect_snapshot() -> Snapshot {
+    let _adb_work = ADB_WORK_LOCK.lock().unwrap();
     let adb_handle = Adb::resolve(None);
 
     let adb_info = match &adb_handle {
@@ -529,6 +541,7 @@ fn run_pairing(
     qr: &PairingQr,
     cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<String> {
+    let _adb_work = ADB_WORK_LOCK.lock().unwrap();
     let adb = Adb::resolve(None)?;
     let baseline_services = adb::connect_services(&adb.mdns_services().unwrap_or_default());
     let baseline_devices = adb::ready_device_serials(&adb.devices().unwrap_or_default());
@@ -685,8 +698,9 @@ fn pair_with_pairing_endpoints(
     let mut last_error = None;
     let deadline = Instant::now() + PAIRING_RETRY_TIMEOUT;
     let mut attempt = 0;
+    let mut reset_adb_after_protocol_fault = false;
 
-    loop {
+    'pairing: loop {
         ensure_not_cancelled(cancel)?;
 
         let mut retryable_failure = false;
@@ -718,11 +732,55 @@ fn pair_with_pairing_endpoints(
                 Ok(_) => return Ok(endpoint),
                 Err(error) => {
                     let message = format!("{error:#}");
-                    retryable_failure |= adb::pairing_error_is_retryable(&message);
                     shared
                         .lock()
                         .unwrap()
                         .log(format!("Pairing endpoint {endpoint} failed: {message}"));
+                    last_error = Some(message.clone());
+
+                    if pairing_error_needs_adb_reset(&message) {
+                        if reset_adb_after_protocol_fault {
+                            last_error = Some(format!(
+                                "{message}. ADB was restarted once and the pairing protocol still failed; start a new QR scan, or toggle Wireless debugging off and on before retrying."
+                            ));
+                            break 'pairing;
+                        }
+
+                        reset_adb_after_protocol_fault = true;
+                        update_phase(
+                            shared,
+                            ctx,
+                            cancel,
+                            PairingPhase::Connecting {
+                                progress: PairingProgress::new(
+                                    "Restarting ADB server",
+                                    "ADB reported a pairing protocol fault; resetting the local ADB server before retrying.",
+                                )
+                                .deadline(deadline)
+                                .attempt(attempt)
+                                .endpoint(endpoint.clone()),
+                            },
+                        );
+                        shared
+                            .lock()
+                            .unwrap()
+                            .log("Restarting ADB server after pairing protocol fault");
+
+                        match adb.reset_server() {
+                            Ok(()) => {
+                                sleep_or_cancel(cancel, Duration::from_secs(1))?;
+                                continue 'pairing;
+                            }
+                            Err(reset_error) => {
+                                last_error = Some(format!(
+                                    "{message}; additionally failed to restart ADB: {reset_error:#}"
+                                ));
+                                break 'pairing;
+                            }
+                        }
+                    }
+
+                    retryable_failure |= adb::pairing_error_is_retryable(&message);
                     update_phase(
                         shared,
                         ctx,
@@ -737,7 +795,6 @@ fn pair_with_pairing_endpoints(
                             .endpoint(endpoint.clone()),
                         },
                     );
-                    last_error = Some(message);
                 }
             }
         }
@@ -1178,6 +1235,15 @@ fn is_ipv4_endpoint(endpoint: &str) -> bool {
     host_parts.clone().count() == 4 && host_parts.all(|part| part.parse::<u8>().is_ok())
 }
 
+fn pairing_error_needs_adb_reset(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+
+    message.contains("protocol fault")
+        && (message.contains("couldn't read status")
+            || message.contains("could not read status")
+            || message.contains("no status"))
+}
+
 fn compact_error(message: &str) -> String {
     let message = message
         .lines()
@@ -1268,6 +1334,17 @@ mod tests {
             extract_ipv4_endpoints(hierarchy),
             vec!["192.168.68.54:37197"]
         );
+    }
+
+    #[test]
+    fn protocol_fault_pairing_errors_trigger_adb_reset() {
+        assert!(pairing_error_needs_adb_reset(
+            "adb pair failed: error: protocol fault (couldn't read status message): Undefined error: 0"
+        ));
+        assert!(pairing_error_needs_adb_reset(
+            "error: protocol fault (no status)"
+        ));
+        assert!(!pairing_error_needs_adb_reset("connection refused"));
     }
 
     fn mdns_connect_service(instance: &str, address: &str) -> adb::MdnsService {

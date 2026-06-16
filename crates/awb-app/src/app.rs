@@ -268,8 +268,8 @@ impl App {
                     self.show(ctx, None);
                 }
             } else if event.id == self.pair_id {
-                self.show(ctx, None);
                 self.open_pairing(ctx);
+                self.show(ctx, None);
             } else if event.id == self.refresh_id {
                 backend::refresh_status(self.shared.clone(), ctx.clone());
             } else if event.id == self.quit_id {
