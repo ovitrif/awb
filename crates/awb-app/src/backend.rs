@@ -607,11 +607,13 @@ fn connect_after_pairing(
 
         // ADB can surface only a stale connect candidate while macOS Bonjour
         // sees the live endpoint, so always merge Bonjour results rather than
-        // falling back to them only when ADB returned nothing.
+        // falling back to them only when ADB returned nothing. Keep the
+        // Bonjour set on the pairing host so another advertising phone cannot
+        // satisfy this pairing flow.
         if let Ok(found) =
             dnssd::discover_connect_endpoints(pairing_endpoint, Duration::from_secs(2))
         {
-            for endpoint in found {
+            for endpoint in bonjour_connect_candidates_for_pairing(found, pairing_endpoint) {
                 if !endpoints.contains(&endpoint) {
                     endpoints.push(endpoint);
                 }
@@ -645,6 +647,18 @@ fn connect_after_pairing(
     }
 }
 
+fn bonjour_connect_candidates_for_pairing(
+    endpoints: Vec<String>,
+    pairing_endpoint: &str,
+) -> Vec<String> {
+    let pairing_host = adb::endpoint_host(pairing_endpoint);
+
+    endpoints
+        .into_iter()
+        .filter(|endpoint| adb::endpoint_host(endpoint) == pairing_host)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,6 +686,20 @@ mod tests {
         assert_eq!(
             mirror_key_for_device(&device, &[]),
             "adb-5C020DLCH0007Q-tfPgZw._adb-tls-connect._tcp"
+        );
+    }
+
+    #[test]
+    fn bonjour_connect_candidates_keep_pairing_host_only() {
+        assert_eq!(
+            bonjour_connect_candidates_for_pairing(
+                vec![
+                    "192.168.68.54:37197".to_string(),
+                    "192.168.68.99:37197".to_string(),
+                ],
+                "192.168.68.54:40713",
+            ),
+            vec!["192.168.68.54:37197"]
         );
     }
 

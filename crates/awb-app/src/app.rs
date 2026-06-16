@@ -331,11 +331,7 @@ impl App {
         }
 
         // Forget devices that have disconnected so a later reconnect re-mirrors.
-        let present: HashSet<&str> = snapshot
-            .devices
-            .iter()
-            .map(|d| d.mirror_key.as_str())
-            .collect();
+        let present = ready_device_mirror_keys(&snapshot.devices);
         self.auto_mirrored
             .retain(|serial| present.contains(serial.as_str()));
 
@@ -354,6 +350,14 @@ impl App {
             }
         }
     }
+}
+
+fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
+    devices
+        .iter()
+        .filter(|device| device.ready)
+        .map(|device| device.mirror_key.as_str())
+        .collect()
 }
 
 fn popover_position(
@@ -1306,6 +1310,19 @@ mod tests {
     const MARGIN: f64 = 8.0;
 
     #[test]
+    fn ready_mirror_keys_ignore_offline_devices() {
+        let devices = [
+            device_info("adb-ready._adb-tls-connect._tcp", true),
+            device_info("adb-offline._adb-tls-connect._tcp", false),
+        ];
+
+        let keys = ready_device_mirror_keys(&devices);
+
+        assert!(keys.contains("adb-ready._adb-tls-connect._tcp"));
+        assert!(!keys.contains("adb-offline._adb-tls-connect._tcp"));
+    }
+
+    #[test]
     fn clamps_primary_display_edges() {
         let displays = [DisplayBounds {
             min_x: 0.0,
@@ -1415,5 +1432,16 @@ mod tests {
         let x = clamp_window_x_to_displays(2010.0, 2200.0, 24.0, WIDTH, MARGIN, Some(1512.0), &[]);
 
         assert_eq!(x, 2010.0);
+    }
+
+    fn device_info(mirror_key: &str, ready: bool) -> backend::DeviceInfo {
+        backend::DeviceInfo {
+            serial: mirror_key.to_string(),
+            mirror_key: mirror_key.to_string(),
+            name: "Pixel".to_string(),
+            ready,
+            state: if ready { "device" } else { "offline" }.to_string(),
+            is_emulator: false,
+        }
     }
 }
