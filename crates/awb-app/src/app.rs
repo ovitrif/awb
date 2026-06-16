@@ -11,7 +11,7 @@ use egui_phosphor::regular as ph;
 use menu_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use menu_icon::{MenuBarIcon, MenuBarIconBuilder, MenuBarIconEvent, MouseButton, MouseButtonState};
 
-use crate::backend::{self, PairingPhase, Shared, Snapshot};
+use crate::backend::{self, PairingPhase, PairingProgress, Shared, Snapshot};
 use crate::config::Settings;
 use crate::glyph;
 use crate::login_item;
@@ -899,8 +899,8 @@ impl App {
         };
 
         match phase {
-            PairingPhase::Qr { modules } => {
-                let content_height = 168.0 + 14.0 + 18.0 + 4.0 + 30.0;
+            PairingPhase::Qr { modules, progress } => {
+                let content_height = 168.0 + 14.0 + 18.0 + 4.0 + 30.0 + 12.0 + 50.0;
                 center_pad(ui, content_height);
 
                 ui.vertical_centered(|ui| {
@@ -941,16 +941,24 @@ impl App {
                         "Developer options → Wireless debugging → Pair device with QR code",
                         300.0,
                     );
+                    ui.add_space(12.0);
+                    pairing_progress_block(ui, &progress, 310.0);
                 });
             }
-            PairingPhase::Connecting { label } => {
-                center_pad(ui, 28.0 + 12.0 + 18.0 + 4.0 + 16.0);
+            PairingPhase::Connecting { progress } => {
+                center_pad(ui, 28.0 + 12.0 + 18.0 + 4.0 + 34.0 + 10.0 + 32.0);
                 ui.vertical_centered(|ui| {
                     ui.add(egui::Spinner::new().size(28.0).color(theme::GREEN));
                     ui.add_space(12.0);
-                    ui.add(Label::new(semibold(label, 13.0, theme::TEXT_BRIGHT)));
+                    ui.add(Label::new(semibold(
+                        progress.title.clone(),
+                        13.0,
+                        theme::TEXT_BRIGHT,
+                    )));
                     ui.add_space(4.0);
-                    hint_label(ui, "Keep both devices on the same Wi-Fi network", 280.0);
+                    hint_label(ui, &progress.detail, 300.0);
+                    ui.add_space(10.0);
+                    pairing_progress_block(ui, &progress, 310.0);
                 });
             }
             PairingPhase::Failed { message } => {
@@ -1248,6 +1256,61 @@ fn hint_label(ui: &mut Ui, text: &str, width: f32) {
                 .wrap(),
         );
     });
+}
+
+fn pairing_progress_block(ui: &mut Ui, progress: &PairingProgress, width: f32) {
+    if progress.deadline.is_some() {
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+    }
+
+    let meta = pairing_progress_meta(progress);
+    if !meta.is_empty() {
+        ui.scope(|ui| {
+            ui.set_max_width(width);
+            ui.add(
+                Label::new(medium(meta, 11.0, theme::GREEN))
+                    .halign(egui::Align::Center)
+                    .wrap(),
+            );
+        });
+    }
+
+    if let Some(endpoint) = &progress.endpoint {
+        ui.add_space(4.0);
+        ui.scope(|ui| {
+            ui.set_max_width(width);
+            ui.add(
+                Label::new(regular(endpoint, 10.5, theme::TEXT_FAINT))
+                    .halign(egui::Align::Center)
+                    .wrap(),
+            );
+        });
+    }
+}
+
+fn pairing_progress_meta(progress: &PairingProgress) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(deadline) = progress.deadline {
+        let seconds = display_remaining_seconds(deadline);
+        parts.push(format!("{seconds}s remaining"));
+    }
+
+    if let Some(attempt) = progress.attempt {
+        parts.push(format!("attempt {attempt}"));
+    }
+
+    parts.join(" · ")
+}
+
+fn display_remaining_seconds(deadline: Instant) -> u64 {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+
+    if remaining.is_zero() {
+        0
+    } else {
+        remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)
+    }
 }
 
 fn pill_button(
