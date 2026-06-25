@@ -518,9 +518,11 @@ fn collect_status(args: &Args) -> StatusSnapshot {
         devices_error: None,
     };
     let mut devices = Vec::new();
+    let mut scrcpy_adb = None;
 
     match Adb::resolve(args.adb.clone()) {
         Ok(adb) => {
+            scrcpy_adb = Some(adb.clone());
             adb_status.path = Some(adb.path().display().to_string());
 
             match adb.version() {
@@ -550,7 +552,7 @@ fn collect_status(args: &Args) -> StatusSnapshot {
     StatusSnapshot {
         awb_version: env!("CARGO_PKG_VERSION"),
         adb: adb_status,
-        scrcpy: collect_scrcpy_status(args),
+        scrcpy: collect_scrcpy_status(args, scrcpy_adb),
         devices,
     }
 }
@@ -566,8 +568,8 @@ fn collect_adb_mdns_status(adb: &Adb) -> (Option<bool>, Option<String>) {
     }
 }
 
-fn collect_scrcpy_status(args: &Args) -> ToolStatus {
-    match Scrcpy::resolve(args.scrcpy.clone(), args.no_scrcpy_check) {
+fn collect_scrcpy_status(args: &Args, adb: Option<Adb>) -> ToolStatus {
+    match Scrcpy::resolve_with_adb(args.scrcpy.clone(), args.no_scrcpy_check, adb) {
         Ok(scrcpy) => ToolStatus {
             path: Some(scrcpy.path().display().to_string()),
             available: true,
@@ -674,8 +676,8 @@ fn handle_connected_phone(
     }
 
     match action {
-        ConnectedAction::StartBackground => start_scrcpy_background(phone, args),
-        ConnectedAction::StartForeground => start_scrcpy_foreground(phone, args),
+        ConnectedAction::StartBackground => start_scrcpy_background(adb, phone, args),
+        ConnectedAction::StartForeground => start_scrcpy_foreground(adb, phone, args),
         ConnectedAction::Close => Ok(()),
     }
 }
@@ -734,15 +736,15 @@ fn connect_only_phone(adb: &Adb, timeout: Duration) -> Result<Option<ConnectedPh
     }
 }
 
-fn start_scrcpy_background(phone: &ConnectedPhone, args: &Args) -> Result<()> {
-    let scrcpy = resolve_scrcpy(args)?;
+fn start_scrcpy_background(adb: &Adb, phone: &ConnectedPhone, args: &Args) -> Result<()> {
+    let scrcpy = resolve_scrcpy(args, adb)?;
     let pid = scrcpy.launch_background(&phone.serial, &args.scrcpy_options())?;
     ui::success(format!("Started scrcpy (pid {pid}); awb can close now."));
     Ok(())
 }
 
-fn start_scrcpy_foreground(phone: &ConnectedPhone, args: &Args) -> Result<()> {
-    let scrcpy = resolve_scrcpy(args)?;
+fn start_scrcpy_foreground(adb: &Adb, phone: &ConnectedPhone, args: &Args) -> Result<()> {
+    let scrcpy = resolve_scrcpy(args, adb)?;
     scrcpy.launch(&phone.serial, &args.scrcpy_options())
 }
 
@@ -762,7 +764,7 @@ fn watch_connected_phone(
     );
 
     let scrcpy = if scrcpy_mode.is_some() {
-        Some(resolve_scrcpy(args)?)
+        Some(resolve_scrcpy(args, adb)?)
     } else {
         None
     };
@@ -1009,8 +1011,8 @@ fn report_wifi_status(adb: &Adb, serial: &str, last_status: &mut Option<String>)
     }
 }
 
-fn resolve_scrcpy(args: &Args) -> Result<Scrcpy> {
-    Scrcpy::resolve(args.scrcpy.clone(), args.no_scrcpy_check)
+fn resolve_scrcpy(args: &Args, adb: &Adb) -> Result<Scrcpy> {
+    Scrcpy::resolve_with_adb(args.scrcpy.clone(), args.no_scrcpy_check, Some(adb.clone()))
         .context("scrcpy was not found. Install scrcpy, then try again")
 }
 

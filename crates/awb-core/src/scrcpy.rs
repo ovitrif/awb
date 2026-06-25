@@ -4,7 +4,8 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-use crate::command_path::resolve_program;
+use crate::adb::Adb;
+use crate::command_path::{path_env_with_tool_dirs, resolve_program};
 
 pub const DEFAULT_WINDOW_WIDTH: u32 = 480;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
@@ -12,6 +13,7 @@ pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
 #[derive(Debug, Clone)]
 pub struct Scrcpy {
     path: PathBuf,
+    adb: Option<Adb>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,13 +24,24 @@ pub enum ScrcpyRunMode {
 
 impl Scrcpy {
     pub fn resolve(override_path: Option<PathBuf>, skip_check: bool) -> Result<Self> {
+        Self::resolve_with_adb(override_path, skip_check, None)
+    }
+
+    pub fn resolve_with_adb(
+        override_path: Option<PathBuf>,
+        skip_check: bool,
+        adb: Option<Adb>,
+    ) -> Result<Self> {
         let path = if skip_check {
             override_path.unwrap_or_else(|| PathBuf::from("scrcpy"))
         } else {
             resolve_program("scrcpy", override_path)?
         };
 
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            adb: adb.or_else(|| Adb::resolve(None).ok()),
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -36,8 +49,10 @@ impl Scrcpy {
     }
 
     pub fn launch(&self, serial: &str, options: &ScrcpyOptions) -> Result<()> {
-        let status = Command::new(&self.path)
-            .args(default_args(serial, options))
+        self.ensure_adb_server()?;
+
+        let status = self
+            .command(serial, options)
             .status()
             .with_context(|| format!("failed to run {}", self.path.display()))?;
 
@@ -59,20 +74,75 @@ impl Scrcpy {
         options: &ScrcpyOptions,
         mode: ScrcpyRunMode,
     ) -> Result<Child> {
-        let mut command = Command::new(&self.path);
-        command.args(default_args(serial, options));
+        self.spawn_configured(serial, options, |command| {
+            if mode == ScrcpyRunMode::Background {
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+            }
+        })
+    }
 
-        if mode == ScrcpyRunMode::Background {
+    pub fn spawn_piped(&self, serial: &str, options: &ScrcpyOptions) -> Result<Child> {
+        self.spawn_configured(serial, options, |command| {
             command
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        })
+    }
+
+    fn spawn_configured(
+        &self,
+        serial: &str,
+        options: &ScrcpyOptions,
+        configure: impl FnOnce(&mut Command),
+    ) -> Result<Child> {
+        self.ensure_adb_server()?;
+
+        let mut command = self.command(serial, options);
+        configure(&mut command);
+
+        command
+            .spawn()
+            .with_context(|| format!("failed to run {}", self.path.display()))
+    }
+
+    fn command(&self, serial: &str, options: &ScrcpyOptions) -> Command {
+        let mut command = Command::new(&self.path);
+        command.args(default_args(serial, options));
+        self.configure_adb_env(&mut command);
+        command
+    }
+
+    fn configure_adb_env(&self, command: &mut Command) {
+        let adb_dir = self
+            .adb
+            .as_ref()
+            .and_then(|adb| adb.path().parent())
+            .map(Path::to_path_buf);
+
+        if let Some(adb) = &self.adb {
+            command.env("ADB", adb.path());
         }
 
-        let child = command
-            .spawn()
-            .with_context(|| format!("failed to run {}", self.path.display()))?;
-        Ok(child)
+        if let Some(path) = path_env_with_tool_dirs(adb_dir) {
+            command.env("PATH", path);
+        }
+    }
+
+    fn ensure_adb_server(&self) -> Result<()> {
+        let Some(adb) = &self.adb else {
+            return Ok(());
+        };
+
+        match adb.start_server() {
+            Ok(()) => Ok(()),
+            Err(start_error) => adb.reset_server().with_context(|| {
+                format!("ADB start-server failed ({start_error:#}); reset also failed")
+            }),
+        }
     }
 }
 
@@ -215,5 +285,31 @@ mod tests {
 
         assert!(!args.contains(&"--window-width".to_string()));
         assert!(!args.contains(&"--window-height".to_string()));
+    }
+
+    #[test]
+    fn command_exports_resolved_adb_to_scrcpy() {
+        let adb_path = PathBuf::from("/custom/android/platform-tools/adb");
+        let scrcpy = Scrcpy {
+            path: PathBuf::from("/usr/local/bin/scrcpy"),
+            adb: Some(Adb::from_resolved_path(adb_path.clone())),
+        };
+
+        let command = scrcpy.command("device", &ScrcpyOptions::default());
+        let envs: Vec<_> = command.get_envs().collect();
+        let adb_env = envs
+            .iter()
+            .find(|(name, _)| *name == "ADB")
+            .and_then(|(_, value)| *value)
+            .expect("ADB should be set");
+        let path_env = envs
+            .iter()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| *value)
+            .expect("PATH should be set");
+        let path_dirs: Vec<_> = std::env::split_paths(path_env).collect();
+
+        assert_eq!(adb_env, adb_path.as_os_str());
+        assert_eq!(path_dirs.first().map(PathBuf::as_path), adb_path.parent());
     }
 }

@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Stdio};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -300,17 +300,13 @@ pub fn start_mirror(
     }
 
     thread::spawn(move || {
-        let result = Scrcpy::resolve(None, false).and_then(|scrcpy| {
-            let mut command = std::process::Command::new(scrcpy.path());
-            command
-                .args(awb_core::scrcpy::default_args(&device.serial, &options))
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            command
-                .spawn()
-                .map_err(|error| anyhow::anyhow!("failed to start scrcpy: {error}"))
-        });
+        let result = {
+            let _adb_work = ADB_WORK_LOCK.lock().unwrap();
+            Adb::resolve(None).and_then(|adb| {
+                Scrcpy::resolve_with_adb(None, false, Some(adb))
+                    .and_then(|scrcpy| scrcpy.spawn_piped(&device.serial, &options))
+            })
+        };
 
         let mut state = shared.lock().unwrap();
         let start_still_wanted = state.starting_mirrors.remove(&mirror_key);
