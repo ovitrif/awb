@@ -9,6 +9,7 @@ use crate::command_path::{path_env_with_tool_dirs, resolve_program};
 
 pub const DEFAULT_WINDOW_WIDTH: u32 = 480;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
+const RECOMMENDED_SCRCPY_VERSION: ScrcpyVersion = ScrcpyVersion::new(4, 0, 0);
 
 #[derive(Debug, Clone)]
 pub struct Scrcpy {
@@ -20,6 +21,39 @@ pub struct Scrcpy {
 pub enum ScrcpyRunMode {
     Background,
     Foreground,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrcpyDiagnostics {
+    pub version_line: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ScrcpyVersion {
+    major: u16,
+    minor: u16,
+    patch: u16,
+}
+
+impl ScrcpyVersion {
+    const fn new(major: u16, minor: u16, patch: u16) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+impl std::fmt::Display for ScrcpyVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.patch == 0 {
+            write!(f, "{}.{}", self.major, self.minor)
+        } else {
+            write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+        }
+    }
 }
 
 impl Scrcpy {
@@ -46,6 +80,68 @@ impl Scrcpy {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn version_line(&self) -> Result<String> {
+        let output = self
+            .metadata_command("--version")
+            .output()
+            .with_context(|| format!("failed to run {} --version", self.path.display()))?;
+        let output = command_output("scrcpy --version", output)?;
+
+        Ok(output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(&output)
+            .to_string())
+    }
+
+    pub fn diagnostics(&self, options: &ScrcpyOptions) -> ScrcpyDiagnostics {
+        let (version_line, version_error) = match self.version_line() {
+            Ok(line) => (Some(line), None),
+            Err(error) => (None, Some(error)),
+        };
+        let help = self.help_text();
+        let mut warnings = Vec::new();
+
+        match version_line.as_deref().and_then(parse_scrcpy_version) {
+            Some(version) if version < RECOMMENDED_SCRCPY_VERSION => warnings.push(format!(
+                "scrcpy {version} detected at {}. AWB works best with scrcpy {RECOMMENDED_SCRCPY_VERSION} or newer; run `brew upgrade scrcpy` if mirroring fails.",
+                self.path.display()
+            )),
+            Some(_) => {}
+            None => {
+                if let Some(error) = version_error {
+                    warnings.push(format!(
+                        "Could not read scrcpy version from {}: {error:#}. If mirroring fails, run `brew upgrade scrcpy` and try again.",
+                        self.path.display()
+                    ));
+                }
+            }
+        }
+
+        match help {
+            Ok(help) => {
+                for flag in compatibility_flags(options) {
+                    if !help.contains(flag) {
+                        warnings.push(format!(
+                            "scrcpy at {} does not advertise `{flag}` in `scrcpy --help`; update it with `brew upgrade scrcpy` or disable the related AWB setting.",
+                            self.path.display()
+                        ));
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "Could not inspect scrcpy options from {}: {error:#}. If mirroring fails, run `brew upgrade scrcpy` and try again.",
+                self.path.display()
+            )),
+        }
+
+        ScrcpyDiagnostics {
+            version_line,
+            warnings,
+        }
     }
 
     pub fn launch(&self, serial: &str, options: &ScrcpyOptions) -> Result<()> {
@@ -116,6 +212,13 @@ impl Scrcpy {
         command
     }
 
+    fn metadata_command(&self, arg: &str) -> Command {
+        let mut command = Command::new(&self.path);
+        command.arg(arg);
+        self.configure_adb_env(&mut command);
+        command
+    }
+
     fn configure_adb_env(&self, command: &mut Command) {
         let adb_dir = self
             .adb
@@ -143,6 +246,15 @@ impl Scrcpy {
                 format!("ADB start-server failed ({start_error:#}); reset also failed")
             }),
         }
+    }
+
+    fn help_text(&self) -> Result<String> {
+        let output = self
+            .metadata_command("--help")
+            .output()
+            .with_context(|| format!("failed to run {} --help", self.path.display()))?;
+
+        command_output("scrcpy --help", output)
     }
 }
 
@@ -206,6 +318,86 @@ pub fn default_args(serial: &str, options: &ScrcpyOptions) -> Vec<OsString> {
     }
 
     args
+}
+
+fn command_output(command: &str, output: std::process::Output) -> Result<String> {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let text = match (stdout.is_empty(), stderr.is_empty()) {
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (false, false) => format!("{stdout}\n{stderr}"),
+        (true, true) => String::new(),
+    };
+
+    if output.status.success() {
+        Ok(text)
+    } else {
+        bail!("{command} exited with status {}: {text}", output.status)
+    }
+}
+
+fn compatibility_flags(options: &ScrcpyOptions) -> Vec<&'static str> {
+    let mut flags = vec!["--no-audio", "--stay-awake"];
+
+    if options.borderless {
+        flags.push("--window-borderless");
+    }
+
+    if options.always_on_top {
+        flags.push("--always-on-top");
+    }
+
+    if !options.window_title.is_empty() {
+        flags.push("--window-title");
+    }
+
+    if options.window_width > 0 {
+        flags.push("--window-width");
+    }
+
+    if options.window_height > 0 {
+        flags.push("--window-height");
+    }
+
+    flags
+}
+
+fn parse_scrcpy_version(line: &str) -> Option<ScrcpyVersion> {
+    line.split_whitespace()
+        .filter_map(parse_version_token)
+        .next()
+}
+
+fn parse_version_token(token: &str) -> Option<ScrcpyVersion> {
+    let token = token.trim_start_matches('v');
+    if !token
+        .chars()
+        .next()
+        .is_some_and(|char| char.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let mut parts = token.split('.');
+    let major = parse_number_prefix(parts.next()?)?;
+    let minor = parse_number_prefix(parts.next()?)?;
+    let patch = parts.next().and_then(parse_number_prefix).unwrap_or(0);
+
+    Some(ScrcpyVersion::new(major, minor, patch))
+}
+
+fn parse_number_prefix(value: &str) -> Option<u16> {
+    let digits: String = value
+        .chars()
+        .take_while(|char| char.is_ascii_digit())
+        .collect();
+
+    if digits.is_empty() {
+        return None;
+    }
+
+    digits.parse().ok()
 }
 
 #[cfg(test)]
@@ -311,5 +503,39 @@ mod tests {
 
         assert_eq!(adb_env, adb_path.as_os_str());
         assert_eq!(path_dirs.first().map(PathBuf::as_path), adb_path.parent());
+    }
+
+    #[test]
+    fn parses_scrcpy_versions() {
+        assert_eq!(
+            parse_scrcpy_version("scrcpy 4.0 <https://github.com/Genymobile/scrcpy>"),
+            Some(ScrcpyVersion::new(4, 0, 0))
+        );
+        assert_eq!(
+            parse_scrcpy_version("scrcpy 3.3.4"),
+            Some(ScrcpyVersion::new(3, 3, 4))
+        );
+    }
+
+    #[test]
+    fn compatibility_flags_follow_enabled_options() {
+        let default_flags = compatibility_flags(&ScrcpyOptions::default());
+        assert!(default_flags.contains(&"--window-borderless"));
+        assert!(!default_flags.contains(&"--always-on-top"));
+
+        let custom_flags = compatibility_flags(&ScrcpyOptions {
+            borderless: false,
+            always_on_top: true,
+            window_title: String::new(),
+            window_width: 0,
+            window_height: 0,
+            ..ScrcpyOptions::default()
+        });
+
+        assert!(!custom_flags.contains(&"--window-borderless"));
+        assert!(custom_flags.contains(&"--always-on-top"));
+        assert!(!custom_flags.contains(&"--window-title"));
+        assert!(!custom_flags.contains(&"--window-width"));
+        assert!(!custom_flags.contains(&"--window-height"));
     }
 }

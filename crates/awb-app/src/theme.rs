@@ -22,6 +22,7 @@ pub const TEXT_CHECK: Color32 = Color32::from_rgb(0xC9, 0xCC, 0xD6);
 
 pub const GREEN: Color32 = Color32::from_rgb(0x3D, 0xDC, 0x84);
 pub const GREEN_INK: Color32 = Color32::from_rgb(0x0A, 0x2A, 0x1B);
+pub const AMBER: Color32 = Color32::from_rgb(0xF2, 0xC9, 0x4C);
 pub const RED: Color32 = Color32::from_rgb(0xF8, 0x71, 0x71);
 
 pub const SURFACE: Color32 = Color32::from_rgba_premultiplied(0x0D, 0x0D, 0x0D, 0x0D);

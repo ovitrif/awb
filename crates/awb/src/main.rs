@@ -237,6 +237,8 @@ struct AdbStatus {
 struct ToolStatus {
     path: Option<String>,
     available: bool,
+    version: Option<String>,
+    warnings: Vec<String>,
     error: Option<String>,
 }
 
@@ -462,6 +464,8 @@ fn print_status(args: &Args, status_args: &StatusArgs) -> Result<()> {
         "ADB",
         &snapshot.adb.path,
         snapshot.adb.available,
+        &snapshot.adb.version,
+        &[],
         &snapshot.adb.error,
     );
 
@@ -477,6 +481,8 @@ fn print_status(args: &Args, status_args: &StatusArgs) -> Result<()> {
         "scrcpy",
         &snapshot.scrcpy.path,
         snapshot.scrcpy.available,
+        &snapshot.scrcpy.version,
+        &snapshot.scrcpy.warnings,
         &snapshot.scrcpy.error,
     );
 
@@ -498,12 +504,24 @@ fn print_status(args: &Args, status_args: &StatusArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_tool_status(name: &str, path: &Option<String>, available: bool, error: &Option<String>) {
-    match (available, path, error) {
-        (true, Some(path), _) => ui::success(format!("{name}: {path}")),
-        (true, None, _) => ui::success(format!("{name}: available")),
-        (false, _, Some(error)) => ui::warn(format!("{name}: {error}")),
-        (false, _, None) => ui::warn(format!("{name}: unavailable")),
+fn print_tool_status(
+    name: &str,
+    path: &Option<String>,
+    available: bool,
+    version: &Option<String>,
+    warnings: &[String],
+    error: &Option<String>,
+) {
+    match (available, path, version, error) {
+        (true, Some(path), Some(version), _) => ui::success(format!("{name}: {path} ({version})")),
+        (true, Some(path), None, _) => ui::success(format!("{name}: {path}")),
+        (true, None, _, _) => ui::success(format!("{name}: available")),
+        (false, _, _, Some(error)) => ui::warn(format!("{name}: {error}")),
+        (false, _, _, None) => ui::warn(format!("{name}: unavailable")),
+    }
+
+    for warning in warnings {
+        ui::warn(warning);
     }
 }
 
@@ -570,14 +588,21 @@ fn collect_adb_mdns_status(adb: &Adb) -> (Option<bool>, Option<String>) {
 
 fn collect_scrcpy_status(args: &Args, adb: Option<Adb>) -> ToolStatus {
     match Scrcpy::resolve_with_adb(args.scrcpy.clone(), args.no_scrcpy_check, adb) {
-        Ok(scrcpy) => ToolStatus {
-            path: Some(scrcpy.path().display().to_string()),
-            available: true,
-            error: None,
-        },
+        Ok(scrcpy) => {
+            let diagnostics = scrcpy.diagnostics(&args.scrcpy_options());
+            ToolStatus {
+                path: Some(scrcpy.path().display().to_string()),
+                available: true,
+                version: diagnostics.version_line,
+                warnings: diagnostics.warnings,
+                error: None,
+            }
+        }
         Err(error) => ToolStatus {
             path: None,
             available: false,
+            version: None,
+            warnings: Vec::new(),
             error: Some(format!("{error:#}")),
         },
     }
@@ -1012,8 +1037,15 @@ fn report_wifi_status(adb: &Adb, serial: &str, last_status: &mut Option<String>)
 }
 
 fn resolve_scrcpy(args: &Args, adb: &Adb) -> Result<Scrcpy> {
-    Scrcpy::resolve_with_adb(args.scrcpy.clone(), args.no_scrcpy_check, Some(adb.clone()))
-        .context("scrcpy was not found. Install scrcpy, then try again")
+    let scrcpy =
+        Scrcpy::resolve_with_adb(args.scrcpy.clone(), args.no_scrcpy_check, Some(adb.clone()))
+            .context("scrcpy was not found. Install scrcpy, then try again")?;
+
+    for warning in scrcpy.diagnostics(&args.scrcpy_options()).warnings {
+        ui::warn(warning);
+    }
+
+    Ok(scrcpy)
 }
 
 fn startup_device_choice(adb: &Adb) -> Result<StartupDeviceChoice> {
