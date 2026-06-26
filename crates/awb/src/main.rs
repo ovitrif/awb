@@ -20,6 +20,7 @@ use serde::Serialize;
 
 const BINARY_NAME: &str = "awb";
 const APP_BINARY_NAME: &str = "awb-app";
+const APP_BUNDLE_PATH: &str = "/Applications/AWB.app";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -426,6 +427,22 @@ fn handle_cli_command(command: &CliCommand, args: &Args) -> Result<()> {
 }
 
 fn launch_app() -> Result<()> {
+    let app_bundle = PathBuf::from(APP_BUNDLE_PATH);
+    if app_bundle.is_dir() {
+        let status = ProcessCommand::new("open")
+            .arg("-n")
+            .arg(&app_bundle)
+            .status()
+            .with_context(|| format!("could not launch {}", app_bundle.display()))?;
+
+        if status.success() {
+            ui::success(format!("Launched {}.", app_bundle.display()));
+            return Ok(());
+        }
+
+        bail!("open exited with status {status}");
+    }
+
     let app_path = env::current_exe()
         .ok()
         .and_then(|exe| Some(exe.parent()?.join(APP_BINARY_NAME)))
