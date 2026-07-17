@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -10,6 +12,7 @@ use crate::command_path::{path_env_with_tool_dirs, resolve_program};
 pub const DEFAULT_WINDOW_WIDTH: u32 = 480;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
 const RECOMMENDED_SCRCPY_VERSION: ScrcpyVersion = ScrcpyVersion::new(4, 0, 0);
+const SCRCPY_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct Scrcpy {
@@ -83,10 +86,7 @@ impl Scrcpy {
     }
 
     pub fn version_line(&self) -> Result<String> {
-        let output = self
-            .metadata_command("--version")
-            .output()
-            .with_context(|| format!("failed to run {} --version", self.path.display()))?;
+        let output = self.metadata_output("--version", SCRCPY_METADATA_TIMEOUT)?;
         let output = command_output("scrcpy --version", output)?;
 
         Ok(output
@@ -219,6 +219,41 @@ impl Scrcpy {
         command
     }
 
+    fn metadata_output(&self, arg: &str, timeout: Duration) -> Result<Output> {
+        let command_display = format!("{} {arg}", self.path.display());
+        let mut command = self.metadata_command(arg);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to run {command_display}"))?;
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if child
+                .try_wait()
+                .with_context(|| format!("failed to poll {command_display}"))?
+                .is_some()
+            {
+                return child
+                    .wait_with_output()
+                    .with_context(|| format!("failed to read {command_display} output"));
+            }
+
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                child
+                    .wait()
+                    .with_context(|| format!("failed to reap timed-out {command_display}"))?;
+                bail!(
+                    "{command_display} timed out after {} seconds",
+                    timeout.as_secs_f32()
+                );
+            }
+
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     fn configure_adb_env(&self, command: &mut Command) {
         let adb_dir = self
             .adb
@@ -249,10 +284,7 @@ impl Scrcpy {
     }
 
     fn help_text(&self) -> Result<String> {
-        let output = self
-            .metadata_command("--help")
-            .output()
-            .with_context(|| format!("failed to run {} --help", self.path.display()))?;
+        let output = self.metadata_output("--help", SCRCPY_METADATA_TIMEOUT)?;
 
         command_output("scrcpy --help", output)
     }
@@ -338,7 +370,15 @@ fn command_output(command: &str, output: std::process::Output) -> Result<String>
 }
 
 fn compatibility_flags(options: &ScrcpyOptions) -> Vec<&'static str> {
-    let mut flags = vec!["--no-audio", "--stay-awake"];
+    let mut flags = Vec::new();
+
+    if options.no_audio {
+        flags.push("--no-audio");
+    }
+
+    if options.stay_awake {
+        flags.push("--stay-awake");
+    }
 
     if options.borderless {
         flags.push("--window-borderless");
@@ -524,18 +564,59 @@ mod tests {
         assert!(!default_flags.contains(&"--always-on-top"));
 
         let custom_flags = compatibility_flags(&ScrcpyOptions {
+            no_audio: false,
+            stay_awake: false,
             borderless: false,
             always_on_top: true,
             window_title: String::new(),
             window_width: 0,
             window_height: 0,
-            ..ScrcpyOptions::default()
         });
 
+        assert!(!custom_flags.contains(&"--no-audio"));
+        assert!(!custom_flags.contains(&"--stay-awake"));
         assert!(!custom_flags.contains(&"--window-borderless"));
         assert!(custom_flags.contains(&"--always-on-top"));
         assert!(!custom_flags.contains(&"--window-title"));
         assert!(!custom_flags.contains(&"--window-width"));
         assert!(!custom_flags.contains(&"--window-height"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_commands_time_out_and_reap_the_process() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let script = std::env::temp_dir().join(format!(
+            "awb-scrcpy-timeout-{}-{unique}.sh",
+            std::process::id()
+        ));
+        fs::write(&script, "#!/bin/sh\nwhile :; do :; done\n")
+            .expect("timeout fixture should be writable");
+        let mut permissions = fs::metadata(&script)
+            .expect("timeout fixture should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("timeout fixture should be executable");
+
+        let scrcpy = Scrcpy {
+            path: script.clone(),
+            adb: None,
+        };
+        let started = Instant::now();
+        let error = scrcpy
+            .metadata_output("--version", Duration::from_millis(50))
+            .expect_err("unresponsive metadata command should time out");
+        let elapsed = started.elapsed();
+        fs::remove_file(script).expect("timeout fixture should be removable after child is reaped");
+
+        assert!(format!("{error:#}").contains("timed out"));
+        assert!(elapsed < Duration::from_secs(1));
     }
 }
