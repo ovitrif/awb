@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Button, Color32, Context, CornerRadius, FontFamily, FontId, Frame, Label, Layout,
-    Margin, Rect, RichText, Sense, Stroke, TextEdit, TextureHandle, TextureOptions, Ui,
-    ViewportCommand, vec2,
+    Margin, Rect, Sense, Stroke, TextEdit, TextureHandle, TextureOptions, Ui, ViewportCommand,
+    vec2,
 };
 use egui_phosphor::regular as ph;
 use menu_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
@@ -779,31 +779,30 @@ impl App {
 
     fn logs_tab(&mut self, ui: &mut Ui) {
         let logs: Vec<String> = self.shared.lock().unwrap().logs.clone();
+        let empty = logs.is_empty();
+        let mut log_text = if empty {
+            "No output yet.".to_string()
+        } else {
+            logs.join("\n")
+        };
 
         ui.add_space(8.0);
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if logs.is_empty() {
-                    ui.add(Label::new(
-                        RichText::new("No output yet.")
-                            .font(FontId::new(10.5, FontFamily::Monospace))
-                            .color(theme::TEXT_FAINT),
-                    ));
-                }
-
-                for line in &logs {
-                    ui.add(
-                        Label::new(
-                            RichText::new(line)
-                                .font(FontId::new(10.5, FontFamily::Monospace))
-                                .color(theme::TEXT_CHECK),
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(2.0);
-                }
+                ui.add(
+                    TextEdit::multiline(&mut log_text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(logs.len().max(1))
+                        .font(FontId::new(10.5, FontFamily::Monospace))
+                        .text_color(if empty {
+                            theme::TEXT_FAINT
+                        } else {
+                            theme::TEXT_CHECK
+                        })
+                        .frame(Frame::NONE),
+                );
             });
     }
 
@@ -1134,22 +1133,38 @@ fn dependency_row(ui: &mut Ui, row_icon: &str, name: &str, info: Option<&backend
         ui.add(Label::new(medium(name, 12.5, theme::TEXT_BRIGHT)).selectable(false));
         ui.add_space(10.0);
 
-        let detail = info.map_or("checking…".to_string(), |tool| tool.detail.clone());
+        let warning = info.and_then(|tool| tool.warnings.first());
+        let detail = match (info, warning) {
+            (_, Some(warning)) => warning.clone(),
+            (Some(tool), None) => tool.detail.clone(),
+            (None, None) => "checking…".to_string(),
+        };
         let available_width = ui.available_width() - 50.0;
         ui.scope(|ui| {
             ui.set_max_width(available_width.max(40.0));
             ui.add(
-                Label::new(regular(detail, 11.0, theme::TEXT_FAINT))
-                    .truncate()
-                    .selectable(false),
+                Label::new(regular(
+                    detail,
+                    11.0,
+                    if warning.is_some() {
+                        theme::AMBER
+                    } else {
+                        theme::TEXT_FAINT
+                    },
+                ))
+                .truncate()
+                .selectable(false),
             );
         });
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(2.0);
             match info {
-                Some(tool) if tool.available => {
+                Some(tool) if tool.available && tool.warnings.is_empty() => {
                     ui.add(Label::new(regular("Ready", 11.0, theme::TEXT_MUTED)).selectable(false));
+                }
+                Some(tool) if tool.available => {
+                    ui.add(Label::new(regular("Update", 11.0, theme::AMBER)).selectable(false));
                 }
                 Some(_) => {
                     ui.add(Label::new(regular("Missing", 11.0, theme::RED)).selectable(false));

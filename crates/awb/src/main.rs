@@ -20,6 +20,7 @@ use serde::Serialize;
 
 const BINARY_NAME: &str = "awb";
 const APP_BINARY_NAME: &str = "awb-app";
+const APP_BUNDLE_PATH: &str = "/Applications/AWB.app";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -237,6 +238,8 @@ struct AdbStatus {
 struct ToolStatus {
     path: Option<String>,
     available: bool,
+    version: Option<String>,
+    warnings: Vec<String>,
     error: Option<String>,
 }
 
@@ -424,6 +427,22 @@ fn handle_cli_command(command: &CliCommand, args: &Args) -> Result<()> {
 }
 
 fn launch_app() -> Result<()> {
+    let app_bundle = PathBuf::from(APP_BUNDLE_PATH);
+    if app_bundle.is_dir() {
+        let status = ProcessCommand::new("open")
+            .arg("-n")
+            .arg(&app_bundle)
+            .status()
+            .with_context(|| format!("could not launch {}", app_bundle.display()))?;
+
+        if status.success() {
+            ui::success(format!("Launched {}.", app_bundle.display()));
+            return Ok(());
+        }
+
+        bail!("open exited with status {status}");
+    }
+
     let app_path = env::current_exe()
         .ok()
         .and_then(|exe| Some(exe.parent()?.join(APP_BINARY_NAME)))
@@ -462,6 +481,8 @@ fn print_status(args: &Args, status_args: &StatusArgs) -> Result<()> {
         "ADB",
         &snapshot.adb.path,
         snapshot.adb.available,
+        &snapshot.adb.version,
+        &[],
         &snapshot.adb.error,
     );
 
@@ -477,6 +498,8 @@ fn print_status(args: &Args, status_args: &StatusArgs) -> Result<()> {
         "scrcpy",
         &snapshot.scrcpy.path,
         snapshot.scrcpy.available,
+        &snapshot.scrcpy.version,
+        &snapshot.scrcpy.warnings,
         &snapshot.scrcpy.error,
     );
 
@@ -498,12 +521,24 @@ fn print_status(args: &Args, status_args: &StatusArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_tool_status(name: &str, path: &Option<String>, available: bool, error: &Option<String>) {
-    match (available, path, error) {
-        (true, Some(path), _) => ui::success(format!("{name}: {path}")),
-        (true, None, _) => ui::success(format!("{name}: available")),
-        (false, _, Some(error)) => ui::warn(format!("{name}: {error}")),
-        (false, _, None) => ui::warn(format!("{name}: unavailable")),
+fn print_tool_status(
+    name: &str,
+    path: &Option<String>,
+    available: bool,
+    version: &Option<String>,
+    warnings: &[String],
+    error: &Option<String>,
+) {
+    match (available, path, version, error) {
+        (true, Some(path), Some(version), _) => ui::success(format!("{name}: {path} ({version})")),
+        (true, Some(path), None, _) => ui::success(format!("{name}: {path}")),
+        (true, None, _, _) => ui::success(format!("{name}: available")),
+        (false, _, _, Some(error)) => ui::warn(format!("{name}: {error}")),
+        (false, _, _, None) => ui::warn(format!("{name}: unavailable")),
+    }
+
+    for warning in warnings {
+        ui::warn(warning);
     }
 }
 
@@ -518,9 +553,11 @@ fn collect_status(args: &Args) -> StatusSnapshot {
         devices_error: None,
     };
     let mut devices = Vec::new();
+    let mut scrcpy_adb = None;
 
     match Adb::resolve(args.adb.clone()) {
         Ok(adb) => {
+            scrcpy_adb = Some(adb.clone());
             adb_status.path = Some(adb.path().display().to_string());
 
             match adb.version() {
@@ -550,7 +587,7 @@ fn collect_status(args: &Args) -> StatusSnapshot {
     StatusSnapshot {
         awb_version: env!("CARGO_PKG_VERSION"),
         adb: adb_status,
-        scrcpy: collect_scrcpy_status(args),
+        scrcpy: collect_scrcpy_status(args, scrcpy_adb),
         devices,
     }
 }
@@ -566,16 +603,23 @@ fn collect_adb_mdns_status(adb: &Adb) -> (Option<bool>, Option<String>) {
     }
 }
 
-fn collect_scrcpy_status(args: &Args) -> ToolStatus {
-    match Scrcpy::resolve(args.scrcpy.clone(), args.no_scrcpy_check) {
-        Ok(scrcpy) => ToolStatus {
-            path: Some(scrcpy.path().display().to_string()),
-            available: true,
-            error: None,
-        },
+fn collect_scrcpy_status(args: &Args, adb: Option<Adb>) -> ToolStatus {
+    match Scrcpy::resolve_with_adb(args.scrcpy.clone(), args.no_scrcpy_check, adb) {
+        Ok(scrcpy) => {
+            let diagnostics = scrcpy.diagnostics(&args.scrcpy_options());
+            ToolStatus {
+                path: Some(scrcpy.path().display().to_string()),
+                available: true,
+                version: diagnostics.version_line,
+                warnings: diagnostics.warnings,
+                error: None,
+            }
+        }
         Err(error) => ToolStatus {
             path: None,
             available: false,
+            version: None,
+            warnings: Vec::new(),
             error: Some(format!("{error:#}")),
         },
     }
@@ -674,8 +718,8 @@ fn handle_connected_phone(
     }
 
     match action {
-        ConnectedAction::StartBackground => start_scrcpy_background(phone, args),
-        ConnectedAction::StartForeground => start_scrcpy_foreground(phone, args),
+        ConnectedAction::StartBackground => start_scrcpy_background(adb, phone, args),
+        ConnectedAction::StartForeground => start_scrcpy_foreground(adb, phone, args),
         ConnectedAction::Close => Ok(()),
     }
 }
@@ -734,15 +778,15 @@ fn connect_only_phone(adb: &Adb, timeout: Duration) -> Result<Option<ConnectedPh
     }
 }
 
-fn start_scrcpy_background(phone: &ConnectedPhone, args: &Args) -> Result<()> {
-    let scrcpy = resolve_scrcpy(args)?;
+fn start_scrcpy_background(adb: &Adb, phone: &ConnectedPhone, args: &Args) -> Result<()> {
+    let scrcpy = resolve_scrcpy(args, adb)?;
     let pid = scrcpy.launch_background(&phone.serial, &args.scrcpy_options())?;
     ui::success(format!("Started scrcpy (pid {pid}); awb can close now."));
     Ok(())
 }
 
-fn start_scrcpy_foreground(phone: &ConnectedPhone, args: &Args) -> Result<()> {
-    let scrcpy = resolve_scrcpy(args)?;
+fn start_scrcpy_foreground(adb: &Adb, phone: &ConnectedPhone, args: &Args) -> Result<()> {
+    let scrcpy = resolve_scrcpy(args, adb)?;
     scrcpy.launch(&phone.serial, &args.scrcpy_options())
 }
 
@@ -762,7 +806,7 @@ fn watch_connected_phone(
     );
 
     let scrcpy = if scrcpy_mode.is_some() {
-        Some(resolve_scrcpy(args)?)
+        Some(resolve_scrcpy(args, adb)?)
     } else {
         None
     };
@@ -1009,9 +1053,16 @@ fn report_wifi_status(adb: &Adb, serial: &str, last_status: &mut Option<String>)
     }
 }
 
-fn resolve_scrcpy(args: &Args) -> Result<Scrcpy> {
-    Scrcpy::resolve(args.scrcpy.clone(), args.no_scrcpy_check)
-        .context("scrcpy was not found. Install scrcpy, then try again")
+fn resolve_scrcpy(args: &Args, adb: &Adb) -> Result<Scrcpy> {
+    let scrcpy =
+        Scrcpy::resolve_with_adb(args.scrcpy.clone(), args.no_scrcpy_check, Some(adb.clone()))
+            .context("scrcpy was not found. Install scrcpy, then try again")?;
+
+    for warning in scrcpy.diagnostics(&args.scrcpy_options()).warnings {
+        ui::warn(warning);
+    }
+
+    Ok(scrcpy)
 }
 
 fn startup_device_choice(adb: &Adb) -> Result<StartupDeviceChoice> {

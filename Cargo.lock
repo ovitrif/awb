@@ -498,7 +498,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "awb"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "awb-core",
@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "awb-app"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "awb-core",
@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "awb-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "qrcode",
@@ -2348,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "menu-icon"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "tray-icon",
 ]

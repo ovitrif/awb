@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Stdio};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -27,6 +27,7 @@ pub use awb_core::pairing_flow::PairingProgress;
 pub struct ToolInfo {
     pub available: bool,
     pub detail: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +71,7 @@ pub struct Shared {
     pub snapshot: Option<Snapshot>,
     pub refreshing: bool,
     pub logs: Vec<String>,
+    pub logged_tool_warnings: HashSet<String>,
     pub pairing: Option<PairingSession>,
     pub mirrors: HashMap<String, Child>,
     pub starting_mirrors: HashSet<String>,
@@ -82,6 +84,14 @@ impl Shared {
         let overflow = self.logs.len().saturating_sub(600);
         if overflow > 0 {
             self.logs.drain(..overflow);
+        }
+    }
+
+    fn log_tool_warnings(&mut self, warnings: &[String]) {
+        for warning in warnings {
+            if self.logged_tool_warnings.insert(warning.clone()) {
+                self.log(warning);
+            }
         }
     }
 
@@ -151,6 +161,7 @@ pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
 
         let mut state = shared.lock().unwrap();
         state.reap_finished_mirrors();
+        state.log_tool_warnings(&snapshot.scrcpy.warnings);
         state.snapshot = Some(snapshot);
         state.refreshing = false;
         drop(state);
@@ -173,26 +184,41 @@ fn collect_snapshot() -> Snapshot {
                     .find(|line| !line.is_empty())
                     .unwrap_or("available")
                     .to_string(),
+                warnings: Vec::new(),
             },
             Err(error) => ToolInfo {
                 available: false,
                 detail: format!("{error:#}"),
+                warnings: Vec::new(),
             },
         },
         Err(error) => ToolInfo {
             available: false,
             detail: format!("{error:#}"),
+            warnings: Vec::new(),
         },
     };
 
     let scrcpy_info = match Scrcpy::resolve(None, false) {
-        Ok(scrcpy) => ToolInfo {
-            available: true,
-            detail: scrcpy.path().display().to_string(),
-        },
+        Ok(scrcpy) => {
+            let diagnostics = scrcpy.diagnostics(&Default::default());
+            let detail = match diagnostics.version_line {
+                Some(version) if !version.is_empty() => {
+                    format!("{} ({})", version, scrcpy.path().display())
+                }
+                _ => scrcpy.path().display().to_string(),
+            };
+
+            ToolInfo {
+                available: true,
+                detail,
+                warnings: diagnostics.warnings,
+            }
+        }
         Err(_) => ToolInfo {
             available: false,
             detail: "Not found".to_string(),
+            warnings: Vec::new(),
         },
     };
 
@@ -300,27 +326,27 @@ pub fn start_mirror(
     }
 
     thread::spawn(move || {
-        let result = Scrcpy::resolve(None, false).and_then(|scrcpy| {
-            let mut command = std::process::Command::new(scrcpy.path());
-            command
-                .args(awb_core::scrcpy::default_args(&device.serial, &options))
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            command
-                .spawn()
-                .map_err(|error| anyhow::anyhow!("failed to start scrcpy: {error}"))
-        });
+        let result = {
+            let _adb_work = ADB_WORK_LOCK.lock().unwrap();
+            Adb::resolve(None).and_then(|adb| {
+                Scrcpy::resolve_with_adb(None, false, Some(adb)).and_then(|scrcpy| {
+                    let diagnostics = scrcpy.diagnostics(&options);
+                    scrcpy
+                        .spawn_piped(&device.serial, &options)
+                        .map(|child| (child, diagnostics))
+                })
+            })
+        };
 
         let mut state = shared.lock().unwrap();
         let start_still_wanted = state.starting_mirrors.remove(&mirror_key);
         match result {
-            Ok(mut child) if !start_still_wanted => {
+            Ok((mut child, _)) if !start_still_wanted => {
                 let _ = child.kill();
                 let _ = child.wait();
                 state.log(format!("Cancelled mirror start for {}", device.name));
             }
-            Ok(mut child) if state.mirrors.contains_key(&mirror_key) => {
+            Ok((mut child, _)) if state.mirrors.contains_key(&mirror_key) => {
                 // Another start won the race (e.g. a rapid double-click). Drop-
                 // ping a Child does not kill scrcpy, so stop this extra process
                 // rather than replacing — and losing track of — the tracked one.
@@ -328,7 +354,8 @@ pub fn start_mirror(
                 let _ = child.wait();
                 state.log(format!("Already mirroring {}", device.name));
             }
-            Ok(mut child) => {
+            Ok((mut child, diagnostics)) => {
+                state.log_tool_warnings(&diagnostics.warnings);
                 state.log(format!("Mirroring {} (pid {})", device.name, child.id()));
 
                 if let Some(out) = child.stdout.take() {

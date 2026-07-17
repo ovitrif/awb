@@ -1,17 +1,23 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-use crate::command_path::resolve_program;
+use crate::adb::Adb;
+use crate::command_path::{path_env_with_tool_dirs, resolve_program};
 
 pub const DEFAULT_WINDOW_WIDTH: u32 = 480;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
+const RECOMMENDED_SCRCPY_VERSION: ScrcpyVersion = ScrcpyVersion::new(4, 0, 0);
+const SCRCPY_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct Scrcpy {
     path: PathBuf,
+    adb: Option<Adb>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,24 +26,129 @@ pub enum ScrcpyRunMode {
     Foreground,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrcpyDiagnostics {
+    pub version_line: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ScrcpyVersion {
+    major: u16,
+    minor: u16,
+    patch: u16,
+}
+
+impl ScrcpyVersion {
+    const fn new(major: u16, minor: u16, patch: u16) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+impl std::fmt::Display for ScrcpyVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.patch == 0 {
+            write!(f, "{}.{}", self.major, self.minor)
+        } else {
+            write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+        }
+    }
+}
+
 impl Scrcpy {
     pub fn resolve(override_path: Option<PathBuf>, skip_check: bool) -> Result<Self> {
+        Self::resolve_with_adb(override_path, skip_check, None)
+    }
+
+    pub fn resolve_with_adb(
+        override_path: Option<PathBuf>,
+        skip_check: bool,
+        adb: Option<Adb>,
+    ) -> Result<Self> {
         let path = if skip_check {
             override_path.unwrap_or_else(|| PathBuf::from("scrcpy"))
         } else {
             resolve_program("scrcpy", override_path)?
         };
 
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            adb: adb.or_else(|| Adb::resolve(None).ok()),
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    pub fn version_line(&self) -> Result<String> {
+        let output = self.metadata_output("--version", SCRCPY_METADATA_TIMEOUT)?;
+        let output = command_output("scrcpy --version", output)?;
+
+        Ok(output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(&output)
+            .to_string())
+    }
+
+    pub fn diagnostics(&self, options: &ScrcpyOptions) -> ScrcpyDiagnostics {
+        let (version_line, version_error) = match self.version_line() {
+            Ok(line) => (Some(line), None),
+            Err(error) => (None, Some(error)),
+        };
+        let help = self.help_text();
+        let mut warnings = Vec::new();
+
+        match version_line.as_deref().and_then(parse_scrcpy_version) {
+            Some(version) if version < RECOMMENDED_SCRCPY_VERSION => warnings.push(format!(
+                "scrcpy {version} detected at {}. AWB works best with scrcpy {RECOMMENDED_SCRCPY_VERSION} or newer; run `brew upgrade scrcpy` if mirroring fails.",
+                self.path.display()
+            )),
+            Some(_) => {}
+            None => {
+                if let Some(error) = version_error {
+                    warnings.push(format!(
+                        "Could not read scrcpy version from {}: {error:#}. If mirroring fails, run `brew upgrade scrcpy` and try again.",
+                        self.path.display()
+                    ));
+                }
+            }
+        }
+
+        match help {
+            Ok(help) => {
+                for flag in compatibility_flags(options) {
+                    if !help.contains(flag) {
+                        warnings.push(format!(
+                            "scrcpy at {} does not advertise `{flag}` in `scrcpy --help`; update it with `brew upgrade scrcpy` or disable the related AWB setting.",
+                            self.path.display()
+                        ));
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "Could not inspect scrcpy options from {}: {error:#}. If mirroring fails, run `brew upgrade scrcpy` and try again.",
+                self.path.display()
+            )),
+        }
+
+        ScrcpyDiagnostics {
+            version_line,
+            warnings,
+        }
+    }
+
     pub fn launch(&self, serial: &str, options: &ScrcpyOptions) -> Result<()> {
-        let status = Command::new(&self.path)
-            .args(default_args(serial, options))
+        self.ensure_adb_server()?;
+
+        let status = self
+            .command(serial, options)
             .status()
             .with_context(|| format!("failed to run {}", self.path.display()))?;
 
@@ -59,20 +170,123 @@ impl Scrcpy {
         options: &ScrcpyOptions,
         mode: ScrcpyRunMode,
     ) -> Result<Child> {
-        let mut command = Command::new(&self.path);
-        command.args(default_args(serial, options));
+        self.spawn_configured(serial, options, |command| {
+            if mode == ScrcpyRunMode::Background {
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+            }
+        })
+    }
 
-        if mode == ScrcpyRunMode::Background {
+    pub fn spawn_piped(&self, serial: &str, options: &ScrcpyOptions) -> Result<Child> {
+        self.spawn_configured(serial, options, |command| {
             command
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        })
+    }
+
+    fn spawn_configured(
+        &self,
+        serial: &str,
+        options: &ScrcpyOptions,
+        configure: impl FnOnce(&mut Command),
+    ) -> Result<Child> {
+        self.ensure_adb_server()?;
+
+        let mut command = self.command(serial, options);
+        configure(&mut command);
+
+        command
+            .spawn()
+            .with_context(|| format!("failed to run {}", self.path.display()))
+    }
+
+    fn command(&self, serial: &str, options: &ScrcpyOptions) -> Command {
+        let mut command = Command::new(&self.path);
+        command.args(default_args(serial, options));
+        self.configure_adb_env(&mut command);
+        command
+    }
+
+    fn metadata_command(&self, arg: &str) -> Command {
+        let mut command = Command::new(&self.path);
+        command.arg(arg);
+        self.configure_adb_env(&mut command);
+        command
+    }
+
+    fn metadata_output(&self, arg: &str, timeout: Duration) -> Result<Output> {
+        let command_display = format!("{} {arg}", self.path.display());
+        let mut command = self.metadata_command(arg);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to run {command_display}"))?;
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if child
+                .try_wait()
+                .with_context(|| format!("failed to poll {command_display}"))?
+                .is_some()
+            {
+                return child
+                    .wait_with_output()
+                    .with_context(|| format!("failed to read {command_display} output"));
+            }
+
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                child
+                    .wait()
+                    .with_context(|| format!("failed to reap timed-out {command_display}"))?;
+                bail!(
+                    "{command_display} timed out after {} seconds",
+                    timeout.as_secs_f32()
+                );
+            }
+
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn configure_adb_env(&self, command: &mut Command) {
+        let adb_dir = self
+            .adb
+            .as_ref()
+            .and_then(|adb| adb.path().parent())
+            .map(Path::to_path_buf);
+
+        if let Some(adb) = &self.adb {
+            command.env("ADB", adb.path());
         }
 
-        let child = command
-            .spawn()
-            .with_context(|| format!("failed to run {}", self.path.display()))?;
-        Ok(child)
+        if let Some(path) = path_env_with_tool_dirs(adb_dir) {
+            command.env("PATH", path);
+        }
+    }
+
+    fn ensure_adb_server(&self) -> Result<()> {
+        let Some(adb) = &self.adb else {
+            return Ok(());
+        };
+
+        match adb.start_server() {
+            Ok(()) => Ok(()),
+            Err(start_error) => adb.reset_server().with_context(|| {
+                format!("ADB start-server failed ({start_error:#}); reset also failed")
+            }),
+        }
+    }
+
+    fn help_text(&self) -> Result<String> {
+        let output = self.metadata_output("--help", SCRCPY_METADATA_TIMEOUT)?;
+
+        command_output("scrcpy --help", output)
     }
 }
 
@@ -136,6 +350,94 @@ pub fn default_args(serial: &str, options: &ScrcpyOptions) -> Vec<OsString> {
     }
 
     args
+}
+
+fn command_output(command: &str, output: std::process::Output) -> Result<String> {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let text = match (stdout.is_empty(), stderr.is_empty()) {
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (false, false) => format!("{stdout}\n{stderr}"),
+        (true, true) => String::new(),
+    };
+
+    if output.status.success() {
+        Ok(text)
+    } else {
+        bail!("{command} exited with status {}: {text}", output.status)
+    }
+}
+
+fn compatibility_flags(options: &ScrcpyOptions) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+
+    if options.no_audio {
+        flags.push("--no-audio");
+    }
+
+    if options.stay_awake {
+        flags.push("--stay-awake");
+    }
+
+    if options.borderless {
+        flags.push("--window-borderless");
+    }
+
+    if options.always_on_top {
+        flags.push("--always-on-top");
+    }
+
+    if !options.window_title.is_empty() {
+        flags.push("--window-title");
+    }
+
+    if options.window_width > 0 {
+        flags.push("--window-width");
+    }
+
+    if options.window_height > 0 {
+        flags.push("--window-height");
+    }
+
+    flags
+}
+
+fn parse_scrcpy_version(line: &str) -> Option<ScrcpyVersion> {
+    line.split_whitespace()
+        .filter_map(parse_version_token)
+        .next()
+}
+
+fn parse_version_token(token: &str) -> Option<ScrcpyVersion> {
+    let token = token.trim_start_matches('v');
+    if !token
+        .chars()
+        .next()
+        .is_some_and(|char| char.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let mut parts = token.split('.');
+    let major = parse_number_prefix(parts.next()?)?;
+    let minor = parse_number_prefix(parts.next()?)?;
+    let patch = parts.next().and_then(parse_number_prefix).unwrap_or(0);
+
+    Some(ScrcpyVersion::new(major, minor, patch))
+}
+
+fn parse_number_prefix(value: &str) -> Option<u16> {
+    let digits: String = value
+        .chars()
+        .take_while(|char| char.is_ascii_digit())
+        .collect();
+
+    if digits.is_empty() {
+        return None;
+    }
+
+    digits.parse().ok()
 }
 
 #[cfg(test)]
@@ -215,5 +517,106 @@ mod tests {
 
         assert!(!args.contains(&"--window-width".to_string()));
         assert!(!args.contains(&"--window-height".to_string()));
+    }
+
+    #[test]
+    fn command_exports_resolved_adb_to_scrcpy() {
+        let adb_path = PathBuf::from("/custom/android/platform-tools/adb");
+        let scrcpy = Scrcpy {
+            path: PathBuf::from("/usr/local/bin/scrcpy"),
+            adb: Some(Adb::from_resolved_path(adb_path.clone())),
+        };
+
+        let command = scrcpy.command("device", &ScrcpyOptions::default());
+        let envs: Vec<_> = command.get_envs().collect();
+        let adb_env = envs
+            .iter()
+            .find(|(name, _)| *name == "ADB")
+            .and_then(|(_, value)| *value)
+            .expect("ADB should be set");
+        let path_env = envs
+            .iter()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| *value)
+            .expect("PATH should be set");
+        let path_dirs: Vec<_> = std::env::split_paths(path_env).collect();
+
+        assert_eq!(adb_env, adb_path.as_os_str());
+        assert_eq!(path_dirs.first().map(PathBuf::as_path), adb_path.parent());
+    }
+
+    #[test]
+    fn parses_scrcpy_versions() {
+        assert_eq!(
+            parse_scrcpy_version("scrcpy 4.0 <https://github.com/Genymobile/scrcpy>"),
+            Some(ScrcpyVersion::new(4, 0, 0))
+        );
+        assert_eq!(
+            parse_scrcpy_version("scrcpy 3.3.4"),
+            Some(ScrcpyVersion::new(3, 3, 4))
+        );
+    }
+
+    #[test]
+    fn compatibility_flags_follow_enabled_options() {
+        let default_flags = compatibility_flags(&ScrcpyOptions::default());
+        assert!(default_flags.contains(&"--window-borderless"));
+        assert!(!default_flags.contains(&"--always-on-top"));
+
+        let custom_flags = compatibility_flags(&ScrcpyOptions {
+            no_audio: false,
+            stay_awake: false,
+            borderless: false,
+            always_on_top: true,
+            window_title: String::new(),
+            window_width: 0,
+            window_height: 0,
+        });
+
+        assert!(!custom_flags.contains(&"--no-audio"));
+        assert!(!custom_flags.contains(&"--stay-awake"));
+        assert!(!custom_flags.contains(&"--window-borderless"));
+        assert!(custom_flags.contains(&"--always-on-top"));
+        assert!(!custom_flags.contains(&"--window-title"));
+        assert!(!custom_flags.contains(&"--window-width"));
+        assert!(!custom_flags.contains(&"--window-height"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_commands_time_out_and_reap_the_process() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let script = std::env::temp_dir().join(format!(
+            "awb-scrcpy-timeout-{}-{unique}.sh",
+            std::process::id()
+        ));
+        fs::write(&script, "#!/bin/sh\nwhile :; do :; done\n")
+            .expect("timeout fixture should be writable");
+        let mut permissions = fs::metadata(&script)
+            .expect("timeout fixture should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("timeout fixture should be executable");
+
+        let scrcpy = Scrcpy {
+            path: script.clone(),
+            adb: None,
+        };
+        let started = Instant::now();
+        let error = scrcpy
+            .metadata_output("--version", Duration::from_millis(50))
+            .expect_err("unresponsive metadata command should time out");
+        let elapsed = started.elapsed();
+        fs::remove_file(script).expect("timeout fixture should be removable after child is reaped");
+
+        assert!(format!("{error:#}").contains("timed out"));
+        assert!(elapsed < Duration::from_secs(1));
     }
 }

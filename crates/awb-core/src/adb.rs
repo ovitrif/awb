@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -107,9 +108,26 @@ impl MdnsService {
 
 impl Adb {
     pub fn resolve(override_path: Option<PathBuf>) -> Result<Self> {
+        if let Some(path) = override_path {
+            return Ok(Self {
+                path: resolve_program("adb", Some(path))?,
+            });
+        }
+
+        if let Some(path) = env::var_os("ADB") {
+            return Ok(Self {
+                path: resolve_program("adb", Some(PathBuf::from(path)))?,
+            });
+        }
+
         Ok(Self {
-            path: resolve_program("adb", override_path)?,
+            path: resolve_program("adb", None)?,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_resolved_path(path: PathBuf) -> Self {
+        Self { path }
     }
 
     pub fn path(&self) -> &Path {
@@ -129,6 +147,10 @@ impl Adb {
         let _kill_output = self.run(["kill-server"])?;
         thread::sleep(Duration::from_secs(1));
 
+        self.start_server()
+    }
+
+    pub fn start_server(&self) -> Result<()> {
         let start_output = self.run(["start-server"])?;
         ensure_success("adb start-server", start_output)?;
 

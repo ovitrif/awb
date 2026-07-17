@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -43,6 +44,24 @@ fn find_on_path(name: &str) -> Result<PathBuf> {
     bail!("{name} not found on PATH")
 }
 
+pub(crate) fn path_env_with_tool_dirs(
+    extra_dirs: impl IntoIterator<Item = PathBuf>,
+) -> Option<OsString> {
+    let mut dirs = Vec::new();
+
+    for dir in extra_dirs.into_iter().chain(standard_dirs()) {
+        push_unique_dir(&mut dirs, dir);
+    }
+
+    if let Some(path_var) = env::var_os("PATH") {
+        for dir in env::split_paths(&path_var) {
+            push_unique_dir(&mut dirs, dir);
+        }
+    }
+
+    env::join_paths(dirs).ok()
+}
+
 /// Common macOS install locations for adb and scrcpy, probed when PATH is the
 /// minimal launchd environment rather than the user's shell.
 fn standard_dirs() -> Vec<PathBuf> {
@@ -63,6 +82,12 @@ fn standard_dirs() -> Vec<PathBuf> {
     }
 
     dirs
+}
+
+fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !dirs.contains(&dir) {
+        dirs.push(dir);
+    }
 }
 
 fn is_executable_file(path: &Path) -> bool {
