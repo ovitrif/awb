@@ -151,8 +151,8 @@ pub fn window_logo(frame_size: u32, glyph_size: f32, offset: f32, oversample: u3
 }
 
 /// Rasterizes the popover shell (beak + rounded body) with the DESIGN.pen
-/// background: a vertical slate gradient, a soft blue glow at the beak, and a
-/// hairline stroke. Drawn at `oversample` resolution for a crisp texture.
+/// background: a vertical slate gradient, soft highlights along the top edge,
+/// and a hairline stroke. Drawn at `oversample` resolution for a crisp texture.
 fn render_shell(oversample: u32) -> Pixmap {
     let w = (SHELL_W as u32) * oversample;
     let h = (SHELL_H as u32) * oversample;
@@ -192,6 +192,24 @@ fn render_shell(oversample: u32) -> Pixmap {
     )
     .expect("shell glow gradient");
 
+    // Arc-style edge sheen: a shallow ellipse clipped by the shell puts a
+    // restrained highlight inside the upper-left curve, then fades it before
+    // the center so the beak glow remains the visual anchor.
+    let top_highlight = RadialGradient::new(
+        Point::from_xy(48.0, 9.0),
+        0.0,
+        Point::from_xy(48.0, 9.0),
+        SHELL_W * 0.58,
+        vec![
+            GradientStop::new(0.0, Color::from_rgba8(0xEE, 0xF2, 0xFF, 0x19)),
+            GradientStop::new(0.42, Color::from_rgba8(0xD8, 0xDF, 0xF7, 0x0B)),
+            GradientStop::new(1.0, Color::from_rgba8(0xD8, 0xDF, 0xF7, 0x00)),
+        ],
+        SpreadMode::Pad,
+        Transform::from_scale(1.0, 0.09),
+    )
+    .expect("shell top highlight gradient");
+
     let mut paint = Paint {
         anti_alias: true,
         ..Default::default()
@@ -199,6 +217,8 @@ fn render_shell(oversample: u32) -> Pixmap {
     paint.shader = base;
     pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
     paint.shader = glow;
+    pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
+    paint.shader = top_highlight;
     pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
 
     let mut stroke_paint = Paint {
