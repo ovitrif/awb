@@ -7,6 +7,8 @@ use tiny_skia::{
     PremultipliedColorU8, RadialGradient, Shader, SpreadMode, Stroke, Transform,
 };
 
+use crate::theme::Appearance;
+
 /// Visual bounds of the glyph inside the 100-unit viewBox: [x, y, w, h]. The
 /// dome bottom sits at y=75 and the outer Wi-Fi wave peaks at y=24.
 const GLYPH_BOUNDS: [f32; 4] = [9.81, 24.0, 80.38, 51.0];
@@ -151,9 +153,9 @@ pub fn window_logo(frame_size: u32, glyph_size: f32, offset: f32, oversample: u3
 }
 
 /// Rasterizes the popover shell (beak + rounded body) with the DESIGN.pen
-/// background: a vertical slate gradient, a soft blue glow at the beak, and a
-/// hairline stroke. Drawn at `oversample` resolution for a crisp texture.
-fn render_shell(oversample: u32) -> Pixmap {
+/// background: a vertical slate gradient, soft highlights along the top edge,
+/// and a hairline stroke. Drawn at `oversample` resolution for a crisp texture.
+fn render_shell(oversample: u32, appearance: Appearance) -> Pixmap {
     let w = (SHELL_W as u32) * oversample;
     let h = (SHELL_H as u32) * oversample;
     let mut pixmap = Pixmap::new(w, h).expect("shell pixmap");
@@ -163,14 +165,35 @@ fn render_shell(oversample: u32) -> Pixmap {
         return pixmap;
     };
 
+    let (base_stops, glow_color, highlight_start, highlight_mid, stroke_color) = match appearance {
+        Appearance::Night => (
+            vec![
+                GradientStop::new(0.0, Color::from_rgba8(0x2F, 0x32, 0x42, 0xFF)),
+                GradientStop::new(0.5, Color::from_rgba8(0x27, 0x2A, 0x35, 0xFF)),
+                GradientStop::new(1.0, Color::from_rgba8(0x1C, 0x1F, 0x29, 0xFF)),
+            ],
+            Color::from_rgba8(0x9A, 0xA3, 0xD4, 0x1F),
+            Color::from_rgba8(0xEE, 0xF2, 0xFF, 0x19),
+            Color::from_rgba8(0xD8, 0xDF, 0xF7, 0x0B),
+            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x14),
+        ),
+        Appearance::Day => (
+            vec![
+                GradientStop::new(0.0, Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF)),
+                GradientStop::new(0.5, Color::from_rgba8(0xFA, 0xFB, 0xFD, 0xFF)),
+                GradientStop::new(1.0, Color::from_rgba8(0xF2, 0xF5, 0xFA, 0xFF)),
+            ],
+            Color::from_rgba8(0xB8, 0xC5, 0xE8, 0x1A),
+            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x8A),
+            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x3D),
+            Color::from_rgba8(0x00, 0x00, 0x00, 0x18),
+        ),
+    };
+
     let base = LinearGradient::new(
         Point::from_xy(SHELL_W / 2.0, 0.0),
         Point::from_xy(SHELL_W / 2.0, SHELL_H),
-        vec![
-            GradientStop::new(0.0, Color::from_rgba8(0x2F, 0x32, 0x42, 0xFF)),
-            GradientStop::new(0.5, Color::from_rgba8(0x27, 0x2A, 0x35, 0xFF)),
-            GradientStop::new(1.0, Color::from_rgba8(0x1C, 0x1F, 0x29, 0xFF)),
-        ],
+        base_stops,
         SpreadMode::Pad,
         Transform::identity(),
     )
@@ -184,13 +207,47 @@ fn render_shell(oversample: u32) -> Pixmap {
         Point::from_xy(SHELL_W / 2.0, 0.0),
         SHELL_W * 0.8,
         vec![
-            GradientStop::new(0.0, Color::from_rgba8(0x9A, 0xA3, 0xD4, 0x1F)),
-            GradientStop::new(1.0, Color::from_rgba8(0x9A, 0xA3, 0xD4, 0x00)),
+            GradientStop::new(0.0, glow_color),
+            GradientStop::new(
+                1.0,
+                Color::from_rgba8(
+                    (glow_color.red() * 255.0) as u8,
+                    (glow_color.green() * 255.0) as u8,
+                    (glow_color.blue() * 255.0) as u8,
+                    0x00,
+                ),
+            ),
         ],
         SpreadMode::Pad,
         Transform::from_scale(1.0, 0.459),
     )
     .expect("shell glow gradient");
+
+    // Arc-style edge sheen: a shallow ellipse clipped by the shell puts a
+    // restrained highlight inside the upper-left curve, then fades it before
+    // the center so the beak glow remains the visual anchor.
+    let top_highlight = RadialGradient::new(
+        Point::from_xy(48.0, 9.0),
+        0.0,
+        Point::from_xy(48.0, 9.0),
+        SHELL_W * 0.58,
+        vec![
+            GradientStop::new(0.0, highlight_start),
+            GradientStop::new(0.42, highlight_mid),
+            GradientStop::new(
+                1.0,
+                Color::from_rgba8(
+                    (highlight_mid.red() * 255.0) as u8,
+                    (highlight_mid.green() * 255.0) as u8,
+                    (highlight_mid.blue() * 255.0) as u8,
+                    0x00,
+                ),
+            ),
+        ],
+        SpreadMode::Pad,
+        Transform::from_scale(1.0, 0.09),
+    )
+    .expect("shell top highlight gradient");
 
     let mut paint = Paint {
         anti_alias: true,
@@ -200,12 +257,14 @@ fn render_shell(oversample: u32) -> Pixmap {
     pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
     paint.shader = glow;
     pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
+    paint.shader = top_highlight;
+    pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
 
     let mut stroke_paint = Paint {
         anti_alias: true,
         ..Default::default()
     };
-    stroke_paint.set_color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x14));
+    stroke_paint.set_color(stroke_color);
     let stroke = Stroke {
         width: 1.0,
         ..Default::default()
@@ -216,8 +275,8 @@ fn render_shell(oversample: u32) -> Pixmap {
 }
 
 /// The shell as a premultiplied-RGBA raster for the in-window texture.
-pub fn shell_background(oversample: u32) -> Raster {
-    let pixmap = render_shell(oversample);
+pub fn shell_background(oversample: u32, appearance: Appearance) -> Raster {
+    let pixmap = render_shell(oversample, appearance);
     Raster {
         width: pixmap.width(),
         height: pixmap.height(),
@@ -226,8 +285,8 @@ pub fn shell_background(oversample: u32) -> Raster {
 }
 
 /// The shell as a PNG, for offline preview via `awb-app --render-shell`.
-pub fn shell_background_png(oversample: u32) -> Vec<u8> {
-    render_shell(oversample)
+pub fn shell_background_png(oversample: u32, appearance: Appearance) -> Vec<u8> {
+    render_shell(oversample, appearance)
         .encode_png()
         .expect("shell png encoding")
 }
@@ -371,4 +430,19 @@ fn fill_with_paint(pixmap: &mut Pixmap, svg_path: &str, paint: &Paint, transform
         return;
     };
     pixmap.fill_path(&path, paint, FillRule::EvenOdd, transform, None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn day_and_night_shells_share_geometry_but_not_pixels() {
+        let day = shell_background(1, Appearance::Day);
+        let night = shell_background(1, Appearance::Night);
+
+        assert_eq!((day.width, day.height), (380, 349));
+        assert_eq!((night.width, night.height), (380, 349));
+        assert_ne!(day.rgba, night.rgba);
+    }
 }

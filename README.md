@@ -18,7 +18,7 @@ Pin a release or choose the install directory:
 
 ```sh
 curl -fsSL https://github.com/ovitrif/awb/releases/latest/download/install.sh | \
-  AWB_INSTALL_TAG=v2.0.1 AWB_INSTALL_DIR="$HOME/.local/bin" sh
+  AWB_INSTALL_TAG=v2.0.2 AWB_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 Requirements: `adb` on your PATH (Android SDK platform-tools). `scrcpy` is optional and

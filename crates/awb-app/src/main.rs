@@ -30,7 +30,11 @@ fn main() -> eframe::Result {
             .get(index + 1)
             .map(String::as_str)
             .unwrap_or("shell.png");
-        std::fs::write(path, glyph::shell_background_png(3)).expect("write shell");
+        let appearance = match args.get(index + 2).map(String::as_str) {
+            Some("day") => theme::Appearance::Day,
+            _ => theme::Appearance::Night,
+        };
+        std::fs::write(path, glyph::shell_background_png(3, appearance)).expect("write shell");
         println!("wrote {path}");
         return Ok(());
     }

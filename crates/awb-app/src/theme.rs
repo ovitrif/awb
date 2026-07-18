@@ -1,7 +1,9 @@
 //! Design tokens and font setup extracted from DESIGN.pen.
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use eframe::egui::{
-    Color32, Context, FontData, FontDefinitions, FontFamily, FontId, RichText, TextStyle,
+    Color32, Context, FontData, FontDefinitions, FontFamily, FontId, RichText, TextStyle, Theme,
 };
 
 pub const WINDOW_WIDTH: f32 = 380.0;
@@ -10,28 +12,128 @@ pub const WINDOW_HEIGHT: f32 = 340.0;
 pub const BEAK_HEIGHT: f32 = 9.0;
 pub const WINDOW_FULL_HEIGHT: f32 = WINDOW_HEIGHT + BEAK_HEIGHT;
 
-pub const HAIRLINE: Color32 = Color32::from_rgba_premultiplied(0x0D, 0x0D, 0x0D, 0x0D);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Appearance {
+    Day,
+    Night,
+}
 
-pub const TEXT_STRONG: Color32 = Color32::from_rgb(0xF2, 0xF3, 0xF7);
-pub const TEXT_BRIGHT: Color32 = Color32::from_rgb(0xEC, 0xEE, 0xF4);
-pub const TEXT_SOFT: Color32 = Color32::from_rgb(0x83, 0x87, 0x91);
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x90, 0x94, 0xA0);
-pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x70, 0x74, 0x7F);
-pub const TEXT_LABEL: Color32 = Color32::from_rgb(0x7C, 0x81, 0x90);
-pub const TEXT_CHECK: Color32 = Color32::from_rgb(0xC9, 0xCC, 0xD6);
+#[derive(Debug, Clone, Copy)]
+struct Palette {
+    hairline: Color32,
+    text_strong: Color32,
+    text_bright: Color32,
+    text_soft: Color32,
+    text_muted: Color32,
+    text_faint: Color32,
+    text_label: Color32,
+    text_check: Color32,
+    green: Color32,
+    green_ink: Color32,
+    amber: Color32,
+    red: Color32,
+    surface: Color32,
+    input_bg: Color32,
+    input_stroke: Color32,
+    check_stroke: Color32,
+    segment_bg: Color32,
+    segment_selected: Color32,
+    qr_card: Color32,
+    qr_ink: Color32,
+}
 
-pub const GREEN: Color32 = Color32::from_rgb(0x3D, 0xDC, 0x84);
-pub const GREEN_INK: Color32 = Color32::from_rgb(0x0A, 0x2A, 0x1B);
-pub const AMBER: Color32 = Color32::from_rgb(0xF2, 0xC9, 0x4C);
-pub const RED: Color32 = Color32::from_rgb(0xF8, 0x71, 0x71);
+const NIGHT: Palette = Palette {
+    hairline: Color32::from_rgba_premultiplied(0x0D, 0x0D, 0x0D, 0x0D),
+    text_strong: Color32::from_rgb(0xF2, 0xF3, 0xF7),
+    text_bright: Color32::from_rgb(0xEC, 0xEE, 0xF4),
+    text_soft: Color32::from_rgb(0x83, 0x87, 0x91),
+    text_muted: Color32::from_rgb(0x90, 0x94, 0xA0),
+    text_faint: Color32::from_rgb(0x70, 0x74, 0x7F),
+    text_label: Color32::from_rgb(0x7C, 0x81, 0x90),
+    text_check: Color32::from_rgb(0xC9, 0xCC, 0xD6),
+    green: Color32::from_rgb(0x3D, 0xDC, 0x84),
+    green_ink: Color32::from_rgb(0x0A, 0x2A, 0x1B),
+    amber: Color32::from_rgb(0xF2, 0xC9, 0x4C),
+    red: Color32::from_rgb(0xF8, 0x71, 0x71),
+    surface: Color32::from_rgba_premultiplied(0x0D, 0x0D, 0x0D, 0x0D),
+    input_bg: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x33),
+    input_stroke: Color32::from_rgba_premultiplied(0x12, 0x12, 0x12, 0x12),
+    check_stroke: Color32::from_rgba_premultiplied(0x26, 0x26, 0x26, 0x26),
+    segment_bg: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x2E),
+    segment_selected: Color32::from_rgba_premultiplied(0x20, 0x20, 0x20, 0x20),
+    qr_card: Color32::WHITE,
+    qr_ink: Color32::from_rgb(0x17, 0x18, 0x1C),
+};
 
-pub const SURFACE: Color32 = Color32::from_rgba_premultiplied(0x0D, 0x0D, 0x0D, 0x0D);
-pub const INPUT_BG: Color32 = Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x33);
-pub const INPUT_STROKE: Color32 = Color32::from_rgba_premultiplied(0x12, 0x12, 0x12, 0x12);
-pub const CHECK_STROKE: Color32 = Color32::from_rgba_premultiplied(0x26, 0x26, 0x26, 0x26);
+const DAY: Palette = Palette {
+    hairline: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x0C),
+    text_strong: Color32::from_rgb(0x17, 0x19, 0x23),
+    text_bright: Color32::from_rgb(0x22, 0x24, 0x2E),
+    text_soft: Color32::from_rgb(0x62, 0x68, 0x74),
+    text_muted: Color32::from_rgb(0x54, 0x5B, 0x68),
+    text_faint: Color32::from_rgb(0x75, 0x7D, 0x8A),
+    text_label: Color32::from_rgb(0x65, 0x6D, 0x7A),
+    text_check: Color32::from_rgb(0x2F, 0x33, 0x3D),
+    green: Color32::from_rgb(0x14, 0x84, 0x47),
+    green_ink: Color32::WHITE,
+    amber: Color32::from_rgb(0x9A, 0x67, 0x00),
+    red: Color32::from_rgb(0xD6, 0x3A, 0x3A),
+    surface: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x08),
+    input_bg: Color32::WHITE,
+    input_stroke: Color32::from_rgb(0xD5, 0xDB, 0xE4),
+    check_stroke: Color32::from_rgb(0xAE, 0xB8, 0xC5),
+    segment_bg: Color32::from_rgb(0xEE, 0xF1, 0xF6),
+    segment_selected: Color32::WHITE,
+    qr_card: Color32::WHITE,
+    qr_ink: Color32::from_rgb(0x17, 0x18, 0x1C),
+};
 
-pub const QR_CARD: Color32 = Color32::WHITE;
-pub const QR_INK: Color32 = Color32::from_rgb(0x17, 0x18, 0x1C);
+static ACTIVE_APPEARANCE: AtomicU8 = AtomicU8::new(Appearance::Night as u8);
+
+pub fn apply(ctx: &Context, appearance: Appearance) {
+    ACTIVE_APPEARANCE.store(appearance as u8, Ordering::Relaxed);
+    ctx.set_theme(match appearance {
+        Appearance::Day => Theme::Light,
+        Appearance::Night => Theme::Dark,
+    });
+}
+
+fn palette() -> &'static Palette {
+    match ACTIVE_APPEARANCE.load(Ordering::Relaxed) {
+        value if value == Appearance::Day as u8 => &DAY,
+        _ => &NIGHT,
+    }
+}
+
+macro_rules! color_token {
+    ($name:ident, $field:ident) => {
+        pub fn $name() -> Color32 {
+            palette().$field
+        }
+    };
+}
+
+color_token!(hairline, hairline);
+color_token!(text_strong, text_strong);
+color_token!(text_bright, text_bright);
+color_token!(text_soft, text_soft);
+color_token!(text_muted, text_muted);
+color_token!(text_faint, text_faint);
+color_token!(text_label, text_label);
+color_token!(text_check, text_check);
+color_token!(green, green);
+color_token!(green_ink, green_ink);
+color_token!(amber, amber);
+color_token!(red, red);
+color_token!(surface, surface);
+color_token!(input_bg, input_bg);
+color_token!(input_stroke, input_stroke);
+color_token!(check_stroke, check_stroke);
+color_token!(segment_bg, segment_bg);
+color_token!(segment_selected, segment_selected);
+color_token!(qr_card, qr_card);
+color_token!(qr_ink, qr_ink);
 
 pub const MEDIUM: &str = "inter-medium";
 pub const SEMIBOLD: &str = "inter-semibold";
