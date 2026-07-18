@@ -1232,9 +1232,7 @@ fn dependency_row(ui: &mut Ui, row_icon: &str, name: &str, info: Option<&backend
             ui.add_space(2.0);
             match info {
                 Some(tool) if tool.available && tool.warnings.is_empty() => {
-                    ui.add(
-                        Label::new(regular("Ready", 11.0, theme::text_muted())).selectable(false),
-                    );
+                    ui.add(Label::new(regular("Ready", 11.0, theme::green())).selectable(false));
                 }
                 Some(tool) if tool.available => {
                     ui.add(Label::new(regular("Update", 11.0, theme::amber())).selectable(false));
@@ -1292,7 +1290,7 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(2))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 for (mode, label) in modes {
                     let active = *selected == mode;
                     let text = if active {

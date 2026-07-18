@@ -1,43 +1,52 @@
-**Comparison Target**
+# Design QA — AWB 2.0.2
 
-- Source visual truth: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Arc 2026-07-18 007606.png`
-- Rendered implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/shell-top-highlight.png`
-- Viewport: AWB production shell at 380 × 349 points, rendered at the app's 3× oversampling scale (1140 × 1047 pixels).
-- State: dark menu-bar popover shell with its existing beak glow and new upper-left edge highlight.
+## Day settings palette
 
-**Evidence**
+**Comparison target**
 
-- Full-view comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/full-comparison.png`
-- Focused top-edge comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/top-edge-comparison.png`
-- The products have different layouts and proportions, so the comparison is scoped to the requested surface treatment rather than implying full-screen parity.
+- Source visual truth: `/var/folders/_j/84zgw9rj5s7cp81pjgksy8yw0000gn/T/codex-clipboard-83dd750c-2a86-4258-9dd8-bd1509967373.png`
+- Rendered implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-day-2.0.2.png`
+- Combined comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/day-settings-comparison-2.0.2.png`
+- Viewport: native 380 × 349-point settings popover, captured at 2× (760 × 698 pixels).
+- State: Day appearance resolved while the persisted selector remains on its default `Auto` value.
 
 **Findings**
 
-- No actionable P0/P1/P2 differences in the requested treatment. The implementation adds a shallow cool-white sheen at the upper-left curve, fades it before the center, keeps the brighter beak glow as the anchor, and preserves the existing slate gradient.
-- Fonts and typography: unchanged and outside the shell-background layer.
-- Spacing and layout rhythm: the 380 × 349-point shell geometry, corner radius, beak position, and content bounds are unchanged.
-- Colors and visual tokens: the new highlight uses low-alpha cool whites that blend with the existing slate and blue-violet shell palette without flattening the vertical gradient.
-- Image quality and asset fidelity: the effect is rendered in the existing native raster pipeline at 3× oversampling; the comparison shows a clean edge without banding, compression, or transparency halos.
-- Copy and content: unchanged; the shell renderer contains no app text.
+- No actionable P0/P1/P2 differences remain in the requested coloring treatment.
+- The popover now uses a near-white vertical gradient instead of the previous gray cast, while retaining visible depth from top to bottom.
+- Enabled inputs are white with cool blue-gray outlines; checkboxes have stronger outlines; labels and values use darker enabled-state text.
+- The segmented control is ordered `Auto`, `Day`, `Night`, with `Auto` visibly selected by default.
+- Hairlines and the outer shell stroke are quieter, so controls no longer read as disabled.
+- Dependency success uses the existing green semantic token. The capture occurred while the asynchronous dependency check was still running, so the comparison evaluates the shell, fields, checkboxes, and appearance control rather than the final dependency rows.
+- Typography, spacing rhythm, corner geometry, and native raster quality remain consistent with the existing AWB design system.
 
-**Open Questions**
+**Comparison history**
 
-- None for this scoped implementation.
+- Pass 1: identified a gray shell cast, gray input fills, low-contrast checkbox strokes, muted success status, and reversed appearance option order.
+- Pass 2: corrected the palette and option direction; combined comparison found no remaining P0/P1/P2 issues.
 
-**Comparison History**
+## Top-edge highlight
 
-- Pass 1: no P0/P1/P2 findings. No visual correction iteration was required.
+**Comparison target**
 
-**Implementation Checklist**
+- Source visual truth: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Arc 2026-07-18 007606.png`
+- Rendered implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/shell-top-highlight.png`
+- Full comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/full-comparison.png`
+- Focused comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/top-edge-comparison.png`
 
-- [x] Add a restrained upper-left top-edge sheen.
-- [x] Preserve the centered beak glow and existing body gradient.
-- [x] Render and inspect the production shell at its normal 3× oversampling scale.
-- [x] Run format, test, lint, and optimized build checks.
-- [x] Reinstall, rebundle, relaunch, and verify the app version.
+**Findings**
 
-**Follow-up Polish**
+- No actionable P0/P1/P2 differences remain in the scoped top-edge treatment.
+- The upper-left curve has a shallow cool-white sheen that fades before the center, preserves the centered beak glow, and keeps the existing vertical gradient visible.
+- The native 3× raster render has no visible banding, compression, or transparency halos.
 
-- [P3] If an even quieter edge is preferred after daily use, reduce the pre-existing shell hairline opacity independently of this highlight.
+## Implementation checklist
+
+- [x] Add a restrained Arc-inspired top-edge highlight.
+- [x] Add persisted `Auto`, `Day`, and `Night` appearance modes with `Auto` as the default.
+- [x] Preserve and strengthen the Day background gradient.
+- [x] Make enabled Day controls clearly interactive.
+- [x] Compare the supplied reference and the native implementation in one image.
+- [x] Remove all screenshot-only QA scaffolding from the release source.
 
 final result: passed
