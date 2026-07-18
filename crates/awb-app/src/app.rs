@@ -4,15 +4,15 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Button, Color32, Context, CornerRadius, FontFamily, FontId, Frame, Label, Layout,
-    Margin, Rect, Sense, Stroke, TextEdit, TextureHandle, TextureOptions, Ui, ViewportCommand,
-    vec2,
+    Margin, Rect, Sense, Stroke, TextEdit, TextureHandle, TextureOptions, Theme, Ui,
+    ViewportCommand, vec2,
 };
 use egui_phosphor::regular as ph;
 use menu_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use menu_icon::{MenuBarIcon, MenuBarIconBuilder, MenuBarIconEvent, MouseButton, MouseButtonState};
 
 use crate::backend::{self, PairingPhase, PairingProgress, Shared, Snapshot};
-use crate::config::Settings;
+use crate::config::{Settings, ThemeMode};
 use crate::glyph;
 use crate::login_item;
 use crate::theme::{self, icon, medium, regular, semibold};
@@ -95,6 +95,7 @@ pub struct App {
     tab: Tab,
     logo: TextureHandle,
     shell: TextureHandle,
+    appearance: theme::Appearance,
     _status_icon: MenuBarIcon,
     show_item: MenuItem,
     pair_id: MenuId,
@@ -114,6 +115,9 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         let ctx = cc.egui_ctx.clone();
         theme::install_fonts(&ctx);
+        let settings = Settings::load();
+        let appearance = resolved_appearance(settings.theme, ctx.system_theme());
+        theme::apply(&ctx, appearance);
 
         let logo_raster = glyph::window_logo(26, 36.0, -5.0, 4);
         let logo_image = egui::ColorImage::from_rgba_premultiplied(
@@ -122,7 +126,7 @@ impl App {
         );
         let logo = ctx.load_texture("awb-logo", logo_image, TextureOptions::LINEAR);
 
-        let shell_raster = glyph::shell_background(3);
+        let shell_raster = glyph::shell_background(3, appearance);
         let shell_image = egui::ColorImage::from_rgba_premultiplied(
             [shell_raster.width as usize, shell_raster.height as usize],
             &shell_raster.rgba,
@@ -169,7 +173,6 @@ impl App {
         let shared = Arc::new(Mutex::new(Shared::default()));
         backend::refresh_status(shared.clone(), ctx.clone());
 
-        let settings = Settings::load();
         let width_text = settings.window_width.to_string();
         let height_text = settings.window_height.to_string();
 
@@ -182,6 +185,7 @@ impl App {
             tab: Tab::Devices,
             logo,
             shell,
+            appearance,
             _status_icon: status_icon,
             show_item,
             pair_id: pair_item.id().clone(),
@@ -311,6 +315,23 @@ impl App {
         self.settings.save();
     }
 
+    fn sync_appearance(&mut self, ctx: &Context) {
+        let appearance = resolved_appearance(self.settings.theme, ctx.system_theme());
+        if appearance == self.appearance {
+            return;
+        }
+
+        self.appearance = appearance;
+        theme::apply(ctx, appearance);
+        let shell_raster = glyph::shell_background(3, appearance);
+        let shell_image = egui::ColorImage::from_rgba_premultiplied(
+            [shell_raster.width as usize, shell_raster.height as usize],
+            &shell_raster.rgba,
+        );
+        self.shell.set(shell_image, TextureOptions::LINEAR);
+        ctx.request_repaint();
+    }
+
     /// Auto-start mirroring for newly connected physical phones (never
     /// emulators) when the setting is on and scrcpy is available.
     fn maybe_auto_mirror(&mut self, ctx: &Context) {
@@ -358,6 +379,17 @@ fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
         .filter(|device| device.ready)
         .map(|device| device.mirror_key.as_str())
         .collect()
+}
+
+fn resolved_appearance(mode: ThemeMode, system_theme: Option<Theme>) -> theme::Appearance {
+    match mode {
+        ThemeMode::Day => theme::Appearance::Day,
+        ThemeMode::Night => theme::Appearance::Night,
+        ThemeMode::Auto => match system_theme {
+            Some(Theme::Light) => theme::Appearance::Day,
+            Some(Theme::Dark) | None => theme::Appearance::Night,
+        },
+    }
 }
 
 fn popover_position(
@@ -571,6 +603,8 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.sync_appearance(ctx);
+
         // Some setups surface the window on launch despite `with_visible(false)`;
         // keep it hidden until the user opens it from the menu bar icon.
         if !self.visible && self.created_at.elapsed() < STARTUP_HIDE {
@@ -667,23 +701,23 @@ impl App {
             );
             ui.add_space(10.0);
             ui.vertical(|ui| {
-                ui.add(Label::new(semibold("awb", 15.0, theme::TEXT_STRONG)).selectable(false));
+                ui.add(Label::new(semibold("awb", 15.0, theme::text_strong())).selectable(false));
                 ui.add(
-                    Label::new(regular("Android Wireless Bridge", 11.0, theme::TEXT_SOFT))
+                    Label::new(regular("Android Wireless Bridge", 11.0, theme::text_soft()))
                         .selectable(false),
                 );
             });
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, ph::QR_CODE, 14.0, theme::TEXT_MUTED).clicked() {
+                if icon_button(ui, ph::QR_CODE, 14.0, theme::text_muted()).clicked() {
                     self.open_pairing(ctx);
                 }
                 ui.add_space(10.0);
-                if icon_button(ui, ph::GEAR_SIX, 14.0, theme::TEXT_MUTED).clicked() {
+                if icon_button(ui, ph::GEAR_SIX, 14.0, theme::text_muted()).clicked() {
                     self.screen = Screen::Settings;
                 }
                 ui.add_space(10.0);
-                if icon_button(ui, ph::ARROWS_CLOCKWISE, 14.0, theme::TEXT_MUTED).clicked() {
+                if icon_button(ui, ph::ARROWS_CLOCKWISE, 14.0, theme::text_muted()).clicked() {
                     backend::refresh_status(self.shared.clone(), ctx.clone());
                 }
             });
@@ -718,7 +752,7 @@ impl App {
                 ui.add(Label::new(regular(
                     "Checking devices…",
                     11.0,
-                    theme::TEXT_FAINT,
+                    theme::text_faint(),
                 )));
             });
             return;
@@ -730,13 +764,13 @@ impl App {
                 ui.add(Label::new(regular(
                     "No devices connected",
                     12.5,
-                    theme::TEXT_MUTED,
+                    theme::text_muted(),
                 )));
                 ui.add_space(6.0);
                 ui.add(Label::new(regular(
                     "Tap the QR icon to pair a phone over Wi-Fi",
                     11.0,
-                    theme::TEXT_FAINT,
+                    theme::text_faint(),
                 )));
             });
             return;
@@ -750,9 +784,9 @@ impl App {
 
             let mirroring = mirrors.contains(&device.mirror_key);
             let action = if mirroring {
-                RowAction::enabled(ph::STOP, theme::GREEN)
+                RowAction::enabled(ph::STOP, theme::green())
             } else if device.ready && scrcpy_ok {
-                RowAction::enabled(ph::PLAY, theme::TEXT_BRIGHT)
+                RowAction::enabled(ph::PLAY, theme::text_bright())
             } else {
                 RowAction::disabled(ph::PLAY)
             };
@@ -797,9 +831,9 @@ impl App {
                         .desired_rows(logs.len().max(1))
                         .font(FontId::new(10.5, FontFamily::Monospace))
                         .text_color(if empty {
-                            theme::TEXT_FAINT
+                            theme::text_faint()
                         } else {
-                            theme::TEXT_CHECK
+                            theme::text_check()
                         })
                         .frame(Frame::NONE),
                 );
@@ -807,77 +841,107 @@ impl App {
     }
 
     fn settings_screen(&mut self, ui: &mut Ui, ctx: &Context) {
-        let _ = ctx;
         if nav_header(ui, "Settings").clicked() {
             self.screen = Screen::Main;
         }
         ui.add_space(12.0);
 
-        ui.add(
-            Label::new(semibold("Screen Mirroring", 12.5, theme::TEXT_BRIGHT)).selectable(false),
-        );
-        ui.add_space(10.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(
+                    Label::new(semibold("Screen Mirroring", 12.5, theme::text_bright()))
+                        .selectable(false),
+                );
+                ui.add_space(10.0);
 
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            let total = ui.available_width();
-            let title_width = total - 2.0 * 64.0 - 2.0 * 8.0;
-            changed |= labeled_input(ui, "Title", title_width, &mut self.settings.window_title);
-            ui.add_space(8.0);
-            changed |= labeled_input(ui, "W", 64.0, &mut self.width_text);
-            ui.add_space(8.0);
-            changed |= labeled_input(ui, "H", 64.0, &mut self.height_text);
-        });
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    let total = ui.available_width();
+                    let title_width = total - 2.0 * 64.0 - 2.0 * 8.0;
+                    changed |=
+                        labeled_input(ui, "Title", title_width, &mut self.settings.window_title);
+                    ui.add_space(8.0);
+                    changed |= labeled_input(ui, "W", 64.0, &mut self.width_text);
+                    ui.add_space(8.0);
+                    changed |= labeled_input(ui, "H", 64.0, &mut self.height_text);
+                });
 
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            changed |= check_item(ui, "Always on top", &mut self.settings.always_on_top);
-            ui.add_space(20.0);
-            changed |= check_item(ui, "Borderless", &mut self.settings.borderless);
-            ui.add_space(20.0);
-            changed |= check_item(ui, "Auto mirror", &mut self.settings.auto_mirror);
-        });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    changed |= check_item(ui, "Always on top", &mut self.settings.always_on_top);
+                    ui.add_space(20.0);
+                    changed |= check_item(ui, "Borderless", &mut self.settings.borderless);
+                    ui.add_space(20.0);
+                    changed |= check_item(ui, "Auto mirror", &mut self.settings.auto_mirror);
+                });
 
-        if changed {
-            self.save_settings();
-        }
+                ui.add_space(12.0);
+                divider(ui);
+                ui.add_space(12.0);
 
-        ui.add_space(12.0);
-        divider(ui);
-        ui.add_space(12.0);
+                ui.add(
+                    Label::new(semibold("General", 12.5, theme::text_bright())).selectable(false),
+                );
+                ui.add_space(10.0);
 
-        ui.add(Label::new(semibold("General", 12.5, theme::TEXT_BRIGHT)).selectable(false));
-        ui.add_space(10.0);
-        // Queried lazily: the System Events lookup prompts for Automation
-        // access the first time, so we defer it until Settings is opened.
-        let mut open_at_login = match self.open_at_login {
-            Some(value) => value,
-            None => {
-                let enabled = login_item::is_enabled();
-                self.open_at_login = Some(enabled);
-                enabled
-            }
-        };
-        if check_item(ui, "Open at Login", &mut open_at_login) {
-            login_item::set_enabled(open_at_login);
-            self.open_at_login = Some(open_at_login);
-        }
+                let mut theme_changed = false;
+                ui.horizontal(|ui| {
+                    ui.add(
+                        Label::new(regular("Appearance", 12.0, theme::text_check()))
+                            .selectable(false),
+                    );
+                    theme_changed |= ui
+                        .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            theme_mode_group(ui, &mut self.settings.theme)
+                        })
+                        .inner;
+                });
+                changed |= theme_changed;
 
-        ui.add_space(12.0);
-        divider(ui);
-        ui.add_space(12.0);
+                ui.add_space(10.0);
+                // Queried lazily: the System Events lookup prompts for Automation
+                // access the first time, so we defer it until Settings is opened.
+                let mut open_at_login = match self.open_at_login {
+                    Some(value) => value,
+                    None => {
+                        let enabled = login_item::is_enabled();
+                        self.open_at_login = Some(enabled);
+                        enabled
+                    }
+                };
+                if check_item(ui, "Open at Login", &mut open_at_login) {
+                    login_item::set_enabled(open_at_login);
+                    self.open_at_login = Some(open_at_login);
+                }
 
-        ui.add(Label::new(semibold("Dependencies", 12.5, theme::TEXT_BRIGHT)).selectable(false));
+                if changed {
+                    self.save_settings();
+                }
+                if theme_changed {
+                    self.sync_appearance(ctx);
+                }
 
-        let snapshot = self.shared.lock().unwrap().snapshot.clone();
-        let (adb, scrcpy) = match &snapshot {
-            Some(snapshot) => (Some(&snapshot.adb), Some(&snapshot.scrcpy)),
-            None => (None, None),
-        };
+                ui.add_space(12.0);
+                divider(ui);
+                ui.add_space(12.0);
 
-        dependency_row(ui, ph::TERMINAL_WINDOW, "ADB", adb);
-        divider(ui);
-        dependency_row(ui, ph::MONITOR_PLAY, "scrcpy", scrcpy);
+                ui.add(
+                    Label::new(semibold("Dependencies", 12.5, theme::text_bright()))
+                        .selectable(false),
+                );
+
+                let snapshot = self.shared.lock().unwrap().snapshot.clone();
+                let (adb, scrcpy) = match &snapshot {
+                    Some(snapshot) => (Some(&snapshot.adb), Some(&snapshot.scrcpy)),
+                    None => (None, None),
+                };
+
+                dependency_row(ui, ph::TERMINAL_WINDOW, "ADB", adb);
+                divider(ui);
+                dependency_row(ui, ph::MONITOR_PLAY, "scrcpy", scrcpy);
+            });
     }
 
     fn pair_screen(&mut self, ui: &mut Ui, ctx: &Context) {
@@ -905,7 +969,7 @@ impl App {
                 ui.vertical_centered(|ui| {
                     let (rect, _) = ui.allocate_exact_size(vec2(168.0, 168.0), Sense::hover());
                     let painter = ui.painter();
-                    painter.rect_filled(rect, 12.0, theme::QR_CARD);
+                    painter.rect_filled(rect, 12.0, theme::qr_card());
 
                     // Reserve a 4-module quiet zone inside the 144px area; the
                     // raw matrix has none and Android's scanner rejects codes
@@ -922,7 +986,7 @@ impl App {
                                 painter.rect_filled(
                                     Rect::from_min_size(min, vec2(cell + 0.3, cell + 0.3)),
                                     0.0,
-                                    theme::QR_INK,
+                                    theme::qr_ink(),
                                 );
                             }
                         }
@@ -932,7 +996,7 @@ impl App {
                     ui.add(Label::new(semibold(
                         "Scan with your phone",
                         13.0,
-                        theme::TEXT_BRIGHT,
+                        theme::text_bright(),
                     )));
                     ui.add_space(4.0);
                     hint_label(
@@ -947,12 +1011,12 @@ impl App {
             PairingPhase::Connecting { progress } => {
                 center_pad(ui, 28.0 + 12.0 + 18.0 + 4.0 + 34.0 + 10.0 + 32.0);
                 ui.vertical_centered(|ui| {
-                    ui.add(egui::Spinner::new().size(28.0).color(theme::GREEN));
+                    ui.add(egui::Spinner::new().size(28.0).color(theme::green()));
                     ui.add_space(12.0);
                     ui.add(Label::new(semibold(
                         progress.title.clone(),
                         13.0,
-                        theme::TEXT_BRIGHT,
+                        theme::text_bright(),
                     )));
                     ui.add_space(4.0);
                     hint_label(ui, &progress.detail, 300.0);
@@ -963,12 +1027,12 @@ impl App {
             PairingPhase::Failed { message } => {
                 center_pad(ui, 28.0 + 12.0 + 18.0 + 4.0 + 32.0 + 36.0);
                 ui.vertical_centered(|ui| {
-                    ui.add(Label::new(icon(ph::WARNING_CIRCLE, 28.0, theme::RED)));
+                    ui.add(Label::new(icon(ph::WARNING_CIRCLE, 28.0, theme::red())));
                     ui.add_space(12.0);
                     ui.add(Label::new(semibold(
                         "Pairing failed",
                         13.0,
-                        theme::TEXT_BRIGHT,
+                        theme::text_bright(),
                     )));
                     ui.add_space(4.0);
                     hint_label(ui, &message, 280.0);
@@ -983,8 +1047,8 @@ impl App {
                             ui,
                             Some(ph::ARROW_CLOCKWISE),
                             "Retry",
-                            theme::GREEN,
-                            theme::GREEN_INK,
+                            theme::green(),
+                            theme::green_ink(),
                             true,
                         )
                         .clicked()
@@ -992,8 +1056,15 @@ impl App {
                             backend::start_pairing(self.shared.clone(), ctx.clone());
                         }
                         ui.add_space(10.0);
-                        if pill_button(ui, None, "Cancel", theme::SURFACE, theme::TEXT_CHECK, false)
-                            .clicked()
+                        if pill_button(
+                            ui,
+                            None,
+                            "Cancel",
+                            theme::surface(),
+                            theme::text_check(),
+                            false,
+                        )
+                        .clicked()
                         {
                             backend::cancel_pairing(&self.shared);
                             self.screen = Screen::Main;
@@ -1023,7 +1094,7 @@ impl RowAction {
     fn disabled(glyph: &'static str) -> Self {
         Self {
             glyph,
-            color: Color32::from_rgb(0x5A, 0x5E, 0x68),
+            color: theme::text_faint(),
             enabled: false,
         }
     }
@@ -1036,9 +1107,9 @@ fn icon_button(ui: &mut Ui, glyph: &str, size: f32, color: Color32) -> egui::Res
 
 fn tab_item(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
     let text = if active {
-        semibold(label, 12.5, theme::TEXT_STRONG)
+        semibold(label, 12.5, theme::text_strong())
     } else {
-        medium(label, 12.5, theme::TEXT_MUTED)
+        medium(label, 12.5, theme::text_muted())
     };
 
     let response = ui
@@ -1048,7 +1119,7 @@ fn tab_item(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
             let (rect, _) =
                 ui.allocate_exact_size(vec2(response.rect.width(), 2.0), Sense::hover());
             if active {
-                ui.painter().rect_filled(rect, 1.0, theme::GREEN);
+                ui.painter().rect_filled(rect, 1.0, theme::green());
             }
             response
         })
@@ -1059,7 +1130,7 @@ fn tab_item(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
 
 fn divider(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, theme::HAIRLINE);
+    ui.painter().rect_filled(rect, 0.0, theme::hairline());
 }
 
 fn list_row(
@@ -1074,16 +1145,16 @@ fn list_row(
     let response = ui.horizontal(|ui| {
         ui.set_height(38.0);
         ui.add_space(2.0);
-        ui.add(Label::new(icon(row_icon, 14.0, theme::TEXT_LABEL)).selectable(false));
+        ui.add(Label::new(icon(row_icon, 14.0, theme::text_label())).selectable(false));
         ui.add_space(10.0);
-        ui.add(Label::new(medium(name, 12.5, theme::TEXT_BRIGHT)).selectable(false));
+        ui.add(Label::new(medium(name, 12.5, theme::text_bright())).selectable(false));
         ui.add_space(10.0);
 
         let reserved = if action.is_some() { 34.0 } else { 4.0 };
         ui.scope(|ui| {
             ui.set_max_width((ui.available_width() - reserved).max(20.0));
             ui.add(
-                Label::new(regular(detail, 11.0, theme::TEXT_FAINT))
+                Label::new(regular(detail, 11.0, theme::text_faint()))
                     .truncate()
                     .selectable(false),
             );
@@ -1100,7 +1171,7 @@ fn list_row(
                         Sense::hover()
                     },
                 );
-                ui.painter().rect_filled(rect, 6.0, theme::SURFACE);
+                ui.painter().rect_filled(rect, 6.0, theme::surface());
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -1128,9 +1199,9 @@ fn dependency_row(ui: &mut Ui, row_icon: &str, name: &str, info: Option<&backend
     ui.horizontal(|ui| {
         ui.set_height(38.0);
         ui.add_space(2.0);
-        ui.add(Label::new(icon(row_icon, 14.0, theme::TEXT_LABEL)).selectable(false));
+        ui.add(Label::new(icon(row_icon, 14.0, theme::text_label())).selectable(false));
         ui.add_space(10.0);
-        ui.add(Label::new(medium(name, 12.5, theme::TEXT_BRIGHT)).selectable(false));
+        ui.add(Label::new(medium(name, 12.5, theme::text_bright())).selectable(false));
         ui.add_space(10.0);
 
         let warning = info.and_then(|tool| tool.warnings.first());
@@ -1147,9 +1218,9 @@ fn dependency_row(ui: &mut Ui, row_icon: &str, name: &str, info: Option<&backend
                     detail,
                     11.0,
                     if warning.is_some() {
-                        theme::AMBER
+                        theme::amber()
                     } else {
-                        theme::TEXT_FAINT
+                        theme::text_faint()
                     },
                 ))
                 .truncate()
@@ -1161,13 +1232,15 @@ fn dependency_row(ui: &mut Ui, row_icon: &str, name: &str, info: Option<&backend
             ui.add_space(2.0);
             match info {
                 Some(tool) if tool.available && tool.warnings.is_empty() => {
-                    ui.add(Label::new(regular("Ready", 11.0, theme::TEXT_MUTED)).selectable(false));
+                    ui.add(
+                        Label::new(regular("Ready", 11.0, theme::text_muted())).selectable(false),
+                    );
                 }
                 Some(tool) if tool.available => {
-                    ui.add(Label::new(regular("Update", 11.0, theme::AMBER)).selectable(false));
+                    ui.add(Label::new(regular("Update", 11.0, theme::amber())).selectable(false));
                 }
                 Some(_) => {
-                    ui.add(Label::new(regular("Missing", 11.0, theme::RED)).selectable(false));
+                    ui.add(Label::new(regular("Missing", 11.0, theme::red())).selectable(false));
                 }
                 None => {}
             }
@@ -1178,12 +1251,12 @@ fn dependency_row(ui: &mut Ui, row_icon: &str, name: &str, info: Option<&backend
 fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bool {
     ui.vertical(|ui| {
         ui.set_width(width);
-        ui.add(Label::new(regular(label, 10.5, theme::TEXT_LABEL)).selectable(false));
+        ui.add(Label::new(regular(label, 10.5, theme::text_label())).selectable(false));
         ui.add_space(4.0);
 
         let frame = Frame::new()
-            .fill(theme::INPUT_BG)
-            .stroke(Stroke::new(1.0, theme::INPUT_STROKE))
+            .fill(theme::input_bg())
+            .stroke(Stroke::new(1.0, theme::input_stroke()))
             .corner_radius(CornerRadius::same(6))
             .inner_margin(Margin::symmetric(9, 6));
 
@@ -1194,7 +1267,7 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
                     TextEdit::singleline(value)
                         .frame(Frame::NONE)
                         .font(FontId::new(12.0, FontFamily::Proportional))
-                        .text_color(theme::TEXT_BRIGHT)
+                        .text_color(theme::text_bright())
                         .margin(Margin::ZERO)
                         .desired_width(width - 20.0),
                 )
@@ -1205,6 +1278,51 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
     .inner
 }
 
+fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
+    let mut changed = false;
+    let modes = [
+        (ThemeMode::Auto, "Auto"),
+        (ThemeMode::Day, "Day"),
+        (ThemeMode::Night, "Night"),
+    ];
+
+    Frame::new()
+        .fill(theme::segment_bg())
+        .stroke(Stroke::new(1.0, theme::input_stroke()))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (mode, label) in modes {
+                    let active = *selected == mode;
+                    let text = if active {
+                        semibold(label, 11.5, theme::text_strong())
+                    } else {
+                        medium(label, 11.5, theme::text_muted())
+                    };
+                    let response = ui.add_sized(
+                        [56.0, 24.0],
+                        Button::new(text)
+                            .fill(if active {
+                                theme::segment_selected()
+                            } else {
+                                Color32::TRANSPARENT
+                            })
+                            .stroke(Stroke::NONE)
+                            .corner_radius(CornerRadius::same(6)),
+                    );
+                    if response.clicked() && !active {
+                        *selected = mode;
+                        changed = true;
+                    }
+                    response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                }
+            });
+        });
+
+    changed
+}
+
 fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
     let mut changed = false;
 
@@ -1213,27 +1331,27 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
         let painter = ui.painter();
 
         if *value {
-            painter.rect_filled(rect, 4.0, theme::GREEN);
+            painter.rect_filled(rect, 4.0, theme::green());
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 ph::CHECK,
                 theme::icon_font(10.0),
-                theme::GREEN_INK,
+                theme::green_ink(),
             );
         } else {
-            painter.rect_filled(rect, 4.0, theme::INPUT_BG);
+            painter.rect_filled(rect, 4.0, theme::input_bg());
             painter.rect_stroke(
                 rect,
                 4.0,
-                Stroke::new(1.0, theme::CHECK_STROKE),
+                Stroke::new(1.0, theme::check_stroke()),
                 egui::StrokeKind::Inside,
             );
         }
 
         ui.add_space(7.0);
         let label_response = ui.add(
-            Label::new(regular(label, 12.0, theme::TEXT_CHECK))
+            Label::new(regular(label, 12.0, theme::text_check()))
                 .selectable(false)
                 .sense(Sense::click()),
         );
@@ -1249,9 +1367,9 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
 
 fn nav_header(ui: &mut Ui, title: &str) -> egui::Response {
     ui.horizontal(|ui| {
-        let response = icon_button(ui, ph::CARET_LEFT, 16.0, theme::TEXT_MUTED);
+        let response = icon_button(ui, ph::CARET_LEFT, 16.0, theme::text_muted());
         ui.add_space(10.0);
-        ui.add(Label::new(semibold(title, 15.0, theme::TEXT_STRONG)).selectable(false));
+        ui.add(Label::new(semibold(title, 15.0, theme::text_strong())).selectable(false));
         response
     })
     .inner
@@ -1271,7 +1389,7 @@ fn hint_label(ui: &mut Ui, text: &str, width: f32) {
     ui.scope(|ui| {
         ui.set_max_width(width);
         ui.add(
-            Label::new(regular(text, 11.0, theme::TEXT_SOFT))
+            Label::new(regular(text, 11.0, theme::text_soft()))
                 .halign(egui::Align::Center)
                 .wrap(),
         );
@@ -1288,7 +1406,7 @@ fn pairing_progress_block(ui: &mut Ui, progress: &PairingProgress, width: f32) {
         ui.scope(|ui| {
             ui.set_max_width(width);
             ui.add(
-                Label::new(medium(meta, 11.0, theme::GREEN))
+                Label::new(medium(meta, 11.0, theme::green()))
                     .halign(egui::Align::Center)
                     .wrap(),
             );
@@ -1300,7 +1418,7 @@ fn pairing_progress_block(ui: &mut Ui, progress: &PairingProgress, width: f32) {
         ui.scope(|ui| {
             ui.set_max_width(width);
             ui.add(
-                Label::new(regular(endpoint, 10.5, theme::TEXT_FAINT))
+                Label::new(regular(endpoint, 10.5, theme::text_faint()))
                     .halign(egui::Align::Center)
                     .wrap(),
             );
@@ -1391,6 +1509,38 @@ mod tests {
 
     const WIDTH: f64 = 380.0;
     const MARGIN: f64 = 8.0;
+
+    #[test]
+    fn automatic_theme_follows_the_system() {
+        assert_eq!(
+            resolved_appearance(ThemeMode::Auto, Some(Theme::Light)),
+            theme::Appearance::Day
+        );
+        assert_eq!(
+            resolved_appearance(ThemeMode::Auto, Some(Theme::Dark)),
+            theme::Appearance::Night
+        );
+    }
+
+    #[test]
+    fn explicit_theme_overrides_the_system() {
+        assert_eq!(
+            resolved_appearance(ThemeMode::Day, Some(Theme::Dark)),
+            theme::Appearance::Day
+        );
+        assert_eq!(
+            resolved_appearance(ThemeMode::Night, Some(Theme::Light)),
+            theme::Appearance::Night
+        );
+    }
+
+    #[test]
+    fn automatic_theme_falls_back_to_night_when_unknown() {
+        assert_eq!(
+            resolved_appearance(ThemeMode::Auto, None),
+            theme::Appearance::Night
+        );
+    }
 
     #[test]
     fn ready_mirror_keys_ignore_offline_devices() {

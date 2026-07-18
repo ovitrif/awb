@@ -4,6 +4,15 @@ use std::path::PathBuf;
 use awb_core::scrcpy::ScrcpyOptions;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    #[default]
+    Auto,
+    Day,
+    Night,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -15,6 +24,8 @@ pub struct Settings {
     pub borderless: bool,
     /// Auto-start mirroring when a physical phone connects (never emulators).
     pub auto_mirror: bool,
+    /// Follow the system appearance or force the light/dark app palette.
+    pub theme: ThemeMode,
 }
 
 impl Default for Settings {
@@ -28,6 +39,7 @@ impl Default for Settings {
             always_on_top: true,
             borderless: true,
             auto_mirror: false,
+            theme: ThemeMode::Auto,
         }
     }
 }
@@ -72,4 +84,42 @@ fn config_path() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
 
     Some(base.join("awb").join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_automatic_theme() {
+        assert_eq!(Settings::default().theme, ThemeMode::Auto);
+    }
+
+    #[test]
+    fn old_configs_without_theme_migrate_to_auto() {
+        let settings: Settings = toml::from_str(
+            r#"
+window_title = "Phone"
+window_width = 480
+window_height = 1071
+always_on_top = true
+borderless = true
+auto_mirror = false
+"#,
+        )
+        .expect("legacy settings should deserialize");
+
+        assert_eq!(settings.theme, ThemeMode::Auto);
+    }
+
+    #[test]
+    fn theme_modes_use_stable_lowercase_values() {
+        let settings = Settings {
+            theme: ThemeMode::Day,
+            ..Settings::default()
+        };
+
+        let raw = toml::to_string(&settings).expect("settings serialize");
+        assert!(raw.contains("theme = \"day\""));
+    }
 }
