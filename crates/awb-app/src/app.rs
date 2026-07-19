@@ -2,9 +2,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use eframe::egui::containers::scroll_area::ScrollBarVisibility;
 use eframe::egui::{
     self, Align, Button, Color32, Context, CornerRadius, FontFamily, FontId, Frame, Label, Layout,
-    Margin, Rect, Sense, Stroke, TextEdit, TextureHandle, TextureOptions, Theme, Ui,
+    Margin, Rect, Sense, Shadow, Stroke, TextEdit, TextureHandle, TextureOptions, Theme, Ui,
     ViewportCommand, vec2,
 };
 use egui_phosphor::regular as ph;
@@ -19,6 +20,18 @@ use crate::theme::{self, icon, medium, regular, semibold};
 
 const FOCUS_GRACE: Duration = Duration::from_millis(300);
 const STATUS_POLL: Duration = Duration::from_secs(5);
+const SCREEN_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+const POPOVER_APPEAR_DURATION: Duration = Duration::from_millis(160);
+const POPOVER_HIDE_DURATION: Duration = Duration::from_millis(120);
+const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(250);
+const SCREEN_INCOMING_OFFSET: f32 = 32.0;
+const SCREEN_OUTGOING_OFFSET: f32 = 18.0;
+const THEME_MODE_GROUP_SIZE: egui::Vec2 = vec2(172.0, 28.0);
+const SCROLL_EDGE_FADE_HEIGHT: f32 = 22.0;
+const SCROLLBAR_HANDLE_HEIGHT: f32 = 44.0;
+const SCROLLBAR_HANDLE_WIDTH: f32 = 2.0;
+const SCROLLBAR_TRACK_INSET: f32 = 5.0;
+const SCROLLBAR_OPACITY_FADE: Duration = Duration::from_millis(100);
 /// How long after launch to keep forcing the window hidden, in case the
 /// platform surfaces it despite `with_visible(false)`.
 const STARTUP_HIDE: Duration = Duration::from_millis(800);
@@ -73,11 +86,32 @@ struct LogicalMenuAnchor {
     bottom_y: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Screen {
     Main,
     Settings,
     Pair,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScreenTransition {
+    from: Screen,
+    to: Screen,
+    direction: f32,
+    started_at: Instant,
+    cancel_pairing_on_complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopoverTransitionPhase {
+    Appearing,
+    Disappearing,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PopoverTransition {
+    phase: PopoverTransitionPhase,
+    started_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,11 +126,13 @@ pub struct App {
     width_text: String,
     height_text: String,
     screen: Screen,
+    screen_transition: Option<ScreenTransition>,
+    popover_transition: Option<PopoverTransition>,
     tab: Tab,
     logo: TextureHandle,
     shell: TextureHandle,
     appearance: theme::Appearance,
-    _status_icon: MenuBarIcon,
+    status_icon: MenuBarIcon,
     show_item: MenuItem,
     pair_id: MenuId,
     refresh_id: MenuId,
@@ -108,7 +144,10 @@ pub struct App {
     created_at: Instant,
     open_at_login: Option<bool>,
     pending_show: bool,
+    last_menu_anchor: Option<MenuAnchor>,
     auto_mirrored: HashSet<String>,
+    settings_scroll_offset: f32,
+    settings_scroll_active_at: Option<Instant>,
 }
 
 impl App {
@@ -175,18 +214,19 @@ impl App {
 
         let width_text = settings.window_width.to_string();
         let height_text = settings.window_height.to_string();
-
         Ok(Self {
             shared,
             settings,
             width_text,
             height_text,
             screen: Screen::Main,
+            screen_transition: None,
+            popover_transition: None,
             tab: Tab::Devices,
             logo,
             shell,
             appearance,
-            _status_icon: status_icon,
+            status_icon,
             show_item,
             pair_id: pair_item.id().clone(),
             refresh_id: refresh_item.id().clone(),
@@ -198,7 +238,10 @@ impl App {
             created_at: Instant::now(),
             open_at_login: None,
             pending_show: false,
+            last_menu_anchor: None,
             auto_mirrored: HashSet::new(),
+            settings_scroll_offset: 0.0,
+            settings_scroll_active_at: None,
         })
     }
 
@@ -224,6 +267,10 @@ impl App {
         }
 
         self.visible = true;
+        self.popover_transition = Some(PopoverTransition {
+            phase: PopoverTransitionPhase::Appearing,
+            started_at: Instant::now(),
+        });
         self.shown_at = Instant::now();
         self.focus_hidden_at = None;
         self.show_item.set_text("Hide awb");
@@ -231,14 +278,21 @@ impl App {
     }
 
     fn hide(&mut self, ctx: &Context) {
+        if !self.visible || self.is_disappearing() {
+            return;
+        }
+
         self.pending_show = false;
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-        self.visible = false;
+        self.popover_transition = Some(PopoverTransition {
+            phase: PopoverTransitionPhase::Disappearing,
+            started_at: Instant::now(),
+        });
         self.show_item.set_text("Show awb");
+        ctx.request_repaint();
     }
 
     fn toggle(&mut self, ctx: &Context, anchor: Option<MenuAnchor>) {
-        if self.visible {
+        if self.visible && !self.is_disappearing() {
             self.hide(ctx);
         } else if self
             .focus_hidden_at
@@ -258,47 +312,77 @@ impl App {
     }
 
     fn open_pairing(&mut self, ctx: &Context) {
-        self.screen = Screen::Pair;
+        self.navigate_to(Screen::Pair, ctx);
         backend::start_pairing(self.shared.clone(), ctx.clone());
     }
 
+    fn navigate_to(&mut self, screen: Screen, ctx: &Context) {
+        if self.screen == screen {
+            return;
+        }
+
+        self.screen_transition = Some(ScreenTransition {
+            from: self.screen,
+            to: screen,
+            direction: screen_transition_direction(self.screen, screen),
+            started_at: Instant::now(),
+            cancel_pairing_on_complete: false,
+        });
+        self.screen = screen;
+        ctx.request_repaint();
+    }
+
+    fn leave_pairing(&mut self, ctx: &Context) {
+        self.navigate_to(Screen::Main, ctx);
+        if let Some(transition) = &mut self.screen_transition {
+            transition.cancel_pairing_on_complete = true;
+        } else {
+            backend::cancel_pairing(&self.shared);
+        }
+    }
+
     fn handle_events(&mut self, ctx: &Context) {
+        let status_events: Vec<MenuBarIconEvent> =
+            std::mem::take(&mut *STATUS_EVENTS.lock().unwrap());
+        for event in status_events {
+            if let MenuBarIconEvent::Click {
+                button,
+                button_state,
+                rect,
+                position,
+                ..
+            } = event
+            {
+                let anchor = MenuAnchor::new(rect, position.x, position.y);
+                self.last_menu_anchor = Some(anchor);
+
+                if button == MouseButton::Left && button_state == MouseButtonState::Up {
+                    self.toggle(ctx, Some(anchor));
+                }
+            }
+        }
+
         let menu_events: Vec<MenuEvent> = std::mem::take(&mut *MENU_EVENTS.lock().unwrap());
         for event in menu_events {
             if event.id == self.show_item.id() {
-                if self.visible {
+                if self.visible && !self.is_disappearing() {
                     self.hide(ctx);
                 } else {
-                    self.show(ctx, None);
+                    self.show(ctx, self.menu_anchor());
                 }
             } else if event.id == self.pair_id {
                 self.open_pairing(ctx);
-                self.show(ctx, None);
+                self.show(ctx, self.menu_anchor());
             } else if event.id == self.refresh_id {
                 backend::refresh_status(self.shared.clone(), ctx.clone());
             } else if event.id == self.quit_id {
                 self.quit(ctx);
             }
         }
-
-        let status_events: Vec<MenuBarIconEvent> =
-            std::mem::take(&mut *STATUS_EVENTS.lock().unwrap());
-        for event in status_events {
-            if let MenuBarIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                rect,
-                position,
-                ..
-            } = event
-            {
-                self.toggle(ctx, Some(MenuAnchor::new(rect, position.x, position.y)));
-            }
-        }
     }
 
     fn handle_focus(&mut self, ctx: &Context) {
-        if !self.visible {
+        if !self.visible || self.is_disappearing() {
             return;
         }
 
@@ -306,6 +390,38 @@ impl App {
         if !focused && self.shown_at.elapsed() > FOCUS_GRACE {
             self.hide(ctx);
             self.focus_hidden_at = Some(Instant::now());
+        }
+    }
+
+    fn menu_anchor(&self) -> Option<MenuAnchor> {
+        self.last_menu_anchor.or_else(|| {
+            self.status_icon.rect().map(|rect| {
+                let click_x = rect.position.x + f64::from(rect.size.width) / 2.0;
+                let click_y = rect.position.y + f64::from(rect.size.height) / 2.0;
+                MenuAnchor::new(rect, click_x, click_y)
+            })
+        })
+    }
+
+    fn is_disappearing(&self) -> bool {
+        self.popover_transition
+            .is_some_and(|transition| transition.phase == PopoverTransitionPhase::Disappearing)
+    }
+
+    fn update_popover_transition(&mut self, ctx: &Context) {
+        let Some(transition) = self.popover_transition else {
+            return;
+        };
+        let duration = popover_transition_duration(transition.phase);
+
+        if transition.started_at.elapsed() >= duration {
+            self.popover_transition = None;
+            if transition.phase == PopoverTransitionPhase::Disappearing {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                self.visible = false;
+            }
+        } else {
+            ctx.request_repaint();
         }
     }
 
@@ -392,6 +508,15 @@ fn resolved_appearance(mode: ThemeMode, system_theme: Option<Theme>) -> theme::A
     }
 }
 
+fn screen_transition_direction(from: Screen, to: Screen) -> f32 {
+    let depth = |screen| match screen {
+        Screen::Main => 0,
+        Screen::Settings | Screen::Pair => 1,
+    };
+
+    if depth(to) < depth(from) { -1.0 } else { 1.0 }
+}
+
 fn popover_position(
     anchor: MenuAnchor,
     fallback_monitor_width: Option<f64>,
@@ -430,16 +555,62 @@ fn logical_menu_anchor(anchor: MenuAnchor, displays: &[DisplayBounds]) -> Logica
                 && (rect_center_x - click_x).abs() <= 96.0
         })
         .unwrap_or(false);
+    let x = if rect_matches_click_display {
+        rect_center_x
+    } else {
+        click_x
+    };
     let bottom_y = if rect_matches_click_display {
         rect_bottom_y
     } else {
         click_y + icon_height / 2.0
     };
 
-    LogicalMenuAnchor {
-        x: click_x,
-        bottom_y,
+    LogicalMenuAnchor { x, bottom_y }
+}
+
+fn popover_transition_duration(phase: PopoverTransitionPhase) -> Duration {
+    match phase {
+        PopoverTransitionPhase::Appearing => POPOVER_APPEAR_DURATION,
+        PopoverTransitionPhase::Disappearing => POPOVER_HIDE_DURATION,
     }
+}
+
+fn popover_transition_opacity(phase: PopoverTransitionPhase, progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    match phase {
+        PopoverTransitionPhase::Appearing => egui::emath::easing::cubic_out(progress),
+        PopoverTransitionPhase::Disappearing => 1.0 - egui::emath::easing::cubic_in(progress),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_native_window_opacity(frame: &eframe::Frame, opacity: f32) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = frame.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return false;
+    };
+    let ns_view_ptr = handle.ns_view.as_ptr().cast::<objc2_app_kit::NSView>();
+    // SAFETY: AppKit supplies this non-null NSView pointer for the lifetime of
+    // the eframe window, and it is used only synchronously on the UI thread.
+    let Some(ns_view) = (unsafe { ns_view_ptr.as_ref() }) else {
+        return false;
+    };
+    let Some(window) = ns_view.window() else {
+        return false;
+    };
+
+    window.setAlphaValue(f64::from(opacity.clamp(0.0, 1.0)));
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_native_window_opacity(_frame: &eframe::Frame, _opacity: f32) -> bool {
+    false
 }
 
 fn display_for_physical_menu_anchor(
@@ -615,12 +786,18 @@ impl eframe::App for App {
         // Apply a queued move before the window is shown (see `show`).
         if self.pending_show {
             self.pending_show = false;
+            if let Some(transition) = &mut self.popover_transition
+                && transition.phase == PopoverTransitionPhase::Appearing
+            {
+                transition.started_at = Instant::now();
+            }
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
 
         self.handle_events(ctx);
         self.handle_focus(ctx);
+        self.update_popover_transition(ctx);
 
         // Poll while the popover is open, or in the background when auto-mirror
         // must watch for newly connected phones.
@@ -646,13 +823,25 @@ impl eframe::App for App {
             self.screen == Screen::Pair && state.pairing.is_none()
         };
         if pairing_done {
-            self.screen = Screen::Main;
+            self.navigate_to(Screen::Main, ctx);
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let rect = ui.max_rect();
+        let opacity = if !self.visible {
+            0.0
+        } else if let Some(transition) = self.popover_transition {
+            let progress = transition.started_at.elapsed().as_secs_f32()
+                / popover_transition_duration(transition.phase).as_secs_f32();
+            popover_transition_opacity(transition.phase, progress)
+        } else {
+            1.0
+        };
+        if !set_native_window_opacity(frame, opacity) {
+            ui.set_opacity(opacity);
+        }
 
         // Beak + rounded body + gradient + hairline, baked into one texture.
         ui.painter().image(
@@ -666,21 +855,65 @@ impl eframe::App for App {
             egui::pos2(rect.left() + 16.0, rect.top() + theme::BEAK_HEIGHT + 14.0),
             egui::pos2(rect.right() - 16.0, rect.bottom() - 14.0),
         );
-        let mut content_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(content)
-                .layout(Layout::top_down(Align::Min)),
-        );
+        if let Some(transition) = self.screen_transition {
+            let progress = (transition.started_at.elapsed().as_secs_f32()
+                / SCREEN_TRANSITION_DURATION.as_secs_f32())
+            .clamp(0.0, 1.0);
 
-        match self.screen {
-            Screen::Main => self.main_screen(&mut content_ui, &ctx),
-            Screen::Settings => self.settings_screen(&mut content_ui, &ctx),
-            Screen::Pair => self.pair_screen(&mut content_ui, &ctx),
+            if progress >= 1.0 {
+                self.screen_transition = None;
+                if transition.cancel_pairing_on_complete {
+                    backend::cancel_pairing(&self.shared);
+                }
+                self.render_screen(ui, content, &ctx, transition.to, 0.0, 1.0);
+            } else {
+                let eased = egui::emath::easing::cubic_in_out(progress);
+                let outgoing_x = -transition.direction * SCREEN_OUTGOING_OFFSET * eased;
+                let incoming_x = transition.direction * SCREEN_INCOMING_OFFSET * (1.0 - eased);
+
+                self.render_screen(ui, content, &ctx, transition.from, outgoing_x, 1.0 - eased);
+                self.render_screen(ui, content, &ctx, transition.to, incoming_x, eased);
+                ctx.request_repaint();
+            }
+        } else {
+            self.render_screen(ui, content, &ctx, self.screen, 0.0, 1.0);
         }
     }
 }
 
 impl App {
+    fn render_screen(
+        &mut self,
+        ui: &mut Ui,
+        content: Rect,
+        ctx: &Context,
+        screen: Screen,
+        offset_x: f32,
+        opacity: f32,
+    ) {
+        let mut screen_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("screen", screen))
+                .max_rect(content.translate(vec2(offset_x, 0.0)))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        screen_ui.set_clip_rect(content);
+        screen_ui.set_opacity(opacity);
+        if self.screen_transition.is_some() {
+            // Both screens are painted during the transition. Keep their
+            // visual treatment intact while preventing clicks from reaching
+            // either the outgoing or incoming controls mid-animation.
+            screen_ui.visuals_mut().disabled_alpha = 1.0;
+            screen_ui.disable();
+        }
+
+        match screen {
+            Screen::Main => self.main_screen(&mut screen_ui, ctx),
+            Screen::Settings => self.settings_screen(&mut screen_ui, ctx),
+            Screen::Pair => self.pair_screen(&mut screen_ui, ctx),
+        }
+    }
+
     fn main_screen(&mut self, ui: &mut Ui, ctx: &Context) {
         self.main_header(ui, ctx);
         ui.add_space(12.0);
@@ -714,7 +947,7 @@ impl App {
                 }
                 ui.add_space(10.0);
                 if icon_button(ui, ph::GEAR_SIX, 14.0, theme::text_muted()).clicked() {
-                    self.screen = Screen::Settings;
+                    self.navigate_to(Screen::Settings, ctx);
                 }
                 ui.add_space(10.0);
                 if icon_button(ui, ph::ARROWS_CLOCKWISE, 14.0, theme::text_muted()).clicked() {
@@ -842,12 +1075,41 @@ impl App {
 
     fn settings_screen(&mut self, ui: &mut Ui, ctx: &Context) {
         if nav_header(ui, "Settings").clicked() {
-            self.screen = Screen::Main;
+            self.navigate_to(Screen::Main, ctx);
         }
         ui.add_space(12.0);
 
-        egui::ScrollArea::vertical()
+        let scroll_rect = ui.available_rect_before_wrap();
+        let scroll_input_active = ctx.input(|input| {
+            let pointer_over = input
+                .pointer
+                .hover_pos()
+                .is_some_and(|position| scroll_rect.contains(position));
+            pointer_over
+                && (input.is_scrolling()
+                    || input.time_since_last_scroll() <= input.predicted_dt.max(0.05))
+        });
+        if scroll_input_active {
+            self.settings_scroll_active_at = Some(Instant::now());
+        }
+
+        let scrollbar_opacity = self
+            .settings_scroll_active_at
+            .map(scrollbar_opacity)
+            .unwrap_or(0.0);
+        if let Some(active_at) = self.settings_scroll_active_at
+            && let Some(remaining) = SCROLLBAR_HIDE_DELAY.checked_sub(active_at.elapsed())
+        {
+            ctx.request_repaint_after(remaining);
+            if remaining <= SCROLLBAR_OPACITY_FADE {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+        }
+
+        let output = egui::ScrollArea::vertical()
+            .id_salt("settings-scroll")
             .auto_shrink([false, false])
+            .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.add(
@@ -887,17 +1149,21 @@ impl App {
                 ui.add_space(10.0);
 
                 let mut theme_changed = false;
-                ui.horizontal(|ui| {
-                    ui.add(
-                        Label::new(regular("Appearance", 12.0, theme::text_check()))
-                            .selectable(false),
-                    );
-                    theme_changed |= ui
-                        .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            theme_mode_group(ui, &mut self.settings.theme)
-                        })
-                        .inner;
-                });
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), THEME_MODE_GROUP_SIZE.y),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.add(
+                            Label::new(regular("Appearance", 12.0, theme::text_check()))
+                                .selectable(false),
+                        );
+                        theme_changed |= ui
+                            .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                theme_mode_group(ui, &mut self.settings.theme)
+                            })
+                            .inner;
+                    },
+                );
                 changed |= theme_changed;
 
                 ui.add_space(10.0);
@@ -942,12 +1208,27 @@ impl App {
                 divider(ui);
                 dependency_row(ui, ph::MONITOR_PLAY, "scrcpy", scrcpy);
             });
+
+        let scroll_moving = (output.state.offset.y - self.settings_scroll_offset).abs() > 0.01
+            || output.state.velocity().y.abs() > 0.01;
+        self.settings_scroll_offset = output.state.offset.y;
+        if scroll_moving {
+            self.settings_scroll_active_at = Some(Instant::now());
+            ctx.request_repaint_after(SCROLLBAR_HIDE_DELAY);
+        }
+
+        paint_settings_scroll_chrome(
+            ui,
+            output.inner_rect,
+            output.content_size.y,
+            output.state.offset.y,
+            scrollbar_opacity,
+        );
     }
 
     fn pair_screen(&mut self, ui: &mut Ui, ctx: &Context) {
         if nav_header(ui, "Pair device").clicked() {
-            backend::cancel_pairing(&self.shared);
-            self.screen = Screen::Main;
+            self.leave_pairing(ctx);
             return;
         }
 
@@ -957,7 +1238,7 @@ impl App {
         };
 
         let Some(phase) = phase else {
-            self.screen = Screen::Main;
+            self.navigate_to(Screen::Main, ctx);
             return;
         };
 
@@ -1066,8 +1347,7 @@ impl App {
                         )
                         .clicked()
                         {
-                            backend::cancel_pairing(&self.shared);
-                            self.screen = Screen::Main;
+                            self.leave_pairing(ctx);
                         }
                     });
                 });
@@ -1254,26 +1534,146 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
 
         let frame = Frame::new()
             .fill(theme::input_bg())
-            .stroke(Stroke::new(1.0, theme::input_stroke()))
+            .stroke(Stroke::new(1.0, Color32::TRANSPARENT))
+            .shadow(Shadow {
+                offset: [0, 1],
+                blur: 4,
+                spread: 0,
+                color: theme::control_shadow(),
+            })
             .corner_radius(CornerRadius::same(6))
             .inner_margin(Margin::symmetric(9, 6));
 
-        frame
-            .show(ui, |ui| {
-                ui.set_width(width - 20.0);
-                ui.add(
-                    TextEdit::singleline(value)
-                        .frame(Frame::NONE)
-                        .font(FontId::new(12.0, FontFamily::Proportional))
-                        .text_color(theme::text_bright())
-                        .margin(Margin::ZERO)
-                        .desired_width(width - 20.0),
-                )
-            })
-            .inner
-            .changed()
+        let output = frame.show(ui, |ui| {
+            ui.set_width(width - 20.0);
+            ui.add(
+                TextEdit::singleline(value)
+                    .frame(Frame::NONE)
+                    .font(FontId::new(12.0, FontFamily::Proportional))
+                    .text_color(theme::text_bright())
+                    .margin(Margin::ZERO)
+                    .desired_width(width - 20.0),
+            )
+        });
+        let (stroke_width, stroke_color) = if output.inner.has_focus() {
+            (1.5, theme::input_focus_stroke())
+        } else if output.response.hovered() || output.inner.hovered() {
+            (1.0, theme::input_hover_stroke())
+        } else {
+            (1.0, theme::input_stroke())
+        };
+        ui.painter().rect_stroke(
+            output.response.rect,
+            6.0,
+            Stroke::new(stroke_width, stroke_color),
+            egui::StrokeKind::Inside,
+        );
+
+        output.inner.changed()
     })
     .inner
+}
+
+fn scrollbar_opacity(active_at: Instant) -> f32 {
+    let elapsed = active_at.elapsed();
+    let Some(remaining) = SCROLLBAR_HIDE_DELAY.checked_sub(elapsed) else {
+        return 0.0;
+    };
+
+    (remaining.as_secs_f32() / SCROLLBAR_OPACITY_FADE.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+fn paint_settings_scroll_chrome(
+    ui: &Ui,
+    viewport: Rect,
+    content_height: f32,
+    offset: f32,
+    scrollbar_opacity: f32,
+) {
+    let max_offset = (content_height - viewport.height()).max(0.0);
+    if max_offset <= 0.5 {
+        return;
+    }
+
+    let painter = ui.painter().with_clip_rect(viewport);
+    let top_strength = (offset / SCROLL_EDGE_FADE_HEIGHT).clamp(0.0, 1.0);
+    let bottom_strength = ((max_offset - offset) / SCROLL_EDGE_FADE_HEIGHT).clamp(0.0, 1.0);
+
+    if top_strength > 0.0 {
+        let rect = Rect::from_min_max(
+            viewport.min,
+            egui::pos2(viewport.right(), viewport.top() + SCROLL_EDGE_FADE_HEIGHT),
+        );
+        paint_vertical_gradient(
+            &painter,
+            rect,
+            with_opacity(theme::scroll_fade_top(), top_strength),
+            Color32::TRANSPARENT,
+        );
+    }
+
+    if bottom_strength > 0.0 {
+        let rect = Rect::from_min_max(
+            egui::pos2(viewport.left(), viewport.bottom() - SCROLL_EDGE_FADE_HEIGHT),
+            viewport.max,
+        );
+        paint_vertical_gradient(
+            &painter,
+            rect,
+            Color32::TRANSPARENT,
+            with_opacity(theme::scroll_fade_bottom(), bottom_strength),
+        );
+    }
+
+    if scrollbar_opacity > 0.0
+        && let Some(handle) = settings_scrollbar_rect(viewport, content_height, offset)
+    {
+        painter.rect_filled(
+            handle,
+            SCROLLBAR_HANDLE_WIDTH / 2.0,
+            with_opacity(theme::scrollbar_thumb(), scrollbar_opacity),
+        );
+    }
+}
+
+fn settings_scrollbar_rect(viewport: Rect, content_height: f32, offset: f32) -> Option<Rect> {
+    let max_offset = content_height - viewport.height();
+    if max_offset <= 0.5 {
+        return None;
+    }
+
+    let track_top = viewport.top() + SCROLLBAR_TRACK_INSET;
+    let track_height = (viewport.height() - 2.0 * SCROLLBAR_TRACK_INSET).max(0.0);
+    let handle_height = SCROLLBAR_HANDLE_HEIGHT.min(track_height);
+    let travel = (track_height - handle_height).max(0.0);
+    let progress = (offset / max_offset).clamp(0.0, 1.0);
+    let top = track_top + travel * progress;
+
+    Some(Rect::from_min_size(
+        egui::pos2(viewport.right() - SCROLLBAR_HANDLE_WIDTH - 1.0, top),
+        vec2(SCROLLBAR_HANDLE_WIDTH, handle_height),
+    ))
+}
+
+fn paint_vertical_gradient(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.right_bottom(), bottom);
+    mesh.colored_vertex(rect.left_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+fn with_opacity(color: Color32, opacity: f32) -> Color32 {
+    let [red, green, blue, alpha] = color.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(
+        red,
+        green,
+        blue,
+        (f32::from(alpha) * opacity.clamp(0.0, 1.0)).round() as u8,
+    )
 }
 
 fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
@@ -1284,39 +1684,53 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
         (ThemeMode::Night, "Night"),
     ];
 
-    Frame::new()
-        .fill(theme::segment_bg())
-        .stroke(Stroke::new(1.0, theme::input_stroke()))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(2))
-        .show(ui, |ui| {
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                for (mode, label) in modes {
-                    let active = *selected == mode;
-                    let text = if active {
-                        semibold(label, 11.5, theme::text_strong())
-                    } else {
-                        medium(label, 11.5, theme::text_muted())
-                    };
-                    let response = ui.add_sized(
-                        [56.0, 24.0],
-                        Button::new(text)
-                            .fill(if active {
-                                theme::segment_selected()
-                            } else {
-                                Color32::TRANSPARENT
-                            })
-                            .stroke(Stroke::NONE)
-                            .corner_radius(CornerRadius::same(6)),
-                    );
-                    if response.clicked() && !active {
-                        *selected = mode;
-                        changed = true;
+    ui.allocate_ui_with_layout(
+        THEME_MODE_GROUP_SIZE,
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            Frame::new()
+                .fill(theme::segment_bg())
+                .stroke(Stroke::new(1.0, theme::input_stroke()))
+                .shadow(Shadow {
+                    offset: [0, 1],
+                    blur: 4,
+                    spread: 0,
+                    color: theme::control_shadow(),
+                })
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::same(2))
+                .show(ui, |ui| {
+                    for (mode, label) in modes {
+                        let active = *selected == mode;
+                        let text = if active {
+                            semibold(label, 11.5, theme::text_strong())
+                        } else {
+                            medium(label, 11.5, theme::text_muted())
+                        };
+                        let response = ui.add_sized(
+                            [56.0, 24.0],
+                            Button::new(text)
+                                .fill(if active {
+                                    theme::segment_selected()
+                                } else {
+                                    Color32::TRANSPARENT
+                                })
+                                .stroke(if active {
+                                    Stroke::new(1.0, theme::segment_selected_stroke())
+                                } else {
+                                    Stroke::NONE
+                                })
+                                .corner_radius(CornerRadius::same(6)),
+                        );
+                        if response.clicked() && !active {
+                            *selected = mode;
+                            changed = true;
+                        }
+                        response.on_hover_cursor(egui::CursorIcon::PointingHand);
                     }
-                    response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                }
-            });
-        });
+                });
+        },
+    );
 
     changed
 }
@@ -1326,8 +1740,27 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
 
     ui.horizontal(|ui| {
         let (rect, response) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::click());
-        let painter = ui.painter();
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
+        ui.add_space(7.0);
+        let label_response = ui
+            .add(
+                Label::new(regular(label, 12.0, theme::text_check()))
+                    .selectable(false)
+                    .sense(Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+        let painter = ui.painter();
+        painter.add(
+            Shadow {
+                offset: [0, 1],
+                blur: 3,
+                spread: 0,
+                color: theme::control_shadow(),
+            }
+            .as_shape(rect, 4.0),
+        );
         if *value {
             painter.rect_filled(rect, 4.0, theme::green());
             painter.text(
@@ -1342,17 +1775,17 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
             painter.rect_stroke(
                 rect,
                 4.0,
-                Stroke::new(1.0, theme::check_stroke()),
+                Stroke::new(
+                    1.25,
+                    if response.hovered() || label_response.hovered() {
+                        theme::input_hover_stroke()
+                    } else {
+                        theme::check_stroke()
+                    },
+                ),
                 egui::StrokeKind::Inside,
             );
         }
-
-        ui.add_space(7.0);
-        let label_response = ui.add(
-            Label::new(regular(label, 12.0, theme::text_check()))
-                .selectable(false)
-                .sense(Sense::click()),
-        );
 
         if response.clicked() || label_response.clicked() {
             *value = !*value;
@@ -1541,6 +1974,57 @@ mod tests {
     }
 
     #[test]
+    fn screen_transitions_push_forward_and_pull_back() {
+        assert_eq!(
+            screen_transition_direction(Screen::Main, Screen::Settings),
+            1.0
+        );
+        assert_eq!(screen_transition_direction(Screen::Main, Screen::Pair), 1.0);
+        assert_eq!(
+            screen_transition_direction(Screen::Settings, Screen::Main),
+            -1.0
+        );
+    }
+
+    #[test]
+    fn popover_fades_in_and_out_without_overshooting_opacity() {
+        assert_eq!(
+            popover_transition_opacity(PopoverTransitionPhase::Appearing, 0.0),
+            0.0
+        );
+        assert_eq!(
+            popover_transition_opacity(PopoverTransitionPhase::Appearing, 1.0),
+            1.0
+        );
+        assert_eq!(
+            popover_transition_opacity(PopoverTransitionPhase::Disappearing, 0.0),
+            1.0
+        );
+        assert_eq!(
+            popover_transition_opacity(PopoverTransitionPhase::Disappearing, 1.0),
+            0.0
+        );
+        assert!(popover_transition_opacity(PopoverTransitionPhase::Appearing, 0.5) > 0.5);
+        assert!(popover_transition_opacity(PopoverTransitionPhase::Disappearing, 0.5) > 0.5);
+    }
+
+    #[test]
+    fn custom_scrollbar_keeps_a_short_handle_and_tracks_progress() {
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(100.0, 200.0));
+
+        let start = settings_scrollbar_rect(viewport, 400.0, 0.0).unwrap();
+        let middle = settings_scrollbar_rect(viewport, 400.0, 100.0).unwrap();
+        let end = settings_scrollbar_rect(viewport, 400.0, 200.0).unwrap();
+
+        assert_eq!(start.height(), SCROLLBAR_HANDLE_HEIGHT);
+        assert_eq!(middle.height(), SCROLLBAR_HANDLE_HEIGHT);
+        assert_eq!(end.height(), SCROLLBAR_HANDLE_HEIGHT);
+        assert_eq!(start.top(), viewport.top() + SCROLLBAR_TRACK_INSET);
+        assert!(middle.top() > start.top());
+        assert_eq!(end.bottom(), viewport.bottom() - SCROLLBAR_TRACK_INSET);
+    }
+
+    #[test]
     fn ready_mirror_keys_ignore_offline_devices() {
         let devices = [
             device_info("adb-ready._adb-tls-connect._tcp", true),
@@ -1590,6 +2074,33 @@ mod tests {
         let x = clamp_window_x_to_displays(2010.0, 2200.0, 24.0, WIDTH, MARGIN, None, &displays);
 
         assert_eq!(x, 2010.0);
+    }
+
+    #[test]
+    fn anchors_to_status_item_center_regardless_of_click_position() {
+        let displays = [DisplayBounds {
+            min_x: 0.0,
+            max_x: 1512.0,
+            min_y: 0.0,
+            max_y: 982.0,
+            scale: 2.0,
+        }];
+        let anchor = |click_x| MenuAnchor {
+            rect_x: 900.0 * 2.0,
+            rect_y: 0.0,
+            rect_width: 32.0 * 2.0,
+            rect_height: 22.0 * 2.0,
+            click_x: click_x * 2.0,
+            click_y: 12.0 * 2.0,
+        };
+
+        let left_click = popover_position(anchor(904.0), None, &displays);
+        let center_click = popover_position(anchor(916.0), None, &displays);
+        let right_click = popover_position(anchor(928.0), None, &displays);
+
+        assert_eq!(left_click, center_click);
+        assert_eq!(right_click, center_click);
+        assert_eq!(center_click, (726.0, 28.5));
     }
 
     #[test]

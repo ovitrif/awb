@@ -36,9 +36,16 @@ struct Palette {
     surface: Color32,
     input_bg: Color32,
     input_stroke: Color32,
+    input_hover_stroke: Color32,
+    input_focus_stroke: Color32,
     check_stroke: Color32,
+    control_shadow: Color32,
     segment_bg: Color32,
     segment_selected: Color32,
+    segment_selected_stroke: Color32,
+    scroll_fade_top: Color32,
+    scroll_fade_bottom: Color32,
+    scrollbar_thumb: Color32,
     qr_card: Color32,
     qr_ink: Color32,
 }
@@ -59,9 +66,16 @@ const NIGHT: Palette = Palette {
     surface: Color32::from_rgba_premultiplied(0x0D, 0x0D, 0x0D, 0x0D),
     input_bg: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x33),
     input_stroke: Color32::from_rgba_premultiplied(0x12, 0x12, 0x12, 0x12),
+    input_hover_stroke: Color32::from_rgb(0x66, 0x6E, 0x82),
+    input_focus_stroke: Color32::from_rgb(0x4D, 0x9F, 0xF5),
     check_stroke: Color32::from_rgba_premultiplied(0x26, 0x26, 0x26, 0x26),
+    control_shadow: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x28),
     segment_bg: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x2E),
     segment_selected: Color32::from_rgba_premultiplied(0x20, 0x20, 0x20, 0x20),
+    segment_selected_stroke: Color32::from_rgba_premultiplied(0x34, 0x34, 0x34, 0x34),
+    scroll_fade_top: Color32::from_rgb(0x2C, 0x2F, 0x3E),
+    scroll_fade_bottom: Color32::from_rgb(0x1E, 0x21, 0x2B),
+    scrollbar_thumb: Color32::from_rgba_premultiplied(0x55, 0x57, 0x5C, 0x70),
     qr_card: Color32::WHITE,
     qr_ink: Color32::from_rgb(0x17, 0x18, 0x1C),
 };
@@ -81,10 +95,17 @@ const DAY: Palette = Palette {
     red: Color32::from_rgb(0xD6, 0x3A, 0x3A),
     surface: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x08),
     input_bg: Color32::WHITE,
-    input_stroke: Color32::from_rgb(0xD5, 0xDB, 0xE4),
-    check_stroke: Color32::from_rgb(0xAE, 0xB8, 0xC5),
-    segment_bg: Color32::from_rgb(0xEE, 0xF1, 0xF6),
+    input_stroke: Color32::from_rgb(0xB4, 0xC0, 0xCE),
+    input_hover_stroke: Color32::from_rgb(0x88, 0x9A, 0xAF),
+    input_focus_stroke: Color32::from_rgb(0x3E, 0x8F, 0xE8),
+    check_stroke: Color32::from_rgb(0x89, 0x99, 0xAC),
+    control_shadow: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x16),
+    segment_bg: Color32::from_rgb(0xE3, 0xE9, 0xF2),
     segment_selected: Color32::WHITE,
+    segment_selected_stroke: Color32::from_rgb(0xC4, 0xCE, 0xDB),
+    scroll_fade_top: Color32::WHITE,
+    scroll_fade_bottom: Color32::from_rgb(0xDF, 0xE9, 0xF8),
+    scrollbar_thumb: Color32::from_rgba_premultiplied(0x22, 0x27, 0x2D, 0x70),
     qr_card: Color32::WHITE,
     qr_ink: Color32::from_rgb(0x17, 0x18, 0x1C),
 };
@@ -129,9 +150,16 @@ color_token!(red, red);
 color_token!(surface, surface);
 color_token!(input_bg, input_bg);
 color_token!(input_stroke, input_stroke);
+color_token!(input_hover_stroke, input_hover_stroke);
+color_token!(input_focus_stroke, input_focus_stroke);
 color_token!(check_stroke, check_stroke);
+color_token!(control_shadow, control_shadow);
 color_token!(segment_bg, segment_bg);
 color_token!(segment_selected, segment_selected);
+color_token!(segment_selected_stroke, segment_selected_stroke);
+color_token!(scroll_fade_top, scroll_fade_top);
+color_token!(scroll_fade_bottom, scroll_fade_bottom);
+color_token!(scrollbar_thumb, scrollbar_thumb);
 color_token!(qr_card, qr_card);
 color_token!(qr_ink, qr_ink);
 

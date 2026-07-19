@@ -1,52 +1,90 @@
-# Design QA — AWB 2.0.2
+# Design QA — AWB 2.0.3
 
-## Day settings palette
+## Source visual truth
 
-**Comparison target**
+- Main screen: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Obsidian 2026-07-19 007660.png`
+- Settings controls: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Obsidian 2026-07-19 007662.png`
+- Persistent scrollbar: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Google Chrome 2026-07-19 007664.png`
+- Screen-change baseline: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/CleanShot 2026-07-19 007670.mp4`
+- White-top correction baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/white-top-baseline.png`
+- Appearance layout baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/appearance-layout-baseline.png`
+- Scroll-edge baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/scroll-edge-baseline.png`
+- Popover left-click offset baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/popover-anchor-left-baseline.png`
+- Popover right-click offset baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/popover-anchor-right-baseline.png`
+- Popover centered target: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/popover-anchor-target.png`
 
-- Source visual truth: `/var/folders/_j/84zgw9rj5s7cp81pjgksy8yw0000gn/T/codex-clipboard-83dd750c-2a86-4258-9dd8-bd1509967373.png`
-- Rendered implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-day-2.0.2.png`
-- Combined comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/day-settings-comparison-2.0.2.png`
-- Viewport: native 380 × 349-point settings popover, captured at 2× (760 × 698 pixels).
-- State: Day appearance resolved while the persisted selector remains on its default `Auto` value.
+## Native comparison
 
-**Findings**
+- Viewport: native 380 × 349-point popover, captured at 2× where noted.
+- Main comparison, reference left and implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/main-comparison-2.0.3.png`
+- Settings comparison, reference left and implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-comparison-2.0.3.png`
+- Focused input state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-focus-day-2.0.3.png`
+- Settled scrolled state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scrolled-settled-2.0.3.png`
+- Wi-Fi pairing state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/pair-day-2.0.3.png`
+- White-top native implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/main-day-white-top-2.0.3.png`
+- White-top full-view comparison, baseline left and corrected implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/white-top-comparison-2.0.3.png`
+- A separate focused crop was unnecessary because the gradient spans the full shell; centerline pixel samples provide the focused color evidence.
+- Compact appearance native implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-compact-appearance-2.0.3.png`
+- Appearance focused comparison, baseline left and corrected implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/appearance-layout-comparison-2.0.3.png`
+- Scroll-polish full-view comparison, baseline left and implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/scroll-polish-comparison-full-2.0.3.png`
+- Focused scrollbar comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/scroll-polish-comparison-scrollbar-2.0.3.png`
+- Day scroll state with the indicator visible: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scroll-fades-indicator-2.0.3.png`
+- Day scroll state after the indicator settles: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scroll-fades-hidden-2.0.3.png`
+- Night scroll state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scroll-fades-night-2.0.3.png`
+- Corrected popover implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/popover-anchor-corrected-2.0.3.png`
+- Popover full-view comparison, centered target left and implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/popover-anchor-comparison-2.0.3.png`
+- A separate focused crop was unnecessary for this pass because the 380-point normalized comparison keeps the beak, top edge, typography, controls, and shell corners readable. The uncropped centered target preserves the menu-bar icon-to-beak relationship.
 
-- No actionable P0/P1/P2 differences remain in the requested coloring treatment.
-- The popover now uses a near-white vertical gradient instead of the previous gray cast, while retaining visible depth from top to bottom.
-- Enabled inputs are white with cool blue-gray outlines; checkboxes have stronger outlines; labels and values use darker enabled-state text.
-- The segmented control is ordered `Auto`, `Day`, `Night`, with `Auto` visibly selected by default.
-- Hairlines and the outer shell stroke are quieter, so controls no longer read as disabled.
-- Dependency success uses the existing green semantic token. The capture occurred while the asynchronous dependency check was still running, so the comparison evaluates the shell, fields, checkboxes, and appearance control rather than the final dependency rows.
-- Typography, spacing rhythm, corner geometry, and native raster quality remain consistent with the existing AWB design system.
+## Findings
 
-**Comparison history**
+- The Day shell now holds pure white through the header before transitioning to clearly visible cool-blue depth in the lower half. The centered beak, top-edge sheen, and existing shell geometry remain intact, with no banding or transparency artifacts.
+- The supplied baseline sampled at RGB `243/245/252` near the top and `235/239/248` near the bottom. The corrected native capture samples at RGB `255/255/255` across the top/header and `227/235/248` near the bottom, restoring a clear white-to-blue range.
+- The appearance selector now uses a fixed 172-point width instead of expanding across the row. Its 28-point row vertically centers the `Appearance` label and selector, while the selector's right edge aligns with the settings content edge.
+- Enabled text fields now read as interactive through darker resting outlines and small elevation; hover and keyboard-focus states strengthen the outline further, with a blue focus treatment.
+- Checkboxes use darker, slightly thicker outlines with elevation and pointer feedback. The appearance selector has a clearer track, elevated selected segment, and selected-segment border.
+- Scrolled content now dissolves through 22-point top and bottom masks instead of ending on a hard crop. Each mask appears only when more content exists beyond that edge and eases in over the first 22 points of scroll travel.
+- The built-in proportional scrollbar is replaced by a fixed 44 × 2-point pill. It uses a semi-transparent theme token, tracks normalized scroll progress, remains fully visible while scrolling, and fades over the final 100 ms of the 250 ms settle delay.
+- Native Day and Night captures confirm that the masks blend into their respective shell gradients. The settled Day capture confirms that the indicator disappears without leaving a track or edge artifact.
+- Popover placement now uses the status-item rectangle center whenever the rectangle is valid, so left-, center-, and right-side pointer positions resolve to the same beak alignment. The pointer remains only as the stale-rectangle fallback needed when moving between displays.
+- Right-click context-menu actions retain the most recent status-item rectangle before opening or pairing, so menu actions use the same centered anchor as a direct left click.
+- Appear and hide transitions animate the native macOS window alpha over 160 ms and 120 ms respectively. This keeps geometry fixed and lets the compositor fade the complete popover, including its window shadow, with cubic enter/exit easing.
+- Main, Settings, and Pair use a 220 ms cubic eased horizontal push/pull with a restrained opacity blend. Pairing cancellation is deferred until the back transition completes so outgoing content does not disappear mid-motion.
+- The native journey was exercised through Main → Settings → Main and Main → Pair → Main. With Wi-Fi enabled, the QR payload rendered successfully, the countdown advanced, and Back returned to Main while cancelling pairing.
+- The compact selector was exercised in `Auto` and `Day` states; selection, appearance persistence, and the selected-segment treatment remained functional.
+- Typography, spacing rhythm, interaction targets, corner geometry, and the existing AWB color language remain consistent with the current design system.
+- Fidelity surfaces: typography, colors, copy, iconography, and image quality are unchanged; the scoped spacing and alignment regression is corrected without introducing clipping or density changes elsewhere.
 
-- Pass 1: identified a gray shell cast, gray input fills, low-contrast checkbox strokes, muted success status, and reversed appearance option order.
-- Pass 2: corrected the palette and option direction; combined comparison found no remaining P0/P1/P2 issues.
+## Comparison history
 
-## Top-edge highlight
-
-**Comparison target**
-
-- Source visual truth: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Arc 2026-07-18 007606.png`
-- Rendered implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/shell-top-highlight.png`
-- Full comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/full-comparison.png`
-- Focused comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/top-edge-comparison.png`
-
-**Findings**
-
-- No actionable P0/P1/P2 differences remain in the scoped top-edge treatment.
-- The upper-left curve has a shallow cool-white sheen that fades before the center, preserves the centered beak glow, and keeps the existing vertical gradient visible.
-- The native 3× raster render has no visible banding, compression, or transparency halos.
+- Pass 1 — P1: the blue beak glow tinted the nominally white gradient stop, so the entire shell read as blue-gray and the gradient lacked a visible white endpoint.
+- Fix: replaced the Day beak tint with a neutral white glow, held the base at pure white through 28% of the shell, and strengthened the lower blue stop.
+- Pass 2: the full-view comparison and native pixel samples show a pure-white header and an unmistakably blue lower shell. No actionable P0/P1/P2 differences remain.
+- Pass 3 — P1: the appearance segmented control expanded to the full remaining row width and sat out of alignment with its label, making three short choices look like a large form field.
+- Fix: constrained the control to 172 × 28 points, vertically centered the row, kept 56-point segments, and aligned the control to the settings content edge.
+- Pass 4: the normalized focused comparison shows a compact selector with aligned centers and deliberate edge alignment. No actionable P0/P1/P2 differences remain.
+- Pass 5 — P1: scrolling exposed a hard content cut under the fixed header and an oversized, opaque proportional thumb spanning most of the viewport.
+- Fix: added conditional 22-point edge masks and replaced the platform scrollbar with a short, translucent position indicator that fades after scrolling settles.
+- Pass 6: normalized full-view and focused comparisons show a clean content dissolve, a compact indicator, and no persistent scrollbar in both Day and Night states. No actionable P0/P1/P2 differences remain.
+- Pass 7 — P1: horizontal placement used the raw click coordinate even when macOS supplied the status item's full rectangle, allowing the popover beak to drift left or right depending on where the icon was clicked.
+- Fix: anchor to the status-item center, cache right-click anchors for context-menu actions, retain click-based fallback only for stale cross-display rectangles, and add native window-alpha motion.
+- Pass 8: the normalized target/implementation comparison preserves the intended shell and content geometry; direct geometry tests confirm left, center, and right clicks produce the identical window origin. Native alpha reached the expected fully visible state without layout movement or visual artifacts. No actionable P0/P1/P2 differences remain.
 
 ## Implementation checklist
 
-- [x] Add a restrained Arc-inspired top-edge highlight.
-- [x] Add persisted `Auto`, `Day`, and `Night` appearance modes with `Auto` as the default.
-- [x] Preserve and strengthen the Day background gradient.
-- [x] Make enabled Day controls clearly interactive.
-- [x] Compare the supplied reference and the native implementation in one image.
-- [x] Remove all screenshot-only QA scaffolding from the release source.
+- [x] Strengthen the Day background gradient.
+- [x] Keep the Day header genuinely white rather than blue-gray.
+- [x] Make the appearance selector compact and align it with its row and content edge.
+- [x] Improve resting, hover, focus, and selected control affordances.
+- [x] Auto-hide the settings scrollbar 250 ms after scrolling settles.
+- [x] Fade overflowing settings content beneath the fixed header and footer edges.
+- [x] Use a short, semi-transparent scrollbar indicator that preserves position feedback.
+- [x] Center the popover beak on the menu-bar status item independent of click position.
+- [x] Reuse the status-item anchor for right-click menu actions.
+- [x] Fade the complete native popover in and out without moving or relaying out content.
+- [x] Add directional eased transitions between screens.
+- [x] Preserve pairing content until its exit transition completes.
+- [x] Compare supplied references and native renders at the same viewport.
+- [x] Exercise Settings and Wi-Fi pairing in the native app.
+- [x] Remove screenshot-only QA scaffolding from release source.
 
 final result: passed
