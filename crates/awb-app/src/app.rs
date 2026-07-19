@@ -21,6 +21,8 @@ use crate::theme::{self, icon, medium, regular, semibold};
 const FOCUS_GRACE: Duration = Duration::from_millis(300);
 const STATUS_POLL: Duration = Duration::from_secs(5);
 const SCREEN_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+const POPOVER_APPEAR_DURATION: Duration = Duration::from_millis(160);
+const POPOVER_HIDE_DURATION: Duration = Duration::from_millis(120);
 const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(250);
 const SCREEN_INCOMING_OFFSET: f32 = 32.0;
 const SCREEN_OUTGOING_OFFSET: f32 = 18.0;
@@ -101,6 +103,18 @@ struct ScreenTransition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopoverTransitionPhase {
+    Appearing,
+    Disappearing,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PopoverTransition {
+    phase: PopoverTransitionPhase,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Devices,
     Logs,
@@ -113,11 +127,12 @@ pub struct App {
     height_text: String,
     screen: Screen,
     screen_transition: Option<ScreenTransition>,
+    popover_transition: Option<PopoverTransition>,
     tab: Tab,
     logo: TextureHandle,
     shell: TextureHandle,
     appearance: theme::Appearance,
-    _status_icon: MenuBarIcon,
+    status_icon: MenuBarIcon,
     show_item: MenuItem,
     pair_id: MenuId,
     refresh_id: MenuId,
@@ -129,6 +144,7 @@ pub struct App {
     created_at: Instant,
     open_at_login: Option<bool>,
     pending_show: bool,
+    last_menu_anchor: Option<MenuAnchor>,
     auto_mirrored: HashSet<String>,
     settings_scroll_offset: f32,
     settings_scroll_active_at: Option<Instant>,
@@ -205,11 +221,12 @@ impl App {
             height_text,
             screen: Screen::Main,
             screen_transition: None,
+            popover_transition: None,
             tab: Tab::Devices,
             logo,
             shell,
             appearance,
-            _status_icon: status_icon,
+            status_icon,
             show_item,
             pair_id: pair_item.id().clone(),
             refresh_id: refresh_item.id().clone(),
@@ -221,6 +238,7 @@ impl App {
             created_at: Instant::now(),
             open_at_login: None,
             pending_show: false,
+            last_menu_anchor: None,
             auto_mirrored: HashSet::new(),
             settings_scroll_offset: 0.0,
             settings_scroll_active_at: None,
@@ -249,6 +267,10 @@ impl App {
         }
 
         self.visible = true;
+        self.popover_transition = Some(PopoverTransition {
+            phase: PopoverTransitionPhase::Appearing,
+            started_at: Instant::now(),
+        });
         self.shown_at = Instant::now();
         self.focus_hidden_at = None;
         self.show_item.set_text("Hide awb");
@@ -256,14 +278,21 @@ impl App {
     }
 
     fn hide(&mut self, ctx: &Context) {
+        if !self.visible || self.is_disappearing() {
+            return;
+        }
+
         self.pending_show = false;
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-        self.visible = false;
+        self.popover_transition = Some(PopoverTransition {
+            phase: PopoverTransitionPhase::Disappearing,
+            started_at: Instant::now(),
+        });
         self.show_item.set_text("Show awb");
+        ctx.request_repaint();
     }
 
     fn toggle(&mut self, ctx: &Context, anchor: Option<MenuAnchor>) {
-        if self.visible {
+        if self.visible && !self.is_disappearing() {
             self.hide(ctx);
         } else if self
             .focus_hidden_at
@@ -313,42 +342,47 @@ impl App {
     }
 
     fn handle_events(&mut self, ctx: &Context) {
+        let status_events: Vec<MenuBarIconEvent> =
+            std::mem::take(&mut *STATUS_EVENTS.lock().unwrap());
+        for event in status_events {
+            if let MenuBarIconEvent::Click {
+                button,
+                button_state,
+                rect,
+                position,
+                ..
+            } = event
+            {
+                let anchor = MenuAnchor::new(rect, position.x, position.y);
+                self.last_menu_anchor = Some(anchor);
+
+                if button == MouseButton::Left && button_state == MouseButtonState::Up {
+                    self.toggle(ctx, Some(anchor));
+                }
+            }
+        }
+
         let menu_events: Vec<MenuEvent> = std::mem::take(&mut *MENU_EVENTS.lock().unwrap());
         for event in menu_events {
             if event.id == self.show_item.id() {
-                if self.visible {
+                if self.visible && !self.is_disappearing() {
                     self.hide(ctx);
                 } else {
-                    self.show(ctx, None);
+                    self.show(ctx, self.menu_anchor());
                 }
             } else if event.id == self.pair_id {
                 self.open_pairing(ctx);
-                self.show(ctx, None);
+                self.show(ctx, self.menu_anchor());
             } else if event.id == self.refresh_id {
                 backend::refresh_status(self.shared.clone(), ctx.clone());
             } else if event.id == self.quit_id {
                 self.quit(ctx);
             }
         }
-
-        let status_events: Vec<MenuBarIconEvent> =
-            std::mem::take(&mut *STATUS_EVENTS.lock().unwrap());
-        for event in status_events {
-            if let MenuBarIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                rect,
-                position,
-                ..
-            } = event
-            {
-                self.toggle(ctx, Some(MenuAnchor::new(rect, position.x, position.y)));
-            }
-        }
     }
 
     fn handle_focus(&mut self, ctx: &Context) {
-        if !self.visible {
+        if !self.visible || self.is_disappearing() {
             return;
         }
 
@@ -356,6 +390,38 @@ impl App {
         if !focused && self.shown_at.elapsed() > FOCUS_GRACE {
             self.hide(ctx);
             self.focus_hidden_at = Some(Instant::now());
+        }
+    }
+
+    fn menu_anchor(&self) -> Option<MenuAnchor> {
+        self.last_menu_anchor.or_else(|| {
+            self.status_icon.rect().map(|rect| {
+                let click_x = rect.position.x + f64::from(rect.size.width) / 2.0;
+                let click_y = rect.position.y + f64::from(rect.size.height) / 2.0;
+                MenuAnchor::new(rect, click_x, click_y)
+            })
+        })
+    }
+
+    fn is_disappearing(&self) -> bool {
+        self.popover_transition
+            .is_some_and(|transition| transition.phase == PopoverTransitionPhase::Disappearing)
+    }
+
+    fn update_popover_transition(&mut self, ctx: &Context) {
+        let Some(transition) = self.popover_transition else {
+            return;
+        };
+        let duration = popover_transition_duration(transition.phase);
+
+        if transition.started_at.elapsed() >= duration {
+            self.popover_transition = None;
+            if transition.phase == PopoverTransitionPhase::Disappearing {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                self.visible = false;
+            }
+        } else {
+            ctx.request_repaint();
         }
     }
 
@@ -489,16 +555,62 @@ fn logical_menu_anchor(anchor: MenuAnchor, displays: &[DisplayBounds]) -> Logica
                 && (rect_center_x - click_x).abs() <= 96.0
         })
         .unwrap_or(false);
+    let x = if rect_matches_click_display {
+        rect_center_x
+    } else {
+        click_x
+    };
     let bottom_y = if rect_matches_click_display {
         rect_bottom_y
     } else {
         click_y + icon_height / 2.0
     };
 
-    LogicalMenuAnchor {
-        x: click_x,
-        bottom_y,
+    LogicalMenuAnchor { x, bottom_y }
+}
+
+fn popover_transition_duration(phase: PopoverTransitionPhase) -> Duration {
+    match phase {
+        PopoverTransitionPhase::Appearing => POPOVER_APPEAR_DURATION,
+        PopoverTransitionPhase::Disappearing => POPOVER_HIDE_DURATION,
     }
+}
+
+fn popover_transition_opacity(phase: PopoverTransitionPhase, progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    match phase {
+        PopoverTransitionPhase::Appearing => egui::emath::easing::cubic_out(progress),
+        PopoverTransitionPhase::Disappearing => 1.0 - egui::emath::easing::cubic_in(progress),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_native_window_opacity(frame: &eframe::Frame, opacity: f32) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = frame.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return false;
+    };
+    let ns_view_ptr = handle.ns_view.as_ptr().cast::<objc2_app_kit::NSView>();
+    // SAFETY: AppKit supplies this non-null NSView pointer for the lifetime of
+    // the eframe window, and it is used only synchronously on the UI thread.
+    let Some(ns_view) = (unsafe { ns_view_ptr.as_ref() }) else {
+        return false;
+    };
+    let Some(window) = ns_view.window() else {
+        return false;
+    };
+
+    window.setAlphaValue(f64::from(opacity.clamp(0.0, 1.0)));
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_native_window_opacity(_frame: &eframe::Frame, _opacity: f32) -> bool {
+    false
 }
 
 fn display_for_physical_menu_anchor(
@@ -674,12 +786,18 @@ impl eframe::App for App {
         // Apply a queued move before the window is shown (see `show`).
         if self.pending_show {
             self.pending_show = false;
+            if let Some(transition) = &mut self.popover_transition
+                && transition.phase == PopoverTransitionPhase::Appearing
+            {
+                transition.started_at = Instant::now();
+            }
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
 
         self.handle_events(ctx);
         self.handle_focus(ctx);
+        self.update_popover_transition(ctx);
 
         // Poll while the popover is open, or in the background when auto-mirror
         // must watch for newly connected phones.
@@ -709,9 +827,21 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let rect = ui.max_rect();
+        let opacity = if !self.visible {
+            0.0
+        } else if let Some(transition) = self.popover_transition {
+            let progress = transition.started_at.elapsed().as_secs_f32()
+                / popover_transition_duration(transition.phase).as_secs_f32();
+            popover_transition_opacity(transition.phase, progress)
+        } else {
+            1.0
+        };
+        if !set_native_window_opacity(frame, opacity) {
+            ui.set_opacity(opacity);
+        }
 
         // Beak + rounded body + gradient + hairline, baked into one texture.
         ui.painter().image(
@@ -1850,6 +1980,28 @@ mod tests {
     }
 
     #[test]
+    fn popover_fades_in_and_out_without_overshooting_opacity() {
+        assert_eq!(
+            popover_transition_opacity(PopoverTransitionPhase::Appearing, 0.0),
+            0.0
+        );
+        assert_eq!(
+            popover_transition_opacity(PopoverTransitionPhase::Appearing, 1.0),
+            1.0
+        );
+        assert_eq!(
+            popover_transition_opacity(PopoverTransitionPhase::Disappearing, 0.0),
+            1.0
+        );
+        assert_eq!(
+            popover_transition_opacity(PopoverTransitionPhase::Disappearing, 1.0),
+            0.0
+        );
+        assert!(popover_transition_opacity(PopoverTransitionPhase::Appearing, 0.5) > 0.5);
+        assert!(popover_transition_opacity(PopoverTransitionPhase::Disappearing, 0.5) > 0.5);
+    }
+
+    #[test]
     fn custom_scrollbar_keeps_a_short_handle_and_tracks_progress() {
         let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(100.0, 200.0));
 
@@ -1915,6 +2067,33 @@ mod tests {
         let x = clamp_window_x_to_displays(2010.0, 2200.0, 24.0, WIDTH, MARGIN, None, &displays);
 
         assert_eq!(x, 2010.0);
+    }
+
+    #[test]
+    fn anchors_to_status_item_center_regardless_of_click_position() {
+        let displays = [DisplayBounds {
+            min_x: 0.0,
+            max_x: 1512.0,
+            min_y: 0.0,
+            max_y: 982.0,
+            scale: 2.0,
+        }];
+        let anchor = |click_x| MenuAnchor {
+            rect_x: 900.0 * 2.0,
+            rect_y: 0.0,
+            rect_width: 32.0 * 2.0,
+            rect_height: 22.0 * 2.0,
+            click_x: click_x * 2.0,
+            click_y: 12.0 * 2.0,
+        };
+
+        let left_click = popover_position(anchor(904.0), None, &displays);
+        let center_click = popover_position(anchor(916.0), None, &displays);
+        let right_click = popover_position(anchor(928.0), None, &displays);
+
+        assert_eq!(left_click, center_click);
+        assert_eq!(right_click, center_click);
+        assert_eq!(center_click, (726.0, 28.5));
     }
 
     #[test]

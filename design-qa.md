@@ -9,6 +9,9 @@
 - White-top correction baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/white-top-baseline.png`
 - Appearance layout baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/appearance-layout-baseline.png`
 - Scroll-edge baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/scroll-edge-baseline.png`
+- Popover left-click offset baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/popover-anchor-left-baseline.png`
+- Popover right-click offset baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/popover-anchor-right-baseline.png`
+- Popover centered target: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/popover-anchor-target.png`
 
 ## Native comparison
 
@@ -28,6 +31,9 @@
 - Day scroll state with the indicator visible: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scroll-fades-indicator-2.0.3.png`
 - Day scroll state after the indicator settles: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scroll-fades-hidden-2.0.3.png`
 - Night scroll state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scroll-fades-night-2.0.3.png`
+- Corrected popover implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/popover-anchor-corrected-2.0.3.png`
+- Popover full-view comparison, centered target left and implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/popover-anchor-comparison-2.0.3.png`
+- A separate focused crop was unnecessary for this pass because the 380-point normalized comparison keeps the beak, top edge, typography, controls, and shell corners readable. The uncropped centered target preserves the menu-bar icon-to-beak relationship.
 
 ## Findings
 
@@ -39,6 +45,9 @@
 - Scrolled content now dissolves through 22-point top and bottom masks instead of ending on a hard crop. Each mask appears only when more content exists beyond that edge and eases in over the first 22 points of scroll travel.
 - The built-in proportional scrollbar is replaced by a fixed 44 × 2-point pill. It uses a semi-transparent theme token, tracks normalized scroll progress, remains fully visible while scrolling, and fades over the final 100 ms of the 250 ms settle delay.
 - Native Day and Night captures confirm that the masks blend into their respective shell gradients. The settled Day capture confirms that the indicator disappears without leaving a track or edge artifact.
+- Popover placement now uses the status-item rectangle center whenever the rectangle is valid, so left-, center-, and right-side pointer positions resolve to the same beak alignment. The pointer remains only as the stale-rectangle fallback needed when moving between displays.
+- Right-click context-menu actions retain the most recent status-item rectangle before opening or pairing, so menu actions use the same centered anchor as a direct left click.
+- Appear and hide transitions animate the native macOS window alpha over 160 ms and 120 ms respectively. This keeps geometry fixed and lets the compositor fade the complete popover, including its window shadow, with cubic enter/exit easing.
 - Main, Settings, and Pair use a 220 ms cubic eased horizontal push/pull with a restrained opacity blend. Pairing cancellation is deferred until the back transition completes so outgoing content does not disappear mid-motion.
 - The native journey was exercised through Main → Settings → Main and Main → Pair → Main. With Wi-Fi enabled, the QR payload rendered successfully, the countdown advanced, and Back returned to Main while cancelling pairing.
 - The compact selector was exercised in `Auto` and `Day` states; selection, appearance persistence, and the selected-segment treatment remained functional.
@@ -56,6 +65,9 @@
 - Pass 5 — P1: scrolling exposed a hard content cut under the fixed header and an oversized, opaque proportional thumb spanning most of the viewport.
 - Fix: added conditional 22-point edge masks and replaced the platform scrollbar with a short, translucent position indicator that fades after scrolling settles.
 - Pass 6: normalized full-view and focused comparisons show a clean content dissolve, a compact indicator, and no persistent scrollbar in both Day and Night states. No actionable P0/P1/P2 differences remain.
+- Pass 7 — P1: horizontal placement used the raw click coordinate even when macOS supplied the status item's full rectangle, allowing the popover beak to drift left or right depending on where the icon was clicked.
+- Fix: anchor to the status-item center, cache right-click anchors for context-menu actions, retain click-based fallback only for stale cross-display rectangles, and add native window-alpha motion.
+- Pass 8: the normalized target/implementation comparison preserves the intended shell and content geometry; direct geometry tests confirm left, center, and right clicks produce the identical window origin. Native alpha reached the expected fully visible state without layout movement or visual artifacts. No actionable P0/P1/P2 differences remain.
 
 ## Implementation checklist
 
@@ -66,6 +78,9 @@
 - [x] Auto-hide the settings scrollbar 250 ms after scrolling settles.
 - [x] Fade overflowing settings content beneath the fixed header and footer edges.
 - [x] Use a short, semi-transparent scrollbar indicator that preserves position feedback.
+- [x] Center the popover beak on the menu-bar status item independent of click position.
+- [x] Reuse the status-item anchor for right-click menu actions.
+- [x] Fade the complete native popover in and out without moving or relaying out content.
 - [x] Add directional eased transitions between screens.
 - [x] Preserve pairing content until its exit transition completes.
 - [x] Compare supplied references and native renders at the same viewport.
