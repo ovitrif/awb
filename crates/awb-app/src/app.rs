@@ -24,6 +24,7 @@ const SCREEN_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(250);
 const SCREEN_INCOMING_OFFSET: f32 = 32.0;
 const SCREEN_OUTGOING_OFFSET: f32 = 18.0;
+const THEME_MODE_GROUP_SIZE: egui::Vec2 = vec2(172.0, 28.0);
 /// How long after launch to keep forcing the window hidden, in case the
 /// platform surfaces it despite `with_visible(false)`.
 const STARTUP_HIDE: Duration = Duration::from_millis(800);
@@ -1006,17 +1007,21 @@ impl App {
                 ui.add_space(10.0);
 
                 let mut theme_changed = false;
-                ui.horizontal(|ui| {
-                    ui.add(
-                        Label::new(regular("Appearance", 12.0, theme::text_check()))
-                            .selectable(false),
-                    );
-                    theme_changed |= ui
-                        .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            theme_mode_group(ui, &mut self.settings.theme)
-                        })
-                        .inner;
-                });
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), THEME_MODE_GROUP_SIZE.y),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.add(
+                            Label::new(regular("Appearance", 12.0, theme::text_check()))
+                                .selectable(false),
+                        );
+                        theme_changed |= ui
+                            .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                theme_mode_group(ui, &mut self.settings.theme)
+                            })
+                            .inner;
+                    },
+                );
                 changed |= theme_changed;
 
                 ui.add_space(10.0);
@@ -1427,49 +1432,53 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
         (ThemeMode::Night, "Night"),
     ];
 
-    Frame::new()
-        .fill(theme::segment_bg())
-        .stroke(Stroke::new(1.0, theme::input_stroke()))
-        .shadow(Shadow {
-            offset: [0, 1],
-            blur: 4,
-            spread: 0,
-            color: theme::control_shadow(),
-        })
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(2))
-        .show(ui, |ui| {
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                for (mode, label) in modes {
-                    let active = *selected == mode;
-                    let text = if active {
-                        semibold(label, 11.5, theme::text_strong())
-                    } else {
-                        medium(label, 11.5, theme::text_muted())
-                    };
-                    let response = ui.add_sized(
-                        [56.0, 24.0],
-                        Button::new(text)
-                            .fill(if active {
-                                theme::segment_selected()
-                            } else {
-                                Color32::TRANSPARENT
-                            })
-                            .stroke(if active {
-                                Stroke::new(1.0, theme::segment_selected_stroke())
-                            } else {
-                                Stroke::NONE
-                            })
-                            .corner_radius(CornerRadius::same(6)),
-                    );
-                    if response.clicked() && !active {
-                        *selected = mode;
-                        changed = true;
+    ui.allocate_ui_with_layout(
+        THEME_MODE_GROUP_SIZE,
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            Frame::new()
+                .fill(theme::segment_bg())
+                .stroke(Stroke::new(1.0, theme::input_stroke()))
+                .shadow(Shadow {
+                    offset: [0, 1],
+                    blur: 4,
+                    spread: 0,
+                    color: theme::control_shadow(),
+                })
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::same(2))
+                .show(ui, |ui| {
+                    for (mode, label) in modes {
+                        let active = *selected == mode;
+                        let text = if active {
+                            semibold(label, 11.5, theme::text_strong())
+                        } else {
+                            medium(label, 11.5, theme::text_muted())
+                        };
+                        let response = ui.add_sized(
+                            [56.0, 24.0],
+                            Button::new(text)
+                                .fill(if active {
+                                    theme::segment_selected()
+                                } else {
+                                    Color32::TRANSPARENT
+                                })
+                                .stroke(if active {
+                                    Stroke::new(1.0, theme::segment_selected_stroke())
+                                } else {
+                                    Stroke::NONE
+                                })
+                                .corner_radius(CornerRadius::same(6)),
+                        );
+                        if response.clicked() && !active {
+                            *selected = mode;
+                            changed = true;
+                        }
+                        response.on_hover_cursor(egui::CursorIcon::PointingHand);
                     }
-                    response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                }
-            });
-        });
+                });
+        },
+    );
 
     changed
 }
