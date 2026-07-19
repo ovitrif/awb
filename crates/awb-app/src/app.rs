@@ -899,6 +899,13 @@ impl App {
         );
         screen_ui.set_clip_rect(content);
         screen_ui.set_opacity(opacity);
+        if self.screen_transition.is_some() {
+            // Both screens are painted during the transition. Keep their
+            // visual treatment intact while preventing clicks from reaching
+            // either the outgoing or incoming controls mid-animation.
+            screen_ui.visuals_mut().disabled_alpha = 1.0;
+            screen_ui.disable();
+        }
 
         match screen {
             Screen::Main => self.main_screen(&mut screen_ui, ctx),
