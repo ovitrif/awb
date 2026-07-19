@@ -2,9 +2,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use eframe::egui::containers::scroll_area::ScrollBarVisibility;
 use eframe::egui::{
     self, Align, Button, Color32, Context, CornerRadius, FontFamily, FontId, Frame, Label, Layout,
-    Margin, Rect, Sense, Stroke, TextEdit, TextureHandle, TextureOptions, Theme, Ui,
+    Margin, Rect, Sense, Shadow, Stroke, TextEdit, TextureHandle, TextureOptions, Theme, Ui,
     ViewportCommand, vec2,
 };
 use egui_phosphor::regular as ph;
@@ -19,6 +20,10 @@ use crate::theme::{self, icon, medium, regular, semibold};
 
 const FOCUS_GRACE: Duration = Duration::from_millis(300);
 const STATUS_POLL: Duration = Duration::from_secs(5);
+const SCREEN_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(250);
+const SCREEN_INCOMING_OFFSET: f32 = 32.0;
+const SCREEN_OUTGOING_OFFSET: f32 = 18.0;
 /// How long after launch to keep forcing the window hidden, in case the
 /// platform surfaces it despite `with_visible(false)`.
 const STARTUP_HIDE: Duration = Duration::from_millis(800);
@@ -73,11 +78,20 @@ struct LogicalMenuAnchor {
     bottom_y: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Screen {
     Main,
     Settings,
     Pair,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScreenTransition {
+    from: Screen,
+    to: Screen,
+    direction: f32,
+    started_at: Instant,
+    cancel_pairing_on_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +106,7 @@ pub struct App {
     width_text: String,
     height_text: String,
     screen: Screen,
+    screen_transition: Option<ScreenTransition>,
     tab: Tab,
     logo: TextureHandle,
     shell: TextureHandle,
@@ -109,6 +124,8 @@ pub struct App {
     open_at_login: Option<bool>,
     pending_show: bool,
     auto_mirrored: HashSet<String>,
+    settings_scroll_offset: f32,
+    settings_scroll_active_at: Option<Instant>,
 }
 
 impl App {
@@ -175,13 +192,13 @@ impl App {
 
         let width_text = settings.window_width.to_string();
         let height_text = settings.window_height.to_string();
-
         Ok(Self {
             shared,
             settings,
             width_text,
             height_text,
             screen: Screen::Main,
+            screen_transition: None,
             tab: Tab::Devices,
             logo,
             shell,
@@ -199,6 +216,8 @@ impl App {
             open_at_login: None,
             pending_show: false,
             auto_mirrored: HashSet::new(),
+            settings_scroll_offset: 0.0,
+            settings_scroll_active_at: None,
         })
     }
 
@@ -258,8 +277,33 @@ impl App {
     }
 
     fn open_pairing(&mut self, ctx: &Context) {
-        self.screen = Screen::Pair;
+        self.navigate_to(Screen::Pair, ctx);
         backend::start_pairing(self.shared.clone(), ctx.clone());
+    }
+
+    fn navigate_to(&mut self, screen: Screen, ctx: &Context) {
+        if self.screen == screen {
+            return;
+        }
+
+        self.screen_transition = Some(ScreenTransition {
+            from: self.screen,
+            to: screen,
+            direction: screen_transition_direction(self.screen, screen),
+            started_at: Instant::now(),
+            cancel_pairing_on_complete: false,
+        });
+        self.screen = screen;
+        ctx.request_repaint();
+    }
+
+    fn leave_pairing(&mut self, ctx: &Context) {
+        self.navigate_to(Screen::Main, ctx);
+        if let Some(transition) = &mut self.screen_transition {
+            transition.cancel_pairing_on_complete = true;
+        } else {
+            backend::cancel_pairing(&self.shared);
+        }
     }
 
     fn handle_events(&mut self, ctx: &Context) {
@@ -390,6 +434,15 @@ fn resolved_appearance(mode: ThemeMode, system_theme: Option<Theme>) -> theme::A
             Some(Theme::Dark) | None => theme::Appearance::Night,
         },
     }
+}
+
+fn screen_transition_direction(from: Screen, to: Screen) -> f32 {
+    let depth = |screen| match screen {
+        Screen::Main => 0,
+        Screen::Settings | Screen::Pair => 1,
+    };
+
+    if depth(to) < depth(from) { -1.0 } else { 1.0 }
 }
 
 fn popover_position(
@@ -646,7 +699,7 @@ impl eframe::App for App {
             self.screen == Screen::Pair && state.pairing.is_none()
         };
         if pairing_done {
-            self.screen = Screen::Main;
+            self.navigate_to(Screen::Main, ctx);
         }
     }
 
@@ -666,21 +719,58 @@ impl eframe::App for App {
             egui::pos2(rect.left() + 16.0, rect.top() + theme::BEAK_HEIGHT + 14.0),
             egui::pos2(rect.right() - 16.0, rect.bottom() - 14.0),
         );
-        let mut content_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(content)
-                .layout(Layout::top_down(Align::Min)),
-        );
+        if let Some(transition) = self.screen_transition {
+            let progress = (transition.started_at.elapsed().as_secs_f32()
+                / SCREEN_TRANSITION_DURATION.as_secs_f32())
+            .clamp(0.0, 1.0);
 
-        match self.screen {
-            Screen::Main => self.main_screen(&mut content_ui, &ctx),
-            Screen::Settings => self.settings_screen(&mut content_ui, &ctx),
-            Screen::Pair => self.pair_screen(&mut content_ui, &ctx),
+            if progress >= 1.0 {
+                self.screen_transition = None;
+                if transition.cancel_pairing_on_complete {
+                    backend::cancel_pairing(&self.shared);
+                }
+                self.render_screen(ui, content, &ctx, transition.to, 0.0, 1.0);
+            } else {
+                let eased = egui::emath::easing::cubic_in_out(progress);
+                let outgoing_x = -transition.direction * SCREEN_OUTGOING_OFFSET * eased;
+                let incoming_x = transition.direction * SCREEN_INCOMING_OFFSET * (1.0 - eased);
+
+                self.render_screen(ui, content, &ctx, transition.from, outgoing_x, 1.0 - eased);
+                self.render_screen(ui, content, &ctx, transition.to, incoming_x, eased);
+                ctx.request_repaint();
+            }
+        } else {
+            self.render_screen(ui, content, &ctx, self.screen, 0.0, 1.0);
         }
     }
 }
 
 impl App {
+    fn render_screen(
+        &mut self,
+        ui: &mut Ui,
+        content: Rect,
+        ctx: &Context,
+        screen: Screen,
+        offset_x: f32,
+        opacity: f32,
+    ) {
+        let mut screen_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("screen", screen))
+                .max_rect(content.translate(vec2(offset_x, 0.0)))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        screen_ui.set_clip_rect(content);
+        screen_ui.set_opacity(opacity);
+
+        match screen {
+            Screen::Main => self.main_screen(&mut screen_ui, ctx),
+            Screen::Settings => self.settings_screen(&mut screen_ui, ctx),
+            Screen::Pair => self.pair_screen(&mut screen_ui, ctx),
+        }
+    }
+
     fn main_screen(&mut self, ui: &mut Ui, ctx: &Context) {
         self.main_header(ui, ctx);
         ui.add_space(12.0);
@@ -714,7 +804,7 @@ impl App {
                 }
                 ui.add_space(10.0);
                 if icon_button(ui, ph::GEAR_SIX, 14.0, theme::text_muted()).clicked() {
-                    self.screen = Screen::Settings;
+                    self.navigate_to(Screen::Settings, ctx);
                 }
                 ui.add_space(10.0);
                 if icon_button(ui, ph::ARROWS_CLOCKWISE, 14.0, theme::text_muted()).clicked() {
@@ -842,12 +932,41 @@ impl App {
 
     fn settings_screen(&mut self, ui: &mut Ui, ctx: &Context) {
         if nav_header(ui, "Settings").clicked() {
-            self.screen = Screen::Main;
+            self.navigate_to(Screen::Main, ctx);
         }
         ui.add_space(12.0);
 
-        egui::ScrollArea::vertical()
+        let scroll_rect = ui.available_rect_before_wrap();
+        let scroll_input_active = ctx.input(|input| {
+            let pointer_over = input
+                .pointer
+                .hover_pos()
+                .is_some_and(|position| scroll_rect.contains(position));
+            pointer_over
+                && (input.is_scrolling()
+                    || input.time_since_last_scroll() <= input.predicted_dt.max(0.05))
+        });
+        if scroll_input_active {
+            self.settings_scroll_active_at = Some(Instant::now());
+        }
+
+        let scrollbar_visible = self
+            .settings_scroll_active_at
+            .is_some_and(|active_at| active_at.elapsed() < SCROLLBAR_HIDE_DELAY);
+        if let Some(active_at) = self.settings_scroll_active_at
+            && let Some(remaining) = SCROLLBAR_HIDE_DELAY.checked_sub(active_at.elapsed())
+        {
+            ctx.request_repaint_after(remaining);
+        }
+
+        let output = egui::ScrollArea::vertical()
+            .id_salt("settings-scroll")
             .auto_shrink([false, false])
+            .scroll_bar_visibility(if scrollbar_visible {
+                ScrollBarVisibility::VisibleWhenNeeded
+            } else {
+                ScrollBarVisibility::AlwaysHidden
+            })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.add(
@@ -942,12 +1061,19 @@ impl App {
                 divider(ui);
                 dependency_row(ui, ph::MONITOR_PLAY, "scrcpy", scrcpy);
             });
+
+        let scroll_moving = (output.state.offset.y - self.settings_scroll_offset).abs() > 0.01
+            || output.state.velocity().y.abs() > 0.01;
+        self.settings_scroll_offset = output.state.offset.y;
+        if scroll_moving {
+            self.settings_scroll_active_at = Some(Instant::now());
+            ctx.request_repaint_after(SCROLLBAR_HIDE_DELAY);
+        }
     }
 
     fn pair_screen(&mut self, ui: &mut Ui, ctx: &Context) {
         if nav_header(ui, "Pair device").clicked() {
-            backend::cancel_pairing(&self.shared);
-            self.screen = Screen::Main;
+            self.leave_pairing(ctx);
             return;
         }
 
@@ -957,7 +1083,7 @@ impl App {
         };
 
         let Some(phase) = phase else {
-            self.screen = Screen::Main;
+            self.navigate_to(Screen::Main, ctx);
             return;
         };
 
@@ -1066,8 +1192,7 @@ impl App {
                         )
                         .clicked()
                         {
-                            backend::cancel_pairing(&self.shared);
-                            self.screen = Screen::Main;
+                            self.leave_pairing(ctx);
                         }
                     });
                 });
@@ -1254,24 +1379,42 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
 
         let frame = Frame::new()
             .fill(theme::input_bg())
-            .stroke(Stroke::new(1.0, theme::input_stroke()))
+            .stroke(Stroke::new(1.0, Color32::TRANSPARENT))
+            .shadow(Shadow {
+                offset: [0, 1],
+                blur: 4,
+                spread: 0,
+                color: theme::control_shadow(),
+            })
             .corner_radius(CornerRadius::same(6))
             .inner_margin(Margin::symmetric(9, 6));
 
-        frame
-            .show(ui, |ui| {
-                ui.set_width(width - 20.0);
-                ui.add(
-                    TextEdit::singleline(value)
-                        .frame(Frame::NONE)
-                        .font(FontId::new(12.0, FontFamily::Proportional))
-                        .text_color(theme::text_bright())
-                        .margin(Margin::ZERO)
-                        .desired_width(width - 20.0),
-                )
-            })
-            .inner
-            .changed()
+        let output = frame.show(ui, |ui| {
+            ui.set_width(width - 20.0);
+            ui.add(
+                TextEdit::singleline(value)
+                    .frame(Frame::NONE)
+                    .font(FontId::new(12.0, FontFamily::Proportional))
+                    .text_color(theme::text_bright())
+                    .margin(Margin::ZERO)
+                    .desired_width(width - 20.0),
+            )
+        });
+        let (stroke_width, stroke_color) = if output.inner.has_focus() {
+            (1.5, theme::input_focus_stroke())
+        } else if output.response.hovered() || output.inner.hovered() {
+            (1.0, theme::input_hover_stroke())
+        } else {
+            (1.0, theme::input_stroke())
+        };
+        ui.painter().rect_stroke(
+            output.response.rect,
+            6.0,
+            Stroke::new(stroke_width, stroke_color),
+            egui::StrokeKind::Inside,
+        );
+
+        output.inner.changed()
     })
     .inner
 }
@@ -1287,6 +1430,12 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
     Frame::new()
         .fill(theme::segment_bg())
         .stroke(Stroke::new(1.0, theme::input_stroke()))
+        .shadow(Shadow {
+            offset: [0, 1],
+            blur: 4,
+            spread: 0,
+            color: theme::control_shadow(),
+        })
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(2))
         .show(ui, |ui| {
@@ -1306,7 +1455,11 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
                             } else {
                                 Color32::TRANSPARENT
                             })
-                            .stroke(Stroke::NONE)
+                            .stroke(if active {
+                                Stroke::new(1.0, theme::segment_selected_stroke())
+                            } else {
+                                Stroke::NONE
+                            })
                             .corner_radius(CornerRadius::same(6)),
                     );
                     if response.clicked() && !active {
@@ -1326,8 +1479,27 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
 
     ui.horizontal(|ui| {
         let (rect, response) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::click());
-        let painter = ui.painter();
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
+        ui.add_space(7.0);
+        let label_response = ui
+            .add(
+                Label::new(regular(label, 12.0, theme::text_check()))
+                    .selectable(false)
+                    .sense(Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+        let painter = ui.painter();
+        painter.add(
+            Shadow {
+                offset: [0, 1],
+                blur: 3,
+                spread: 0,
+                color: theme::control_shadow(),
+            }
+            .as_shape(rect, 4.0),
+        );
         if *value {
             painter.rect_filled(rect, 4.0, theme::green());
             painter.text(
@@ -1342,17 +1514,17 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
             painter.rect_stroke(
                 rect,
                 4.0,
-                Stroke::new(1.0, theme::check_stroke()),
+                Stroke::new(
+                    1.25,
+                    if response.hovered() || label_response.hovered() {
+                        theme::input_hover_stroke()
+                    } else {
+                        theme::check_stroke()
+                    },
+                ),
                 egui::StrokeKind::Inside,
             );
         }
-
-        ui.add_space(7.0);
-        let label_response = ui.add(
-            Label::new(regular(label, 12.0, theme::text_check()))
-                .selectable(false)
-                .sense(Sense::click()),
-        );
 
         if response.clicked() || label_response.clicked() {
             *value = !*value;
@@ -1537,6 +1709,19 @@ mod tests {
         assert_eq!(
             resolved_appearance(ThemeMode::Auto, None),
             theme::Appearance::Night
+        );
+    }
+
+    #[test]
+    fn screen_transitions_push_forward_and_pull_back() {
+        assert_eq!(
+            screen_transition_direction(Screen::Main, Screen::Settings),
+            1.0
+        );
+        assert_eq!(screen_transition_direction(Screen::Main, Screen::Pair), 1.0);
+        assert_eq!(
+            screen_transition_direction(Screen::Settings, Screen::Main),
+            -1.0
         );
     }
 

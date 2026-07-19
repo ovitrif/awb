@@ -1,52 +1,40 @@
-# Design QA — AWB 2.0.2
+# Design QA — AWB 2.0.3
 
-## Day settings palette
+## Source visual truth
 
-**Comparison target**
+- Main screen: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Obsidian 2026-07-19 007660.png`
+- Settings controls: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Obsidian 2026-07-19 007662.png`
+- Persistent scrollbar: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Google Chrome 2026-07-19 007664.png`
+- Screen-change baseline: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/CleanShot 2026-07-19 007670.mp4`
 
-- Source visual truth: `/var/folders/_j/84zgw9rj5s7cp81pjgksy8yw0000gn/T/codex-clipboard-83dd750c-2a86-4258-9dd8-bd1509967373.png`
-- Rendered implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-day-2.0.2.png`
-- Combined comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/day-settings-comparison-2.0.2.png`
-- Viewport: native 380 × 349-point settings popover, captured at 2× (760 × 698 pixels).
-- State: Day appearance resolved while the persisted selector remains on its default `Auto` value.
+## Native comparison
 
-**Findings**
+- Viewport: native 380 × 349-point popover, captured at 2× where noted.
+- Main comparison, reference left and implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/main-comparison-2.0.3.png`
+- Settings comparison, reference left and implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-comparison-2.0.3.png`
+- Focused input state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-focus-day-2.0.3.png`
+- Settled scrolled state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scrolled-settled-2.0.3.png`
+- Wi-Fi pairing state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/pair-day-2.0.3.png`
 
-- No actionable P0/P1/P2 differences remain in the requested coloring treatment.
-- The popover now uses a near-white vertical gradient instead of the previous gray cast, while retaining visible depth from top to bottom.
-- Enabled inputs are white with cool blue-gray outlines; checkboxes have stronger outlines; labels and values use darker enabled-state text.
-- The segmented control is ordered `Auto`, `Day`, `Night`, with `Auto` visibly selected by default.
-- Hairlines and the outer shell stroke are quieter, so controls no longer read as disabled.
-- Dependency success uses the existing green semantic token. The capture occurred while the asynchronous dependency check was still running, so the comparison evaluates the shell, fields, checkboxes, and appearance control rather than the final dependency rows.
-- Typography, spacing rhythm, corner geometry, and native raster quality remain consistent with the existing AWB design system.
+## Findings
 
-**Comparison history**
-
-- Pass 1: identified a gray shell cast, gray input fills, low-contrast checkbox strokes, muted success status, and reversed appearance option order.
-- Pass 2: corrected the palette and option direction; combined comparison found no remaining P0/P1/P2 issues.
-
-## Top-edge highlight
-
-**Comparison target**
-
-- Source visual truth: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Arc 2026-07-18 007606.png`
-- Rendered implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/shell-top-highlight.png`
-- Full comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/full-comparison.png`
-- Focused comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/top-edge-comparison.png`
-
-**Findings**
-
-- No actionable P0/P1/P2 differences remain in the scoped top-edge treatment.
-- The upper-left curve has a shallow cool-white sheen that fades before the center, preserves the centered beak glow, and keeps the existing vertical gradient visible.
-- The native 3× raster render has no visible banding, compression, or transparency halos.
+- The Day shell now has visible cool-blue depth through the lower half while preserving the near-white top, centered beak, top-edge sheen, and existing shell geometry. No banding or transparency artifacts are visible.
+- Enabled text fields now read as interactive through darker resting outlines and small elevation; hover and keyboard-focus states strengthen the outline further, with a blue focus treatment.
+- Checkboxes use darker, slightly thicker outlines with elevation and pointer feedback. The appearance selector has a clearer track, elevated selected segment, and selected-segment border.
+- The settings scrollbar appears while the scroll position is moving and hides after the 250 ms settle delay. The scrolled settled capture shows the full dependency rows without a lingering scrollbar.
+- Main, Settings, and Pair use a 220 ms cubic eased horizontal push/pull with a restrained opacity blend. Pairing cancellation is deferred until the back transition completes so outgoing content does not disappear mid-motion.
+- The native journey was exercised through Main → Settings → Main and Main → Pair → Main. With Wi-Fi enabled, the QR payload rendered successfully, the countdown advanced, and Back returned to Main while cancelling pairing.
+- Typography, spacing rhythm, interaction targets, corner geometry, and the existing AWB color language remain consistent with the current design system.
 
 ## Implementation checklist
 
-- [x] Add a restrained Arc-inspired top-edge highlight.
-- [x] Add persisted `Auto`, `Day`, and `Night` appearance modes with `Auto` as the default.
-- [x] Preserve and strengthen the Day background gradient.
-- [x] Make enabled Day controls clearly interactive.
-- [x] Compare the supplied reference and the native implementation in one image.
-- [x] Remove all screenshot-only QA scaffolding from the release source.
+- [x] Strengthen the Day background gradient.
+- [x] Improve resting, hover, focus, and selected control affordances.
+- [x] Auto-hide the settings scrollbar 250 ms after scrolling settles.
+- [x] Add directional eased transitions between screens.
+- [x] Preserve pairing content until its exit transition completes.
+- [x] Compare supplied references and native renders at the same viewport.
+- [x] Exercise Settings and Wi-Fi pairing in the native app.
+- [x] Remove screenshot-only QA scaffolding from release source.
 
 final result: passed
