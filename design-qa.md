@@ -8,6 +8,7 @@
 - Screen-change baseline: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/CleanShot 2026-07-19 007670.mp4`
 - White-top correction baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/white-top-baseline.png`
 - Appearance layout baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/appearance-layout-baseline.png`
+- Scroll-edge baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/scroll-edge-baseline.png`
 
 ## Native comparison
 
@@ -22,6 +23,11 @@
 - A separate focused crop was unnecessary because the gradient spans the full shell; centerline pixel samples provide the focused color evidence.
 - Compact appearance native implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-compact-appearance-2.0.3.png`
 - Appearance focused comparison, baseline left and corrected implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/appearance-layout-comparison-2.0.3.png`
+- Scroll-polish full-view comparison, baseline left and implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/scroll-polish-comparison-full-2.0.3.png`
+- Focused scrollbar comparison: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/scroll-polish-comparison-scrollbar-2.0.3.png`
+- Day scroll state with the indicator visible: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scroll-fades-indicator-2.0.3.png`
+- Day scroll state after the indicator settles: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scroll-fades-hidden-2.0.3.png`
+- Night scroll state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scroll-fades-night-2.0.3.png`
 
 ## Findings
 
@@ -30,7 +36,9 @@
 - The appearance selector now uses a fixed 172-point width instead of expanding across the row. Its 28-point row vertically centers the `Appearance` label and selector, while the selector's right edge aligns with the settings content edge.
 - Enabled text fields now read as interactive through darker resting outlines and small elevation; hover and keyboard-focus states strengthen the outline further, with a blue focus treatment.
 - Checkboxes use darker, slightly thicker outlines with elevation and pointer feedback. The appearance selector has a clearer track, elevated selected segment, and selected-segment border.
-- The settings scrollbar appears while the scroll position is moving and hides after the 250 ms settle delay. The scrolled settled capture shows the full dependency rows without a lingering scrollbar.
+- Scrolled content now dissolves through 22-point top and bottom masks instead of ending on a hard crop. Each mask appears only when more content exists beyond that edge and eases in over the first 22 points of scroll travel.
+- The built-in proportional scrollbar is replaced by a fixed 44 × 2-point pill. It uses a semi-transparent theme token, tracks normalized scroll progress, remains fully visible while scrolling, and fades over the final 100 ms of the 250 ms settle delay.
+- Native Day and Night captures confirm that the masks blend into their respective shell gradients. The settled Day capture confirms that the indicator disappears without leaving a track or edge artifact.
 - Main, Settings, and Pair use a 220 ms cubic eased horizontal push/pull with a restrained opacity blend. Pairing cancellation is deferred until the back transition completes so outgoing content does not disappear mid-motion.
 - The native journey was exercised through Main → Settings → Main and Main → Pair → Main. With Wi-Fi enabled, the QR payload rendered successfully, the countdown advanced, and Back returned to Main while cancelling pairing.
 - The compact selector was exercised in `Auto` and `Day` states; selection, appearance persistence, and the selected-segment treatment remained functional.
@@ -45,6 +53,9 @@
 - Pass 3 — P1: the appearance segmented control expanded to the full remaining row width and sat out of alignment with its label, making three short choices look like a large form field.
 - Fix: constrained the control to 172 × 28 points, vertically centered the row, kept 56-point segments, and aligned the control to the settings content edge.
 - Pass 4: the normalized focused comparison shows a compact selector with aligned centers and deliberate edge alignment. No actionable P0/P1/P2 differences remain.
+- Pass 5 — P1: scrolling exposed a hard content cut under the fixed header and an oversized, opaque proportional thumb spanning most of the viewport.
+- Fix: added conditional 22-point edge masks and replaced the platform scrollbar with a short, translucent position indicator that fades after scrolling settles.
+- Pass 6: normalized full-view and focused comparisons show a clean content dissolve, a compact indicator, and no persistent scrollbar in both Day and Night states. No actionable P0/P1/P2 differences remain.
 
 ## Implementation checklist
 
@@ -53,6 +64,8 @@
 - [x] Make the appearance selector compact and align it with its row and content edge.
 - [x] Improve resting, hover, focus, and selected control affordances.
 - [x] Auto-hide the settings scrollbar 250 ms after scrolling settles.
+- [x] Fade overflowing settings content beneath the fixed header and footer edges.
+- [x] Use a short, semi-transparent scrollbar indicator that preserves position feedback.
 - [x] Add directional eased transitions between screens.
 - [x] Preserve pairing content until its exit transition completes.
 - [x] Compare supplied references and native renders at the same viewport.

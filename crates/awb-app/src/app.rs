@@ -25,6 +25,11 @@ const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(250);
 const SCREEN_INCOMING_OFFSET: f32 = 32.0;
 const SCREEN_OUTGOING_OFFSET: f32 = 18.0;
 const THEME_MODE_GROUP_SIZE: egui::Vec2 = vec2(172.0, 28.0);
+const SCROLL_EDGE_FADE_HEIGHT: f32 = 22.0;
+const SCROLLBAR_HANDLE_HEIGHT: f32 = 44.0;
+const SCROLLBAR_HANDLE_WIDTH: f32 = 2.0;
+const SCROLLBAR_TRACK_INSET: f32 = 5.0;
+const SCROLLBAR_OPACITY_FADE: Duration = Duration::from_millis(100);
 /// How long after launch to keep forcing the window hidden, in case the
 /// platform surfaces it despite `with_visible(false)`.
 const STARTUP_HIDE: Duration = Duration::from_millis(800);
@@ -951,23 +956,23 @@ impl App {
             self.settings_scroll_active_at = Some(Instant::now());
         }
 
-        let scrollbar_visible = self
+        let scrollbar_opacity = self
             .settings_scroll_active_at
-            .is_some_and(|active_at| active_at.elapsed() < SCROLLBAR_HIDE_DELAY);
+            .map(scrollbar_opacity)
+            .unwrap_or(0.0);
         if let Some(active_at) = self.settings_scroll_active_at
             && let Some(remaining) = SCROLLBAR_HIDE_DELAY.checked_sub(active_at.elapsed())
         {
             ctx.request_repaint_after(remaining);
+            if remaining <= SCROLLBAR_OPACITY_FADE {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
         }
 
         let output = egui::ScrollArea::vertical()
             .id_salt("settings-scroll")
             .auto_shrink([false, false])
-            .scroll_bar_visibility(if scrollbar_visible {
-                ScrollBarVisibility::VisibleWhenNeeded
-            } else {
-                ScrollBarVisibility::AlwaysHidden
-            })
+            .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.add(
@@ -1074,6 +1079,14 @@ impl App {
             self.settings_scroll_active_at = Some(Instant::now());
             ctx.request_repaint_after(SCROLLBAR_HIDE_DELAY);
         }
+
+        paint_settings_scroll_chrome(
+            ui,
+            output.inner_rect,
+            output.content_size.y,
+            output.state.offset.y,
+            scrollbar_opacity,
+        );
     }
 
     fn pair_screen(&mut self, ui: &mut Ui, ctx: &Context) {
@@ -1424,6 +1437,108 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
     .inner
 }
 
+fn scrollbar_opacity(active_at: Instant) -> f32 {
+    let elapsed = active_at.elapsed();
+    let Some(remaining) = SCROLLBAR_HIDE_DELAY.checked_sub(elapsed) else {
+        return 0.0;
+    };
+
+    (remaining.as_secs_f32() / SCROLLBAR_OPACITY_FADE.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+fn paint_settings_scroll_chrome(
+    ui: &Ui,
+    viewport: Rect,
+    content_height: f32,
+    offset: f32,
+    scrollbar_opacity: f32,
+) {
+    let max_offset = (content_height - viewport.height()).max(0.0);
+    if max_offset <= 0.5 {
+        return;
+    }
+
+    let painter = ui.painter().with_clip_rect(viewport);
+    let top_strength = (offset / SCROLL_EDGE_FADE_HEIGHT).clamp(0.0, 1.0);
+    let bottom_strength = ((max_offset - offset) / SCROLL_EDGE_FADE_HEIGHT).clamp(0.0, 1.0);
+
+    if top_strength > 0.0 {
+        let rect = Rect::from_min_max(
+            viewport.min,
+            egui::pos2(viewport.right(), viewport.top() + SCROLL_EDGE_FADE_HEIGHT),
+        );
+        paint_vertical_gradient(
+            &painter,
+            rect,
+            with_opacity(theme::scroll_fade_top(), top_strength),
+            Color32::TRANSPARENT,
+        );
+    }
+
+    if bottom_strength > 0.0 {
+        let rect = Rect::from_min_max(
+            egui::pos2(viewport.left(), viewport.bottom() - SCROLL_EDGE_FADE_HEIGHT),
+            viewport.max,
+        );
+        paint_vertical_gradient(
+            &painter,
+            rect,
+            Color32::TRANSPARENT,
+            with_opacity(theme::scroll_fade_bottom(), bottom_strength),
+        );
+    }
+
+    if scrollbar_opacity > 0.0
+        && let Some(handle) = settings_scrollbar_rect(viewport, content_height, offset)
+    {
+        painter.rect_filled(
+            handle,
+            SCROLLBAR_HANDLE_WIDTH / 2.0,
+            with_opacity(theme::scrollbar_thumb(), scrollbar_opacity),
+        );
+    }
+}
+
+fn settings_scrollbar_rect(viewport: Rect, content_height: f32, offset: f32) -> Option<Rect> {
+    let max_offset = content_height - viewport.height();
+    if max_offset <= 0.5 {
+        return None;
+    }
+
+    let track_top = viewport.top() + SCROLLBAR_TRACK_INSET;
+    let track_height = (viewport.height() - 2.0 * SCROLLBAR_TRACK_INSET).max(0.0);
+    let handle_height = SCROLLBAR_HANDLE_HEIGHT.min(track_height);
+    let travel = (track_height - handle_height).max(0.0);
+    let progress = (offset / max_offset).clamp(0.0, 1.0);
+    let top = track_top + travel * progress;
+
+    Some(Rect::from_min_size(
+        egui::pos2(viewport.right() - SCROLLBAR_HANDLE_WIDTH - 1.0, top),
+        vec2(SCROLLBAR_HANDLE_WIDTH, handle_height),
+    ))
+}
+
+fn paint_vertical_gradient(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.right_bottom(), bottom);
+    mesh.colored_vertex(rect.left_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+fn with_opacity(color: Color32, opacity: f32) -> Color32 {
+    let [red, green, blue, alpha] = color.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(
+        red,
+        green,
+        blue,
+        (f32::from(alpha) * opacity.clamp(0.0, 1.0)).round() as u8,
+    )
+}
+
 fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
     let mut changed = false;
     let modes = [
@@ -1732,6 +1847,22 @@ mod tests {
             screen_transition_direction(Screen::Settings, Screen::Main),
             -1.0
         );
+    }
+
+    #[test]
+    fn custom_scrollbar_keeps_a_short_handle_and_tracks_progress() {
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(100.0, 200.0));
+
+        let start = settings_scrollbar_rect(viewport, 400.0, 0.0).unwrap();
+        let middle = settings_scrollbar_rect(viewport, 400.0, 100.0).unwrap();
+        let end = settings_scrollbar_rect(viewport, 400.0, 200.0).unwrap();
+
+        assert_eq!(start.height(), SCROLLBAR_HANDLE_HEIGHT);
+        assert_eq!(middle.height(), SCROLLBAR_HANDLE_HEIGHT);
+        assert_eq!(end.height(), SCROLLBAR_HANDLE_HEIGHT);
+        assert_eq!(start.top(), viewport.top() + SCROLLBAR_TRACK_INSET);
+        assert!(middle.top() > start.top());
+        assert_eq!(end.bottom(), viewport.bottom() - SCROLLBAR_TRACK_INSET);
     }
 
     #[test]

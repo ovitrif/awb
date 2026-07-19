@@ -43,6 +43,9 @@ struct Palette {
     segment_bg: Color32,
     segment_selected: Color32,
     segment_selected_stroke: Color32,
+    scroll_fade_top: Color32,
+    scroll_fade_bottom: Color32,
+    scrollbar_thumb: Color32,
     qr_card: Color32,
     qr_ink: Color32,
 }
@@ -70,6 +73,9 @@ const NIGHT: Palette = Palette {
     segment_bg: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x2E),
     segment_selected: Color32::from_rgba_premultiplied(0x20, 0x20, 0x20, 0x20),
     segment_selected_stroke: Color32::from_rgba_premultiplied(0x34, 0x34, 0x34, 0x34),
+    scroll_fade_top: Color32::from_rgb(0x2C, 0x2F, 0x3E),
+    scroll_fade_bottom: Color32::from_rgb(0x1E, 0x21, 0x2B),
+    scrollbar_thumb: Color32::from_rgba_premultiplied(0x55, 0x57, 0x5C, 0x70),
     qr_card: Color32::WHITE,
     qr_ink: Color32::from_rgb(0x17, 0x18, 0x1C),
 };
@@ -97,6 +103,9 @@ const DAY: Palette = Palette {
     segment_bg: Color32::from_rgb(0xE3, 0xE9, 0xF2),
     segment_selected: Color32::WHITE,
     segment_selected_stroke: Color32::from_rgb(0xC4, 0xCE, 0xDB),
+    scroll_fade_top: Color32::WHITE,
+    scroll_fade_bottom: Color32::from_rgb(0xDF, 0xE9, 0xF8),
+    scrollbar_thumb: Color32::from_rgba_premultiplied(0x22, 0x27, 0x2D, 0x70),
     qr_card: Color32::WHITE,
     qr_ink: Color32::from_rgb(0x17, 0x18, 0x1C),
 };
@@ -148,6 +157,9 @@ color_token!(control_shadow, control_shadow);
 color_token!(segment_bg, segment_bg);
 color_token!(segment_selected, segment_selected);
 color_token!(segment_selected_stroke, segment_selected_stroke);
+color_token!(scroll_fade_top, scroll_fade_top);
+color_token!(scroll_fade_bottom, scroll_fade_bottom);
+color_token!(scrollbar_thumb, scrollbar_thumb);
 color_token!(qr_card, qr_card);
 color_token!(qr_ink, qr_ink);
 
