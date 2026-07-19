@@ -6,6 +6,7 @@
 - Settings controls: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Obsidian 2026-07-19 007662.png`
 - Persistent scrollbar: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/Google Chrome 2026-07-19 007664.png`
 - Screen-change baseline: `/Users/ovitrif/Library/CloudStorage/GoogleDrive-masivotech.be@gmail.com/My Drive/Captures/CleanShot 2026-07-19 007670.mp4`
+- White-top correction baseline: `/Volumes/ssd/r/github/ovitrif/awb/.ai/logs/2.0.3-patch/white-top-baseline.png`
 
 ## Native comparison
 
@@ -15,10 +16,14 @@
 - Focused input state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-focus-day-2.0.3.png`
 - Settled scrolled state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/settings-scrolled-settled-2.0.3.png`
 - Wi-Fi pairing state: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/pair-day-2.0.3.png`
+- White-top native implementation: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/main-day-white-top-2.0.3.png`
+- White-top full-view comparison, baseline left and corrected implementation right: `/Volumes/ssd/r/github/ovitrif/awb/target/design-qa/white-top-comparison-2.0.3.png`
+- A separate focused crop was unnecessary because the gradient spans the full shell; centerline pixel samples provide the focused color evidence.
 
 ## Findings
 
-- The Day shell now has visible cool-blue depth through the lower half while preserving the near-white top, centered beak, top-edge sheen, and existing shell geometry. No banding or transparency artifacts are visible.
+- The Day shell now holds pure white through the header before transitioning to clearly visible cool-blue depth in the lower half. The centered beak, top-edge sheen, and existing shell geometry remain intact, with no banding or transparency artifacts.
+- The supplied baseline sampled at RGB `243/245/252` near the top and `235/239/248` near the bottom. The corrected native capture samples at RGB `255/255/255` across the top/header and `227/235/248` near the bottom, restoring a clear white-to-blue range.
 - Enabled text fields now read as interactive through darker resting outlines and small elevation; hover and keyboard-focus states strengthen the outline further, with a blue focus treatment.
 - Checkboxes use darker, slightly thicker outlines with elevation and pointer feedback. The appearance selector has a clearer track, elevated selected segment, and selected-segment border.
 - The settings scrollbar appears while the scroll position is moving and hides after the 250 ms settle delay. The scrolled settled capture shows the full dependency rows without a lingering scrollbar.
@@ -26,9 +31,16 @@
 - The native journey was exercised through Main → Settings → Main and Main → Pair → Main. With Wi-Fi enabled, the QR payload rendered successfully, the countdown advanced, and Back returned to Main while cancelling pairing.
 - Typography, spacing rhythm, interaction targets, corner geometry, and the existing AWB color language remain consistent with the current design system.
 
+## Comparison history
+
+- Pass 1 — P1: the blue beak glow tinted the nominally white gradient stop, so the entire shell read as blue-gray and the gradient lacked a visible white endpoint.
+- Fix: replaced the Day beak tint with a neutral white glow, held the base at pure white through 28% of the shell, and strengthened the lower blue stop.
+- Pass 2: the full-view comparison and native pixel samples show a pure-white header and an unmistakably blue lower shell. No actionable P0/P1/P2 differences remain.
+
 ## Implementation checklist
 
 - [x] Strengthen the Day background gradient.
+- [x] Keep the Day header genuinely white rather than blue-gray.
 - [x] Improve resting, hover, focus, and selected control affordances.
 - [x] Auto-hide the settings scrollbar 250 ms after scrolling settles.
 - [x] Add directional eased transitions between screens.

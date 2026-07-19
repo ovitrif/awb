@@ -180,10 +180,11 @@ fn render_shell(oversample: u32, appearance: Appearance) -> Pixmap {
         Appearance::Day => (
             vec![
                 GradientStop::new(0.0, Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF)),
-                GradientStop::new(0.48, Color::from_rgba8(0xF7, 0xF9, 0xFD, 0xFF)),
-                GradientStop::new(1.0, Color::from_rgba8(0xE8, 0xEE, 0xF9, 0xFF)),
+                GradientStop::new(0.28, Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF)),
+                GradientStop::new(0.60, Color::from_rgba8(0xF3, 0xF6, 0xFC, 0xFF)),
+                GradientStop::new(1.0, Color::from_rgba8(0xDC, 0xE7, 0xF8, 0xFF)),
             ],
-            Color::from_rgba8(0x9F, 0xB8, 0xED, 0x2A),
+            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x10),
             Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x8A),
             Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x3D),
             Color::from_rgba8(0x00, 0x00, 0x00, 0x18),
