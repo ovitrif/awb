@@ -21,6 +21,7 @@ use crate::theme::{self, icon, medium, regular, semibold};
 const FOCUS_GRACE: Duration = Duration::from_millis(300);
 const STATUS_POLL: Duration = Duration::from_secs(5);
 const SCREEN_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+const SKIN_TRANSITION_DURATION: Duration = Duration::from_millis(180);
 const POPOVER_APPEAR_DURATION: Duration = Duration::from_millis(160);
 const POPOVER_HIDE_DURATION: Duration = Duration::from_millis(120);
 const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(250);
@@ -93,7 +94,7 @@ enum Screen {
     Pair,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct ScreenTransition {
     from: Screen,
     to: Screen,
@@ -108,10 +109,141 @@ enum PopoverTransitionPhase {
     Disappearing,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct PopoverTransition {
     phase: PopoverTransitionPhase,
     started_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SkinTransition {
+    from_day_weight: f32,
+    target: theme::Appearance,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SkinState {
+    appearance: theme::Appearance,
+    day_weight: f32,
+    transition: Option<SkinTransition>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SkinUpdate {
+    day_weight: f32,
+    committed: Option<theme::Appearance>,
+    animating: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AnimationState {
+    screen: Option<ScreenTransition>,
+    popover: Option<PopoverTransition>,
+    skin: SkinState,
+}
+
+impl SkinState {
+    fn new(appearance: theme::Appearance) -> Self {
+        Self {
+            appearance,
+            day_weight: appearance_day_weight(appearance),
+            transition: None,
+        }
+    }
+
+    fn set_target_at(&mut self, target: theme::Appearance, now: Instant) -> bool {
+        if self
+            .transition
+            .is_some_and(|active| active.target == target)
+            || (self.transition.is_none() && self.appearance == target)
+        {
+            return false;
+        }
+
+        let from_day_weight = self.day_weight_at(now);
+        self.day_weight = from_day_weight;
+        self.transition = Some(SkinTransition {
+            from_day_weight,
+            target,
+            started_at: now,
+        });
+        true
+    }
+
+    fn day_weight_at(&self, now: Instant) -> f32 {
+        self.transition.map_or(self.day_weight, |transition| {
+            skin_day_weight(transition, skin_transition_progress(transition, now))
+        })
+    }
+}
+
+impl AnimationState {
+    fn new(appearance: theme::Appearance) -> Self {
+        Self {
+            screen: None,
+            popover: None,
+            skin: SkinState::new(appearance),
+        }
+    }
+
+    fn advance_skin_at(&mut self, now: Instant) -> SkinUpdate {
+        let Some(transition) = self.skin.transition else {
+            return SkinUpdate {
+                day_weight: self.skin.day_weight,
+                committed: None,
+                animating: false,
+            };
+        };
+
+        let elapsed = now.saturating_duration_since(transition.started_at);
+        if elapsed >= SKIN_TRANSITION_DURATION {
+            let target = transition.target;
+            let committed = self.commit_skin(target);
+            return SkinUpdate {
+                day_weight: self.skin.day_weight,
+                committed: committed.then_some(target),
+                animating: false,
+            };
+        }
+
+        let progress = elapsed.as_secs_f32() / SKIN_TRANSITION_DURATION.as_secs_f32();
+        self.skin.day_weight = skin_day_weight(transition, progress);
+        SkinUpdate {
+            day_weight: self.skin.day_weight,
+            committed: None,
+            animating: true,
+        }
+    }
+
+    fn commit_skin(&mut self, target: theme::Appearance) -> bool {
+        let changed = self.skin.appearance != target
+            || self.skin.transition.is_some()
+            || (self.skin.day_weight - appearance_day_weight(target)).abs() > f32::EPSILON;
+        self.skin.appearance = target;
+        self.skin.day_weight = appearance_day_weight(target);
+        self.skin.transition = None;
+        changed
+    }
+}
+
+fn appearance_day_weight(appearance: theme::Appearance) -> f32 {
+    match appearance {
+        theme::Appearance::Day => 1.0,
+        theme::Appearance::Night => 0.0,
+    }
+}
+
+fn skin_transition_progress(transition: SkinTransition, now: Instant) -> f32 {
+    now.saturating_duration_since(transition.started_at)
+        .as_secs_f32()
+        / SKIN_TRANSITION_DURATION.as_secs_f32()
+}
+
+fn skin_day_weight(transition: SkinTransition, progress: f32) -> f32 {
+    let eased = egui::emath::easing::cubic_in_out(progress.clamp(0.0, 1.0));
+    let target = appearance_day_weight(transition.target);
+    transition.from_day_weight + (target - transition.from_day_weight) * eased
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,12 +258,11 @@ pub struct App {
     width_text: String,
     height_text: String,
     screen: Screen,
-    screen_transition: Option<ScreenTransition>,
-    popover_transition: Option<PopoverTransition>,
+    animations: AnimationState,
     tab: Tab,
     logo: TextureHandle,
-    shell: TextureHandle,
-    appearance: theme::Appearance,
+    day_shell: TextureHandle,
+    night_shell: TextureHandle,
     status_icon: MenuBarIcon,
     show_item: MenuItem,
     pair_id: MenuId,
@@ -165,12 +296,8 @@ impl App {
         );
         let logo = ctx.load_texture("awb-logo", logo_image, TextureOptions::LINEAR);
 
-        let shell_raster = glyph::shell_background(3, appearance);
-        let shell_image = egui::ColorImage::from_rgba_premultiplied(
-            [shell_raster.width as usize, shell_raster.height as usize],
-            &shell_raster.rgba,
-        );
-        let shell = ctx.load_texture("awb-shell", shell_image, TextureOptions::LINEAR);
+        let day_shell = load_shell_texture(&ctx, "awb-shell-day", theme::Appearance::Day);
+        let night_shell = load_shell_texture(&ctx, "awb-shell-night", theme::Appearance::Night);
 
         let menu = Menu::new();
         let show_item = MenuItem::new("Show awb", true, None);
@@ -220,12 +347,11 @@ impl App {
             width_text,
             height_text,
             screen: Screen::Main,
-            screen_transition: None,
-            popover_transition: None,
+            animations: AnimationState::new(appearance),
             tab: Tab::Devices,
             logo,
-            shell,
-            appearance,
+            day_shell,
+            night_shell,
             status_icon,
             show_item,
             pair_id: pair_item.id().clone(),
@@ -267,7 +393,7 @@ impl App {
         }
 
         self.visible = true;
-        self.popover_transition = Some(PopoverTransition {
+        self.animations.popover = Some(PopoverTransition {
             phase: PopoverTransitionPhase::Appearing,
             started_at: Instant::now(),
         });
@@ -283,7 +409,7 @@ impl App {
         }
 
         self.pending_show = false;
-        self.popover_transition = Some(PopoverTransition {
+        self.animations.popover = Some(PopoverTransition {
             phase: PopoverTransitionPhase::Disappearing,
             started_at: Instant::now(),
         });
@@ -321,7 +447,7 @@ impl App {
             return;
         }
 
-        self.screen_transition = Some(ScreenTransition {
+        self.animations.screen = Some(ScreenTransition {
             from: self.screen,
             to: screen,
             direction: screen_transition_direction(self.screen, screen),
@@ -334,7 +460,7 @@ impl App {
 
     fn leave_pairing(&mut self, ctx: &Context) {
         self.navigate_to(Screen::Main, ctx);
-        if let Some(transition) = &mut self.screen_transition {
+        if let Some(transition) = &mut self.animations.screen {
             transition.cancel_pairing_on_complete = true;
         } else {
             backend::cancel_pairing(&self.shared);
@@ -404,18 +530,19 @@ impl App {
     }
 
     fn is_disappearing(&self) -> bool {
-        self.popover_transition
+        self.animations
+            .popover
             .is_some_and(|transition| transition.phase == PopoverTransitionPhase::Disappearing)
     }
 
     fn update_popover_transition(&mut self, ctx: &Context) {
-        let Some(transition) = self.popover_transition else {
+        let Some(transition) = self.animations.popover else {
             return;
         };
         let duration = popover_transition_duration(transition.phase);
 
         if transition.started_at.elapsed() >= duration {
-            self.popover_transition = None;
+            self.animations.popover = None;
             if transition.phase == PopoverTransitionPhase::Disappearing {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(false));
                 self.visible = false;
@@ -431,21 +558,22 @@ impl App {
         self.settings.save();
     }
 
-    fn sync_appearance(&mut self, ctx: &Context) {
+    fn sync_appearance(&mut self, ctx: &Context, now: Instant) {
         let appearance = resolved_appearance(self.settings.theme, ctx.system_theme());
-        if appearance == self.appearance {
-            return;
+        if self.animations.skin.set_target_at(appearance, now) {
+            ctx.request_repaint();
         }
+    }
 
-        self.appearance = appearance;
-        theme::apply(ctx, appearance);
-        let shell_raster = glyph::shell_background(3, appearance);
-        let shell_image = egui::ColorImage::from_rgba_premultiplied(
-            [shell_raster.width as usize, shell_raster.height as usize],
-            &shell_raster.rgba,
-        );
-        self.shell.set(shell_image, TextureOptions::LINEAR);
-        ctx.request_repaint();
+    fn update_skin_transition(&mut self, ctx: &Context, now: Instant) {
+        let update = self.animations.advance_skin_at(now);
+        theme::set_day_weight(update.day_weight);
+        if let Some(appearance) = update.committed {
+            theme::apply(ctx, appearance);
+        }
+        if update.animating {
+            ctx.request_repaint();
+        }
     }
 
     /// Auto-start mirroring for newly connected physical phones (never
@@ -495,6 +623,15 @@ fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
         .filter(|device| device.ready)
         .map(|device| device.mirror_key.as_str())
         .collect()
+}
+
+fn load_shell_texture(ctx: &Context, name: &str, appearance: theme::Appearance) -> TextureHandle {
+    let raster = glyph::shell_background(3, appearance);
+    let image = egui::ColorImage::from_rgba_premultiplied(
+        [raster.width as usize, raster.height as usize],
+        &raster.rgba,
+    );
+    ctx.load_texture(name, image, TextureOptions::LINEAR)
 }
 
 fn resolved_appearance(mode: ThemeMode, system_theme: Option<Theme>) -> theme::Appearance {
@@ -774,7 +911,9 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        self.sync_appearance(ctx);
+        let now = Instant::now();
+        self.sync_appearance(ctx, now);
+        self.update_skin_transition(ctx, now);
 
         // Some setups surface the window on launch despite `with_visible(false)`;
         // keep it hidden until the user opens it from the menu bar icon.
@@ -786,7 +925,7 @@ impl eframe::App for App {
         // Apply a queued move before the window is shown (see `show`).
         if self.pending_show {
             self.pending_show = false;
-            if let Some(transition) = &mut self.popover_transition
+            if let Some(transition) = &mut self.animations.popover
                 && transition.phase == PopoverTransitionPhase::Appearing
             {
                 transition.started_at = Instant::now();
@@ -832,7 +971,7 @@ impl eframe::App for App {
         let rect = ui.max_rect();
         let opacity = if !self.visible {
             0.0
-        } else if let Some(transition) = self.popover_transition {
+        } else if let Some(transition) = self.animations.popover {
             let progress = transition.started_at.elapsed().as_secs_f32()
                 / popover_transition_duration(transition.phase).as_secs_f32();
             popover_transition_opacity(transition.phase, progress)
@@ -845,23 +984,32 @@ impl eframe::App for App {
 
         // Beak + rounded body + gradient + hairline, baked into one texture.
         ui.painter().image(
-            self.shell.id(),
+            self.night_shell.id(),
             rect,
             Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+        let day_alpha = (self.animations.skin.day_weight * 255.0).round() as u8;
+        if day_alpha > 0 {
+            ui.painter().image(
+                self.day_shell.id(),
+                rect,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::from_white_alpha(day_alpha),
+            );
+        }
 
         let content = Rect::from_min_max(
             egui::pos2(rect.left() + 16.0, rect.top() + theme::BEAK_HEIGHT + 14.0),
             egui::pos2(rect.right() - 16.0, rect.bottom() - 14.0),
         );
-        if let Some(transition) = self.screen_transition {
+        if let Some(transition) = self.animations.screen {
             let progress = (transition.started_at.elapsed().as_secs_f32()
                 / SCREEN_TRANSITION_DURATION.as_secs_f32())
             .clamp(0.0, 1.0);
 
             if progress >= 1.0 {
-                self.screen_transition = None;
+                self.animations.screen = None;
                 if transition.cancel_pairing_on_complete {
                     backend::cancel_pairing(&self.shared);
                 }
@@ -899,7 +1047,7 @@ impl App {
         );
         screen_ui.set_clip_rect(content);
         screen_ui.set_opacity(opacity);
-        if self.screen_transition.is_some() {
+        if self.animations.screen.is_some() {
             // Both screens are painted during the transition. Keep their
             // visual treatment intact while preventing clicks from reaching
             // either the outgoing or incoming controls mid-animation.
@@ -1186,7 +1334,7 @@ impl App {
                     self.save_settings();
                 }
                 if theme_changed {
-                    self.sync_appearance(ctx);
+                    ctx.request_repaint();
                 }
 
                 ui.add_space(12.0);
@@ -1971,6 +2119,73 @@ mod tests {
             resolved_appearance(ThemeMode::Auto, None),
             theme::Appearance::Night
         );
+    }
+
+    #[test]
+    fn committing_skin_preserves_overlapping_screen_and_popover_animations() {
+        let started_at = Instant::now();
+        let screen = ScreenTransition {
+            from: Screen::Main,
+            to: Screen::Settings,
+            direction: 1.0,
+            started_at,
+            cancel_pairing_on_complete: false,
+        };
+        let popover = PopoverTransition {
+            phase: PopoverTransitionPhase::Appearing,
+            started_at,
+        };
+        let mut animations = AnimationState {
+            screen: Some(screen),
+            popover: Some(popover),
+            skin: SkinState {
+                appearance: theme::Appearance::Night,
+                day_weight: 0.75,
+                transition: Some(SkinTransition {
+                    from_day_weight: 0.0,
+                    target: theme::Appearance::Day,
+                    started_at,
+                }),
+            },
+        };
+
+        assert!(animations.commit_skin(theme::Appearance::Day));
+        assert_eq!(animations.skin.appearance, theme::Appearance::Day);
+        assert_eq!(animations.skin.day_weight, 1.0);
+        assert!(animations.skin.transition.is_none());
+        assert_eq!(animations.screen, Some(screen));
+        assert_eq!(animations.popover, Some(popover));
+
+        assert!(!animations.commit_skin(theme::Appearance::Day));
+        assert_eq!(animations.screen, Some(screen));
+        assert_eq!(animations.popover, Some(popover));
+    }
+
+    #[test]
+    fn skin_transition_commits_once_at_the_endpoint() {
+        let started_at = Instant::now();
+        let mut animations = AnimationState::new(theme::Appearance::Night);
+        assert!(
+            animations
+                .skin
+                .set_target_at(theme::Appearance::Day, started_at)
+        );
+
+        let before = animations
+            .advance_skin_at(started_at + SKIN_TRANSITION_DURATION - Duration::from_nanos(1));
+        assert!(before.animating);
+        assert_eq!(before.committed, None);
+
+        let endpoint = animations.advance_skin_at(started_at + SKIN_TRANSITION_DURATION);
+        assert!(!endpoint.animating);
+        assert_eq!(endpoint.committed, Some(theme::Appearance::Day));
+        assert_eq!(endpoint.day_weight, 1.0);
+
+        let after = animations
+            .advance_skin_at(started_at + SKIN_TRANSITION_DURATION + Duration::from_millis(1));
+        assert!(!after.animating);
+        assert_eq!(after.committed, None);
+        assert_eq!(after.day_weight, 1.0);
     }
 
     #[test]

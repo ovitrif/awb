@@ -1,6 +1,6 @@
 //! Design tokens and font setup extracted from DESIGN.pen.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::RwLock;
 
 use eframe::egui::{
     Color32, Context, FontData, FontDefinitions, FontFamily, FontId, RichText, TextStyle, Theme,
@@ -48,6 +48,54 @@ struct Palette {
     scrollbar_thumb: Color32,
     qr_card: Color32,
     qr_ink: Color32,
+}
+
+impl Palette {
+    fn mix(from: Self, to: Self, progress: f32) -> Self {
+        let mix = |from, to| mix_color(from, to, progress);
+        Self {
+            hairline: mix(from.hairline, to.hairline),
+            text_strong: mix(from.text_strong, to.text_strong),
+            text_bright: mix(from.text_bright, to.text_bright),
+            text_soft: mix(from.text_soft, to.text_soft),
+            text_muted: mix(from.text_muted, to.text_muted),
+            text_faint: mix(from.text_faint, to.text_faint),
+            text_label: mix(from.text_label, to.text_label),
+            text_check: mix(from.text_check, to.text_check),
+            green: mix(from.green, to.green),
+            green_ink: mix(from.green_ink, to.green_ink),
+            amber: mix(from.amber, to.amber),
+            red: mix(from.red, to.red),
+            surface: mix(from.surface, to.surface),
+            input_bg: mix(from.input_bg, to.input_bg),
+            input_stroke: mix(from.input_stroke, to.input_stroke),
+            input_hover_stroke: mix(from.input_hover_stroke, to.input_hover_stroke),
+            input_focus_stroke: mix(from.input_focus_stroke, to.input_focus_stroke),
+            check_stroke: mix(from.check_stroke, to.check_stroke),
+            control_shadow: mix(from.control_shadow, to.control_shadow),
+            segment_bg: mix(from.segment_bg, to.segment_bg),
+            segment_selected: mix(from.segment_selected, to.segment_selected),
+            segment_selected_stroke: mix(from.segment_selected_stroke, to.segment_selected_stroke),
+            scroll_fade_top: mix(from.scroll_fade_top, to.scroll_fade_top),
+            scroll_fade_bottom: mix(from.scroll_fade_bottom, to.scroll_fade_bottom),
+            scrollbar_thumb: mix(from.scrollbar_thumb, to.scrollbar_thumb),
+            qr_card: mix(from.qr_card, to.qr_card),
+            qr_ink: mix(from.qr_ink, to.qr_ink),
+        }
+    }
+}
+
+fn mix_color(from: Color32, to: Color32, progress: f32) -> Color32 {
+    let progress = progress.clamp(0.0, 1.0);
+    let channel = |from: u8, to: u8| {
+        (f32::from(from) + (f32::from(to) - f32::from(from)) * progress).round() as u8
+    };
+    Color32::from_rgba_premultiplied(
+        channel(from.r(), to.r()),
+        channel(from.g(), to.g()),
+        channel(from.b(), to.b()),
+        channel(from.a(), to.a()),
+    )
 }
 
 const NIGHT: Palette = Palette {
@@ -110,21 +158,29 @@ const DAY: Palette = Palette {
     qr_ink: Color32::from_rgb(0x17, 0x18, 0x1C),
 };
 
-static ACTIVE_APPEARANCE: AtomicU8 = AtomicU8::new(Appearance::Night as u8);
+static ACTIVE_PALETTE: RwLock<Palette> = RwLock::new(NIGHT);
 
 pub fn apply(ctx: &Context, appearance: Appearance) {
-    ACTIVE_APPEARANCE.store(appearance as u8, Ordering::Relaxed);
+    set_day_weight(match appearance {
+        Appearance::Day => 1.0,
+        Appearance::Night => 0.0,
+    });
     ctx.set_theme(match appearance {
         Appearance::Day => Theme::Light,
         Appearance::Night => Theme::Dark,
     });
 }
 
-fn palette() -> &'static Palette {
-    match ACTIVE_APPEARANCE.load(Ordering::Relaxed) {
-        value if value == Appearance::Day as u8 => &DAY,
-        _ => &NIGHT,
-    }
+pub fn set_day_weight(day_weight: f32) {
+    *ACTIVE_PALETTE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Palette::mix(NIGHT, DAY, day_weight);
+}
+
+fn palette() -> Palette {
+    *ACTIVE_PALETTE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 macro_rules! color_token {
