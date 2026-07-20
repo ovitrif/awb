@@ -21,6 +21,7 @@ use crate::theme::{self, icon, medium, regular, semibold};
 const FOCUS_GRACE: Duration = Duration::from_millis(300);
 const STATUS_POLL: Duration = Duration::from_secs(5);
 const SCREEN_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+const SKIN_TRANSITION_DURATION: Duration = Duration::from_millis(180);
 const POPOVER_APPEAR_DURATION: Duration = Duration::from_millis(160);
 const POPOVER_HIDE_DURATION: Duration = Duration::from_millis(120);
 const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(250);
@@ -114,6 +115,129 @@ struct PopoverTransition {
     started_at: Instant,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SkinTransition {
+    from_day_weight: f32,
+    target: theme::Appearance,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SkinState {
+    appearance: theme::Appearance,
+    day_weight: f32,
+    transition: Option<SkinTransition>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SkinUpdate {
+    day_weight: f32,
+    committed: Option<theme::Appearance>,
+    animating: bool,
+}
+
+impl SkinState {
+    fn new(appearance: theme::Appearance) -> Self {
+        Self {
+            appearance,
+            day_weight: appearance_day_weight(appearance),
+            transition: None,
+        }
+    }
+
+    fn set_target_at(&mut self, target: theme::Appearance, now: Instant) -> bool {
+        if self
+            .transition
+            .is_some_and(|active| active.target == target)
+            || (self.transition.is_none() && self.appearance == target)
+        {
+            return false;
+        }
+
+        let from_day_weight = self.day_weight_at(now);
+        self.day_weight = from_day_weight;
+        self.transition = Some(SkinTransition {
+            from_day_weight,
+            target,
+            started_at: now,
+        });
+        true
+    }
+
+    fn advance_at(&mut self, now: Instant) -> SkinUpdate {
+        let Some(transition) = self.transition else {
+            return SkinUpdate {
+                day_weight: self.day_weight,
+                committed: None,
+                animating: false,
+            };
+        };
+
+        let progress = skin_transition_progress(transition, now);
+        if progress >= 1.0 {
+            let target = transition.target;
+            let committed = commit_skin(
+                &mut self.appearance,
+                &mut self.day_weight,
+                &mut self.transition,
+                target,
+            );
+            return SkinUpdate {
+                day_weight: self.day_weight,
+                committed: committed.then_some(target),
+                animating: false,
+            };
+        }
+
+        self.day_weight = skin_day_weight(transition, progress);
+        SkinUpdate {
+            day_weight: self.day_weight,
+            committed: None,
+            animating: true,
+        }
+    }
+
+    fn day_weight_at(&self, now: Instant) -> f32 {
+        self.transition.map_or(self.day_weight, |transition| {
+            skin_day_weight(transition, skin_transition_progress(transition, now))
+        })
+    }
+}
+
+fn appearance_day_weight(appearance: theme::Appearance) -> f32 {
+    match appearance {
+        theme::Appearance::Day => 1.0,
+        theme::Appearance::Night => 0.0,
+    }
+}
+
+fn skin_transition_progress(transition: SkinTransition, now: Instant) -> f32 {
+    now.saturating_duration_since(transition.started_at)
+        .as_secs_f32()
+        / SKIN_TRANSITION_DURATION.as_secs_f32()
+}
+
+fn skin_day_weight(transition: SkinTransition, progress: f32) -> f32 {
+    let eased = egui::emath::easing::cubic_in_out(progress.clamp(0.0, 1.0));
+    let target = appearance_day_weight(transition.target);
+    transition.from_day_weight + (target - transition.from_day_weight) * eased
+}
+
+fn commit_skin(
+    appearance: &mut theme::Appearance,
+    day_weight: &mut f32,
+    transition: &mut Option<SkinTransition>,
+    target: theme::Appearance,
+) -> bool {
+    let changed = *appearance != target
+        || transition.is_some()
+        || (*day_weight - appearance_day_weight(target)).abs() > f32::EPSILON;
+    *appearance = target;
+    *day_weight = appearance_day_weight(target);
+    *transition = None;
+    changed
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Devices,
@@ -130,8 +254,9 @@ pub struct App {
     popover_transition: Option<PopoverTransition>,
     tab: Tab,
     logo: TextureHandle,
-    shell: TextureHandle,
-    appearance: theme::Appearance,
+    day_shell: TextureHandle,
+    night_shell: TextureHandle,
+    skin: SkinState,
     status_icon: MenuBarIcon,
     show_item: MenuItem,
     pair_id: MenuId,
@@ -165,12 +290,8 @@ impl App {
         );
         let logo = ctx.load_texture("awb-logo", logo_image, TextureOptions::LINEAR);
 
-        let shell_raster = glyph::shell_background(3, appearance);
-        let shell_image = egui::ColorImage::from_rgba_premultiplied(
-            [shell_raster.width as usize, shell_raster.height as usize],
-            &shell_raster.rgba,
-        );
-        let shell = ctx.load_texture("awb-shell", shell_image, TextureOptions::LINEAR);
+        let day_shell = load_shell_texture(&ctx, "awb-shell-day", theme::Appearance::Day);
+        let night_shell = load_shell_texture(&ctx, "awb-shell-night", theme::Appearance::Night);
 
         let menu = Menu::new();
         let show_item = MenuItem::new("Show awb", true, None);
@@ -224,8 +345,9 @@ impl App {
             popover_transition: None,
             tab: Tab::Devices,
             logo,
-            shell,
-            appearance,
+            day_shell,
+            night_shell,
+            skin: SkinState::new(appearance),
             status_icon,
             show_item,
             pair_id: pair_item.id().clone(),
@@ -431,21 +553,22 @@ impl App {
         self.settings.save();
     }
 
-    fn sync_appearance(&mut self, ctx: &Context) {
+    fn sync_appearance(&mut self, ctx: &Context, now: Instant) {
         let appearance = resolved_appearance(self.settings.theme, ctx.system_theme());
-        if appearance == self.appearance {
-            return;
+        if self.skin.set_target_at(appearance, now) {
+            ctx.request_repaint();
         }
+    }
 
-        self.appearance = appearance;
-        theme::apply(ctx, appearance);
-        let shell_raster = glyph::shell_background(3, appearance);
-        let shell_image = egui::ColorImage::from_rgba_premultiplied(
-            [shell_raster.width as usize, shell_raster.height as usize],
-            &shell_raster.rgba,
-        );
-        self.shell.set(shell_image, TextureOptions::LINEAR);
-        ctx.request_repaint();
+    fn update_skin_transition(&mut self, ctx: &Context, now: Instant) {
+        let update = self.skin.advance_at(now);
+        theme::set_day_weight(update.day_weight);
+        if let Some(appearance) = update.committed {
+            theme::apply(ctx, appearance);
+        }
+        if update.animating {
+            ctx.request_repaint();
+        }
     }
 
     /// Auto-start mirroring for newly connected physical phones (never
@@ -495,6 +618,15 @@ fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
         .filter(|device| device.ready)
         .map(|device| device.mirror_key.as_str())
         .collect()
+}
+
+fn load_shell_texture(ctx: &Context, name: &str, appearance: theme::Appearance) -> TextureHandle {
+    let raster = glyph::shell_background(3, appearance);
+    let image = egui::ColorImage::from_rgba_premultiplied(
+        [raster.width as usize, raster.height as usize],
+        &raster.rgba,
+    );
+    ctx.load_texture(name, image, TextureOptions::LINEAR)
 }
 
 fn resolved_appearance(mode: ThemeMode, system_theme: Option<Theme>) -> theme::Appearance {
@@ -774,7 +906,9 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        self.sync_appearance(ctx);
+        let now = Instant::now();
+        self.sync_appearance(ctx, now);
+        self.update_skin_transition(ctx, now);
 
         // Some setups surface the window on launch despite `with_visible(false)`;
         // keep it hidden until the user opens it from the menu bar icon.
@@ -845,11 +979,20 @@ impl eframe::App for App {
 
         // Beak + rounded body + gradient + hairline, baked into one texture.
         ui.painter().image(
-            self.shell.id(),
+            self.night_shell.id(),
             rect,
             Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+        let day_alpha = (self.skin.day_weight * 255.0).round() as u8;
+        if day_alpha > 0 {
+            ui.painter().image(
+                self.day_shell.id(),
+                rect,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::from_white_alpha(day_alpha),
+            );
+        }
 
         let content = Rect::from_min_max(
             egui::pos2(rect.left() + 16.0, rect.top() + theme::BEAK_HEIGHT + 14.0),
@@ -1186,7 +1329,7 @@ impl App {
                     self.save_settings();
                 }
                 if theme_changed {
-                    self.sync_appearance(ctx);
+                    ctx.request_repaint();
                 }
 
                 ui.add_space(12.0);
