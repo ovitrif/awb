@@ -619,13 +619,7 @@ impl App {
     }
 
     fn sync_menu_icon(&mut self) {
-        let connected = self
-            .shared
-            .lock()
-            .unwrap()
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| has_ready_device(&snapshot.devices));
+        let connected = self.shared.lock().unwrap().device_connected;
         if connected == self.menu_icon_connected {
             return;
         }
@@ -648,10 +642,6 @@ fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
         .filter(|device| device.ready)
         .map(|device| device.mirror_key.as_str())
         .collect()
-}
-
-fn has_ready_device(devices: &[backend::DeviceInfo]) -> bool {
-    devices.iter().any(|device| device.ready)
 }
 
 fn menu_bar_icon(connected: bool) -> anyhow::Result<Icon> {
@@ -972,11 +962,15 @@ impl eframe::App for App {
         self.handle_focus(ctx);
         self.update_popover_transition(ctx);
 
-        // Keep device state current in the background so the menu bar icon
-        // always reflects whether a ready device is connected.
+        // Keep the full UI snapshot current while it is in use. When hidden,
+        // a lightweight ADB-only probe is enough to update the menu bar icon.
         if self.last_poll.elapsed() > STATUS_POLL {
             self.last_poll = Instant::now();
-            backend::refresh_status(self.shared.clone(), ctx.clone());
+            if self.visible || self.settings.auto_mirror {
+                backend::refresh_status(self.shared.clone(), ctx.clone());
+            } else {
+                backend::refresh_connection_state(self.shared.clone(), ctx.clone());
+            }
         }
 
         self.maybe_auto_mirror(ctx);
@@ -2360,16 +2354,6 @@ mod tests {
 
         assert!(keys.contains("adb-ready._adb-tls-connect._tcp"));
         assert!(!keys.contains("adb-offline._adb-tls-connect._tcp"));
-    }
-
-    #[test]
-    fn menu_connection_state_uses_ready_devices() {
-        let offline = device_info("adb-offline._adb-tls-connect._tcp", false);
-        let ready = device_info("adb-ready._adb-tls-connect._tcp", true);
-
-        assert!(!has_ready_device(&[]));
-        assert!(!has_ready_device(std::slice::from_ref(&offline)));
-        assert!(has_ready_device(&[offline, ready]));
     }
 
     #[test]

@@ -69,6 +69,7 @@ pub struct PairingSession {
 #[derive(Default)]
 pub struct Shared {
     pub snapshot: Option<Snapshot>,
+    pub device_connected: bool,
     pub refreshing: bool,
     pub logs: Vec<String>,
     pub logged_tool_warnings: HashSet<String>,
@@ -158,11 +159,42 @@ pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
 
     thread::spawn(move || {
         let snapshot = collect_snapshot();
+        let device_connected = snapshot.devices.iter().any(|device| device.ready);
 
         let mut state = shared.lock().unwrap();
         state.reap_finished_mirrors();
         state.log_tool_warnings(&snapshot.scrcpy.warnings);
         state.snapshot = Some(snapshot);
+        state.device_connected = device_connected;
+        state.refreshing = false;
+        drop(state);
+        ctx.request_repaint();
+    });
+}
+
+/// Refresh only the state needed by the menu bar icon while the popover is
+/// hidden. The full status refresh also probes scrcpy and mDNS, so keeping the
+/// background path to `adb devices` avoids unnecessary process churn.
+pub fn refresh_connection_state(shared: Arc<Mutex<Shared>>, ctx: Context) {
+    {
+        let mut state = shared.lock().unwrap();
+        if state.refreshing || state.pairing_busy() {
+            return;
+        }
+        state.refreshing = true;
+    }
+
+    thread::spawn(move || {
+        let device_connected = {
+            let _adb_work = ADB_WORK_LOCK.lock().unwrap();
+            Adb::resolve(None)
+                .ok()
+                .and_then(|adb| adb.devices().ok())
+                .is_some_and(|devices| has_ready_adb_device(&devices))
+        };
+
+        let mut state = shared.lock().unwrap();
+        state.device_connected = device_connected;
         state.refreshing = false;
         drop(state);
         ctx.request_repaint();
@@ -271,6 +303,12 @@ fn state_label(state: &adb::DeviceState) -> &str {
         adb::DeviceState::Unauthorized => "unauthorized",
         adb::DeviceState::Other(value) => value,
     }
+}
+
+fn has_ready_adb_device(devices: &[adb::AdbDevice]) -> bool {
+    devices
+        .iter()
+        .any(|device| device.state == adb::DeviceState::Device)
 }
 
 fn mirror_key_for_device(device: &adb::AdbDevice, services: &[adb::MdnsService]) -> String {
@@ -724,6 +762,17 @@ mod tests {
 
         assert!(pairing_session_owns_cancel(&state, &active_cancel));
         assert!(!pairing_session_owns_cancel(&state, &stale_cancel));
+    }
+
+    #[test]
+    fn menu_connection_state_uses_ready_adb_devices() {
+        let ready = adb_device("adb-ready._adb-tls-connect._tcp");
+        let mut offline = adb_device("adb-offline._adb-tls-connect._tcp");
+        offline.state = adb::DeviceState::Offline;
+
+        assert!(!has_ready_adb_device(&[]));
+        assert!(!has_ready_adb_device(std::slice::from_ref(&offline)));
+        assert!(has_ready_adb_device(&[offline, ready]));
     }
 
     fn mdns_connect_service(instance: &str, address: &str) -> adb::MdnsService {
