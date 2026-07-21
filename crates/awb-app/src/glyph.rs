@@ -38,8 +38,8 @@ pub struct Raster {
 /// Menu bar icon: the glyph as a black template image, tightly fit to its
 /// bounds and rendered taller than its slot so macOS downscales it into a crisp
 /// white (dark mode) or black (light mode) status item. The disconnected state
-/// erodes the source glyph uniformly, retaining its geometry while making
-/// connection state readable through weight alone.
+/// keeps the source weight fully readable while the connected state expands the
+/// Wi-Fi arcs uniformly, making connection state readable through weight alone.
 pub fn menubar_icon(height: u32, connected: bool) -> Raster {
     let [gx, gy, gw, gh] = GLYPH_BOUNDS;
     let h = height as f32;
@@ -54,8 +54,19 @@ pub fn menubar_icon(height: u32, connected: bool) -> Raster {
     let transform =
         Transform::from_scale(scale, scale).post_translate(pad - gx * scale, pad - gy * scale);
     fill_path(&mut pixmap, MENUBAR_GLYPH, Color::BLACK, transform);
-    if !connected {
-        erode_template(&mut pixmap, ((height as f32 * 0.04).round() as u32).max(1));
+    if connected {
+        let mut waves = Pixmap::new(width, height).expect("menu bar wave pixmap");
+        fill_path(&mut waves, LOGO_WAVE_1, Color::BLACK, transform);
+        fill_path(&mut waves, LOGO_WAVE_2, Color::BLACK, transform);
+        dilate_template(&mut waves, ((height as f32 * 0.02).round() as u32).max(1));
+        pixmap.draw_pixmap(
+            0,
+            0,
+            waves.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
     }
 
     Raster {
@@ -68,8 +79,8 @@ pub fn menubar_icon(height: u32, connected: bool) -> Raster {
 /// Preview of the disconnected (top) and connected (bottom) weights as macOS
 /// template images on dark and light menu bars. For `awb-app --render-menubar`.
 pub fn menubar_preview_png() -> Vec<u8> {
-    let disconnected = menubar_icon(36, false);
-    let connected = menubar_icon(36, true);
+    let disconnected = menubar_icon(44, false);
+    let connected = menubar_icon(44, true);
     let zoom = 6;
     let inset = 28;
     let cell_w = connected.width * zoom + inset * 2;
@@ -118,7 +129,7 @@ pub fn menubar_preview_png() -> Vec<u8> {
     pixmap.encode_png().expect("preview png")
 }
 
-fn erode_template(pixmap: &mut Pixmap, radius: u32) {
+fn dilate_template(pixmap: &mut Pixmap, radius: u32) {
     let source = pixmap.data().to_vec();
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
@@ -126,8 +137,8 @@ fn erode_template(pixmap: &mut Pixmap, radius: u32) {
 
     for y in 0..height {
         for x in 0..width {
-            let mut alpha = u8::MAX;
-            'neighbors: for dy in -radius..=radius {
+            let mut alpha = 0;
+            for dy in -radius..=radius {
                 for dx in -radius..=radius {
                     if dx * dx + dy * dy > radius * radius {
                         continue;
@@ -139,14 +150,10 @@ fn erode_template(pixmap: &mut Pixmap, radius: u32) {
                         || neighbor_x >= width
                         || neighbor_y >= height
                     {
-                        alpha = 0;
-                        break 'neighbors;
+                        continue;
                     }
                     let index = ((neighbor_y * width + neighbor_x) * 4 + 3) as usize;
-                    alpha = alpha.min(source[index]);
-                    if alpha == 0 {
-                        break 'neighbors;
-                    }
+                    alpha = alpha.max(source[index]);
                 }
             }
 
@@ -514,6 +521,9 @@ mod tests {
 
         assert_eq!(disconnected.width, connected.width);
         assert_eq!(disconnected.height, connected.height);
-        assert!(alpha_coverage(&disconnected) < alpha_coverage(&connected));
+        let disconnected_coverage = alpha_coverage(&disconnected);
+        let connected_coverage = alpha_coverage(&connected);
+        assert!(disconnected_coverage < connected_coverage);
+        assert!(disconnected_coverage * 4 >= connected_coverage * 3);
     }
 }
