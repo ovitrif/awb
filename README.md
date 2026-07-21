@@ -35,7 +35,7 @@ The awb icon appears in the menu bar. Left-click toggles the popover: connected 
 with one-click mirroring, a Logs tab, scrcpy settings, and QR pairing for new phones.
 Right-click offers Show, Pair, Refresh, and Quit.
 
-macOS release archives also contain `AWB.app` for /Applications and login items; it is the
+macOS release archives also contain `Android Wifi Bridge.app` for /Applications and login items; it is the
 same menu bar app in a bundle.
 
 ## CLI
@@ -78,7 +78,7 @@ options in `~/.config/awb/config.toml`.
 git clone https://github.com/ovitrif/awb.git
 cd awb
 cargo build --release            # target/release/awb and target/release/awb-app
-scripts/bundle-app.sh            # optional: wraps awb-app into target/bundle/AWB.app
+scripts/bundle-app.sh            # optional: wraps awb-app into target/bundle/Android Wifi Bridge.app
 ```
 
 The workspace has three crates: `awb-core` (ADB, scrcpy, QR, and Bonjour logic), `awb`

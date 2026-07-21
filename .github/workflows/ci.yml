@@ -32,7 +32,7 @@ jobs:
       - name: Unit tests
         run: cargo test
 
-      - name: Bundle AWB.app
+      - name: Bundle Android Wifi Bridge.app
         run: |
           cargo build --release -p awb-app
           scripts/bundle-app.sh

@@ -20,7 +20,7 @@ use serde::Serialize;
 
 const BINARY_NAME: &str = "awb";
 const APP_BINARY_NAME: &str = "awb-app";
-const APP_BUNDLE_PATH: &str = "/Applications/AWB.app";
+const APP_BUNDLE_PATH: &str = "/Applications/Android Wifi Bridge.app";
 
 #[derive(Debug, Parser)]
 #[command(
