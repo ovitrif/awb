@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::containers::scroll_area::ScrollBarVisibility;
 use eframe::egui::{
-    self, Align, Button, Color32, Context, CornerRadius, FontFamily, FontId, Frame, Label, Layout,
-    Margin, Rect, Sense, Shadow, Stroke, TextEdit, TextureHandle, TextureOptions, Theme, Ui,
+    self, Align, Color32, Context, CornerRadius, FontFamily, FontId, Frame, Label, Layout, Margin,
+    Rect, Sense, Shadow, Stroke, TextEdit, TextureHandle, TextureOptions, Theme, Ui,
     ViewportCommand, vec2,
 };
 use egui_phosphor::regular as ph;
@@ -35,6 +35,8 @@ const SCROLLBAR_HANDLE_HEIGHT: f32 = 44.0;
 const SCROLLBAR_HANDLE_WIDTH: f32 = 2.0;
 const SCROLLBAR_TRACK_INSET: f32 = 5.0;
 const SCROLLBAR_OPACITY_FADE: Duration = Duration::from_millis(100);
+const CONTROL_HOVER_TRANSITION: f32 = 0.14;
+const CONTROL_PRESS_TRANSITION: f32 = 0.07;
 /// How long after launch to keep forcing the window hidden, in case the
 /// platform surfaces it despite `with_visible(false)`.
 const STARTUP_HIDE: Duration = Duration::from_millis(800);
@@ -1142,6 +1144,9 @@ impl App {
     fn tab_bar(&mut self, ui: &mut Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
+            // Keep the first tab's rounded hover treatment inside the screen
+            // clip instead of slicing off its left edge.
+            ui.add_space(7.0);
             if tab_item(ui, "Devices", self.tab == Tab::Devices).clicked() {
                 self.tab = Tab::Devices;
             }
@@ -1565,18 +1570,21 @@ impl RowAction {
 }
 
 fn icon_button(ui: &mut Ui, glyph: &str, size: f32, color: Color32) -> egui::Response {
-    let background = ui.painter().add(egui::Shape::Noop);
-    let response = ui.add(Button::new(icon(glyph, size, color)).frame(false));
-    if response.hovered() {
-        ui.painter().set(
-            background,
-            egui::Shape::rect_filled(
-                response.rect.expand(4.0),
-                6.0,
-                interaction_overlay(&response),
-            ),
-        );
-    }
+    let (rect, response) = ui.allocate_exact_size(vec2(size + 8.0, size + 8.0), Sense::click());
+    let interaction = interaction_visual(
+        ui,
+        response.id,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    );
+    ui.painter().rect_filled(rect, 6.0, interaction.overlay);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        theme::icon_font(size),
+        color,
+    );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -1591,16 +1599,20 @@ fn tab_item(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
         .vertical(|ui| {
             let background = ui.painter().add(egui::Shape::Noop);
             let response = ui.add(Label::new(text).selectable(false).sense(Sense::click()));
-            if response.hovered() {
-                ui.painter().set(
-                    background,
-                    egui::Shape::rect_filled(
-                        response.rect.expand2(vec2(6.0, 4.0)),
-                        5.0,
-                        interaction_overlay(&response),
-                    ),
-                );
-            }
+            let interaction = interaction_visual(
+                ui,
+                response.id,
+                response.hovered(),
+                response.is_pointer_button_down_on(),
+            );
+            ui.painter().set(
+                background,
+                egui::Shape::rect_filled(
+                    response.rect.expand2(vec2(6.0, 4.0)),
+                    5.0,
+                    interaction.overlay,
+                ),
+            );
             ui.add_space(6.0);
             let (rect, _) =
                 ui.allocate_exact_size(vec2(response.rect.width(), 2.0), Sense::hover());
@@ -1658,10 +1670,13 @@ fn list_row(
                     },
                 );
                 ui.painter().rect_filled(rect, 6.0, theme::surface());
-                if response.hovered() {
-                    ui.painter()
-                        .rect_filled(rect, 6.0, interaction_overlay(&response));
-                }
+                let interaction = interaction_visual(
+                    ui,
+                    response.id,
+                    response.hovered() && action.enabled,
+                    response.is_pointer_button_down_on() && action.enabled,
+                );
+                ui.painter().rect_filled(rect, 6.0, interaction.overlay);
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -1765,12 +1780,19 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
                     .desired_width(width - 20.0),
             )
         });
+        let hovered = output.response.hovered() || output.inner.hovered();
+        let hover_progress = ui.ctx().animate_bool_with_time(
+            output.response.id.with("input-hover"),
+            hovered,
+            CONTROL_HOVER_TRANSITION,
+        );
         let (stroke_width, stroke_color) = if output.inner.has_focus() {
             (1.5, theme::input_focus_stroke())
-        } else if output.response.hovered() || output.inner.hovered() {
-            (1.0, theme::input_hover_stroke())
         } else {
-            (1.0, theme::input_stroke())
+            (
+                1.0,
+                theme::input_stroke().lerp_to_gamma(theme::input_hover_stroke(), hover_progress),
+            )
         };
         ui.painter().rect_stroke(
             output.response.rect,
@@ -1918,10 +1940,13 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
                             ui.painter()
                                 .rect_filled(rect, 6.0, theme::segment_selected());
                         }
-                        if response.hovered() {
-                            ui.painter()
-                                .rect_filled(rect, 6.0, interaction_overlay(&response));
-                        }
+                        let interaction = interaction_visual(
+                            ui,
+                            response.id,
+                            response.hovered(),
+                            response.is_pointer_button_down_on(),
+                        );
+                        ui.painter().rect_filled(rect, 6.0, interaction.overlay);
                         if active {
                             ui.painter().rect_stroke(
                                 rect,
@@ -1947,10 +1972,9 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
                             ),
                             if active {
                                 theme::text_strong()
-                            } else if response.hovered() {
-                                theme::text_bright()
                             } else {
                                 theme::text_muted()
+                                    .lerp_to_gamma(theme::text_bright(), interaction.hover_progress)
                             },
                         );
                         if response.clicked() && !active {
@@ -1970,6 +1994,9 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
     let mut changed = false;
 
     ui.horizontal(|ui| {
+        // The hover shape expands by five points. Reserve those points inside
+        // the scroll viewport so the left rounded edge remains intact.
+        ui.add_space(6.0);
         let background = ui.painter().add(egui::Shape::Noop);
         let (rect, response) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1983,22 +2010,18 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
 
-        if response.hovered() || label_response.hovered() {
-            ui.painter().set(
-                background,
-                egui::Shape::rect_filled(
-                    rect.union(label_response.rect).expand2(vec2(5.0, 3.0)),
-                    5.0,
-                    if response.is_pointer_button_down_on()
-                        || label_response.is_pointer_button_down_on()
-                    {
-                        theme::control_pressed()
-                    } else {
-                        theme::control_hover()
-                    },
-                ),
-            );
-        }
+        let hovered = response.hovered() || label_response.hovered();
+        let pressed =
+            response.is_pointer_button_down_on() || label_response.is_pointer_button_down_on();
+        let interaction = interaction_visual(ui, response.id, hovered, pressed);
+        ui.painter().set(
+            background,
+            egui::Shape::rect_filled(
+                rect.union(label_response.rect).expand2(vec2(5.0, 3.0)),
+                5.0,
+                interaction.overlay,
+            ),
+        );
 
         let painter = ui.painter();
         painter.add(
@@ -2026,11 +2049,8 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
                 4.0,
                 Stroke::new(
                     1.25,
-                    if response.hovered() || label_response.hovered() {
-                        theme::input_hover_stroke()
-                    } else {
-                        theme::check_stroke()
-                    },
+                    theme::check_stroke()
+                        .lerp_to_gamma(theme::input_hover_stroke(), interaction.hover_progress),
                 ),
                 egui::StrokeKind::Inside,
             );
@@ -2160,9 +2180,13 @@ fn pill_button(
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter();
     painter.rect_filled(rect, 7.0, fill);
-    if response.hovered() {
-        painter.rect_filled(rect, 7.0, interaction_overlay(&response));
-    }
+    let interaction = interaction_visual(
+        ui,
+        response.id,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    );
+    painter.rect_filled(rect, 7.0, interaction.overlay);
 
     let mut cursor_x = rect.min.x + 14.0;
     if let Some(glyph) = leading_icon {
@@ -2186,12 +2210,33 @@ fn pill_button(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn interaction_overlay(response: &egui::Response) -> Color32 {
-    if response.is_pointer_button_down_on() {
-        theme::control_pressed()
-    } else {
-        theme::control_hover()
+struct InteractionVisual {
+    overlay: Color32,
+    hover_progress: f32,
+}
+
+fn interaction_visual(ui: &Ui, id: egui::Id, hovered: bool, pressed: bool) -> InteractionVisual {
+    let hover_progress = ui.ctx().animate_bool_with_time(
+        id.with("control-hover"),
+        hovered,
+        CONTROL_HOVER_TRANSITION,
+    );
+    let press_progress = ui.ctx().animate_bool_with_time(
+        id.with("control-press"),
+        pressed,
+        CONTROL_PRESS_TRANSITION,
+    );
+
+    InteractionVisual {
+        overlay: interaction_overlay_color(hover_progress, press_progress),
+        hover_progress,
     }
+}
+
+fn interaction_overlay_color(hover_progress: f32, press_progress: f32) -> Color32 {
+    theme::control_hover()
+        .gamma_multiply(hover_progress)
+        .blend(theme::control_pressed().gamma_multiply(press_progress))
 }
 
 #[cfg(test)]
@@ -2200,6 +2245,17 @@ mod tests {
 
     const WIDTH: f64 = 380.0;
     const MARGIN: f64 = 8.0;
+
+    #[test]
+    fn interaction_overlay_fades_fully_to_transparent() {
+        let hidden = interaction_overlay_color(0.0, 0.0);
+        let hovered = interaction_overlay_color(1.0, 0.0);
+        let pressed = interaction_overlay_color(1.0, 1.0);
+
+        assert_eq!(hidden, Color32::TRANSPARENT);
+        assert!(hovered.a() > hidden.a());
+        assert!(pressed.a() > hovered.a());
+    }
 
     #[test]
     fn automatic_theme_follows_the_system() {
