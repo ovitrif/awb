@@ -322,7 +322,7 @@ impl App {
             .with_icon_as_template(true)
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
-            .with_tooltip("awb - Android Wireless Bridge")
+            .with_tooltip("awb - Android Wifi Bridge")
             .build()?;
 
         let status_ctx = ctx.clone();
@@ -1116,7 +1116,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.add(Label::new(semibold("awb", 15.0, theme::text_strong())).selectable(false));
                 ui.add(
-                    Label::new(regular("Android Wireless Bridge", 11.0, theme::text_soft()))
+                    Label::new(regular("Android Wifi Bridge", 11.0, theme::text_soft()))
                         .selectable(false),
                 );
             });

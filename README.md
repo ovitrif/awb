@@ -1,6 +1,6 @@
 # awb
 
-Android Wireless Bridge for macOS: pair, connect, and mirror Android phones over Wi-Fi
+Android Wifi Bridge for macOS: pair, connect, and mirror Android phones over Wi-Fi
 without remembering a single `adb` command.
 
 awb wraps Android's wireless debugging flow behind a QR code. Scan it with your phone and
