@@ -37,9 +37,10 @@ pub struct Raster {
 
 /// Menu bar icon: the glyph as a black template image, tightly fit to its
 /// bounds and rendered taller than its slot so macOS downscales it into a crisp
-/// white (dark mode) or black (light mode) status item. Width follows the
-/// glyph's aspect ratio so the Wi-Fi waves are not squeezed.
-pub fn menubar_icon(height: u32) -> Raster {
+/// white (dark mode) or black (light mode) status item. The disconnected state
+/// erodes the source glyph uniformly, retaining its geometry while making
+/// connection state readable through weight alone.
+pub fn menubar_icon(height: u32, connected: bool) -> Raster {
     let [gx, gy, gw, gh] = GLYPH_BOUNDS;
     let h = height as f32;
     let pad = h * 0.12;
@@ -53,6 +54,9 @@ pub fn menubar_icon(height: u32) -> Raster {
     let transform =
         Transform::from_scale(scale, scale).post_translate(pad - gx * scale, pad - gy * scale);
     fill_path(&mut pixmap, MENUBAR_GLYPH, Color::BLACK, transform);
+    if !connected {
+        erode_template(&mut pixmap, ((height as f32 * 0.04).round() as u32).max(1));
+    }
 
     Raster {
         width,
@@ -61,47 +65,96 @@ pub fn menubar_icon(height: u32) -> Raster {
     }
 }
 
-/// Side-by-side preview of how macOS recolors the menu bar template: white on a
-/// dark bar, black on a light bar. For `awb-app --render-menubar`.
+/// Preview of the disconnected (top) and connected (bottom) weights as macOS
+/// template images on dark and light menu bars. For `awb-app --render-menubar`.
 pub fn menubar_preview_png() -> Vec<u8> {
-    let icon = menubar_icon(36);
+    let disconnected = menubar_icon(36, false);
+    let connected = menubar_icon(36, true);
     let zoom = 6;
     let inset = 28;
-    let cell_w = icon.width * zoom + inset * 2;
-    let cell_h = icon.height * zoom + inset * 2;
+    let cell_w = connected.width * zoom + inset * 2;
+    let cell_h = connected.height * zoom + inset * 2;
 
-    let mut pixmap = Pixmap::new(cell_w * 2, cell_h).expect("preview pixmap");
-    fill_cell(&mut pixmap, 0.0, cell_w as f32, cell_h as f32, "#1D1D1F");
+    let mut pixmap = Pixmap::new(cell_w * 2, cell_h * 2).expect("preview pixmap");
+    fill_cell(
+        &mut pixmap,
+        0.0,
+        cell_w as f32,
+        (cell_h * 2) as f32,
+        "#1D1D1F",
+    );
     fill_cell(
         &mut pixmap,
         cell_w as f32,
         cell_w as f32,
-        cell_h as f32,
+        (cell_h * 2) as f32,
         "#ECECEE",
     );
 
     let paint = PixmapPaint::default();
-    let place = |dx: u32| {
-        Transform::from_scale(zoom as f32, zoom as f32).post_translate(dx as f32, inset as f32)
+    let place = |dx: u32, dy: u32| {
+        Transform::from_scale(zoom as f32, zoom as f32).post_translate(dx as f32, dy as f32)
     };
-    pixmap.draw_pixmap(
-        0,
-        0,
-        recolor(&icon, 0xFF).as_ref(),
-        &paint,
-        place(inset),
-        None,
-    );
-    pixmap.draw_pixmap(
-        0,
-        0,
-        recolor(&icon, 0x00).as_ref(),
-        &paint,
-        place(cell_w + inset),
-        None,
-    );
+    for (row, icon) in [&disconnected, &connected].into_iter().enumerate() {
+        let y = row as u32 * cell_h + inset;
+        pixmap.draw_pixmap(
+            0,
+            0,
+            recolor(icon, 0xFF).as_ref(),
+            &paint,
+            place(inset, y),
+            None,
+        );
+        pixmap.draw_pixmap(
+            0,
+            0,
+            recolor(icon, 0x00).as_ref(),
+            &paint,
+            place(cell_w + inset, y),
+            None,
+        );
+    }
 
     pixmap.encode_png().expect("preview png")
+}
+
+fn erode_template(pixmap: &mut Pixmap, radius: u32) {
+    let source = pixmap.data().to_vec();
+    let width = pixmap.width() as i32;
+    let height = pixmap.height() as i32;
+    let radius = radius as i32;
+
+    for y in 0..height {
+        for x in 0..width {
+            let mut alpha = u8::MAX;
+            'neighbors: for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx * dx + dy * dy > radius * radius {
+                        continue;
+                    }
+                    let neighbor_x = x + dx;
+                    let neighbor_y = y + dy;
+                    if neighbor_x < 0
+                        || neighbor_y < 0
+                        || neighbor_x >= width
+                        || neighbor_y >= height
+                    {
+                        alpha = 0;
+                        break 'neighbors;
+                    }
+                    let index = ((neighbor_y * width + neighbor_x) * 4 + 3) as usize;
+                    alpha = alpha.min(source[index]);
+                    if alpha == 0 {
+                        break 'neighbors;
+                    }
+                }
+            }
+
+            let index = (y * width + x) as usize;
+            pixmap.pixels_mut()[index] =
+                PremultipliedColorU8::from_rgba(0, 0, 0, alpha).expect("valid template pixel");
+        }
+    }
 }
 
 fn recolor(icon: &Raster, level: u8) -> Pixmap {
@@ -445,5 +498,22 @@ mod tests {
         assert_eq!((day.width, day.height), (380, 349));
         assert_eq!((night.width, night.height), (380, 349));
         assert_ne!(day.rgba, night.rgba);
+    }
+
+    #[test]
+    fn disconnected_menu_icon_preserves_size_with_lighter_weight() {
+        let disconnected = menubar_icon(44, false);
+        let connected = menubar_icon(44, true);
+        let alpha_coverage = |raster: &Raster| {
+            raster
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| u64::from(pixel[3]))
+                .sum::<u64>()
+        };
+
+        assert_eq!(disconnected.width, connected.width);
+        assert_eq!(disconnected.height, connected.height);
+        assert!(alpha_coverage(&disconnected) < alpha_coverage(&connected));
     }
 }

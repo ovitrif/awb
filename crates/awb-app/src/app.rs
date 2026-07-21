@@ -10,7 +10,9 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as ph;
 use menu_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use menu_icon::{MenuBarIcon, MenuBarIconBuilder, MenuBarIconEvent, MouseButton, MouseButtonState};
+use menu_icon::{
+    Icon, MenuBarIcon, MenuBarIconBuilder, MenuBarIconEvent, MouseButton, MouseButtonState,
+};
 
 use crate::backend::{self, PairingPhase, PairingProgress, Shared, Snapshot};
 use crate::config::{Settings, ThemeMode};
@@ -264,6 +266,7 @@ pub struct App {
     day_shell: TextureHandle,
     night_shell: TextureHandle,
     status_icon: MenuBarIcon,
+    menu_icon_connected: bool,
     show_item: MenuItem,
     pair_id: MenuId,
     refresh_id: MenuId,
@@ -313,9 +316,7 @@ impl App {
             &quit_item,
         ])?;
 
-        let icon_raster = glyph::menubar_icon(44);
-        let icon =
-            menu_icon::Icon::from_rgba(icon_raster.rgba, icon_raster.width, icon_raster.height)?;
+        let icon = menu_bar_icon(false)?;
         let status_icon = MenuBarIconBuilder::new()
             .with_icon(icon)
             .with_icon_as_template(true)
@@ -353,6 +354,7 @@ impl App {
             day_shell,
             night_shell,
             status_icon,
+            menu_icon_connected: false,
             show_item,
             pair_id: pair_item.id().clone(),
             refresh_id: refresh_item.id().clone(),
@@ -615,6 +617,29 @@ impl App {
             }
         }
     }
+
+    fn sync_menu_icon(&mut self) {
+        let connected = self
+            .shared
+            .lock()
+            .unwrap()
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| has_ready_device(&snapshot.devices));
+        if connected == self.menu_icon_connected {
+            return;
+        }
+
+        let result = menu_bar_icon(connected)
+            .and_then(|icon| self.status_icon.set_icon(Some(icon)).map_err(Into::into));
+        self.menu_icon_connected = connected;
+        if let Err(error) = result {
+            self.shared
+                .lock()
+                .unwrap()
+                .log(format!("Menu bar icon update failed: {error:#}"));
+        }
+    }
 }
 
 fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
@@ -623,6 +648,15 @@ fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
         .filter(|device| device.ready)
         .map(|device| device.mirror_key.as_str())
         .collect()
+}
+
+fn has_ready_device(devices: &[backend::DeviceInfo]) -> bool {
+    devices.iter().any(|device| device.ready)
+}
+
+fn menu_bar_icon(connected: bool) -> anyhow::Result<Icon> {
+    let raster = glyph::menubar_icon(44, connected);
+    Ok(Icon::from_rgba(raster.rgba, raster.width, raster.height)?)
 }
 
 fn load_shell_texture(ctx: &Context, name: &str, appearance: theme::Appearance) -> TextureHandle {
@@ -938,24 +972,22 @@ impl eframe::App for App {
         self.handle_focus(ctx);
         self.update_popover_transition(ctx);
 
-        // Poll while the popover is open, or in the background when auto-mirror
-        // must watch for newly connected phones.
-        let watching = self.visible || self.settings.auto_mirror;
-        if watching && self.last_poll.elapsed() > STATUS_POLL {
+        // Keep device state current in the background so the menu bar icon
+        // always reflects whether a ready device is connected.
+        if self.last_poll.elapsed() > STATUS_POLL {
             self.last_poll = Instant::now();
             backend::refresh_status(self.shared.clone(), ctx.clone());
         }
 
         self.maybe_auto_mirror(ctx);
+        self.sync_menu_icon();
 
-        if watching {
-            let interval = if self.visible {
-                Duration::from_secs(1)
-            } else {
-                STATUS_POLL
-            };
-            ctx.request_repaint_after(interval);
-        }
+        let interval = if self.visible {
+            Duration::from_secs(1)
+        } else {
+            STATUS_POLL
+        };
+        ctx.request_repaint_after(interval);
 
         let pairing_done = {
             let state = self.shared.lock().unwrap();
@@ -2328,6 +2360,16 @@ mod tests {
 
         assert!(keys.contains("adb-ready._adb-tls-connect._tcp"));
         assert!(!keys.contains("adb-offline._adb-tls-connect._tcp"));
+    }
+
+    #[test]
+    fn menu_connection_state_uses_ready_devices() {
+        let offline = device_info("adb-offline._adb-tls-connect._tcp", false);
+        let ready = device_info("adb-ready._adb-tls-connect._tcp", true);
+
+        assert!(!has_ready_device(&[]));
+        assert!(!has_ready_device(std::slice::from_ref(&offline)));
+        assert!(has_ready_device(&[offline, ready]));
     }
 
     #[test]
