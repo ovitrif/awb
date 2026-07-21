@@ -13,13 +13,12 @@ use crate::theme::Appearance;
 /// dome bottom sits at y=75 and the outer Wi-Fi wave peaks at y=24.
 const GLYPH_BOUNDS: [f32; 4] = [9.81, 24.0, 80.38, 51.0];
 
-/// Monochrome menu bar glyph: dome with punched-out eyes under two Wi-Fi arcs.
-const MENUBAR_GLYPH: &str = "M25 75a25 25 0 0 1 50 0z m-4.94-23.4a38 38 0 0 1 59.88 0l-5.51 4.31a31 31 0 0 0-48.86 0z m-10.25-8a51 51 0 0 1 80.38 0l-5.52 4.31a44 44 0 0 0-69.34 0z m28.69 19.4a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z m16 0a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z";
-
 /// Colored logo: green head with punched eyes, blue Wi-Fi waves.
 const LOGO_HEAD: &str = "M25 75a25 25 0 0 1 50 0z m13.5-12a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z m16 0a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z";
 const LOGO_WAVE_1: &str = "M20.06 51.6a38 38 0 0 1 59.88 0l-5.51 4.31a31 31 0 0 0-48.86 0z";
 const LOGO_WAVE_2: &str = "M9.81 43.6a51 51 0 0 1 80.38 0l-5.52 4.31a44 44 0 0 0-69.34 0z";
+const DISCONNECTED_WAVE_1: &str = "M20.06 51.6a38 38 0 0 1 59.88 0l-3.94 3.08a33 33 0 0 0-52.02 0z";
+const DISCONNECTED_WAVE_2: &str = "M9.81 43.6a51 51 0 0 1 80.38 0l-3.94 3.08a46 46 0 0 0-72.5 0z";
 
 /// Popover shell: a 380x349 rounded body with a beak pointing up at the menu
 /// bar icon. Coordinates match the `Shell Shape` path in DESIGN.pen.
@@ -38,8 +37,8 @@ pub struct Raster {
 /// Menu bar icon: the glyph as a black template image, tightly fit to its
 /// bounds and rendered taller than its slot so macOS downscales it into a crisp
 /// white (dark mode) or black (light mode) status item. The disconnected state
-/// keeps the source weight fully readable while the connected state expands the
-/// Wi-Fi arcs uniformly, making connection state readable through weight alone.
+/// uses narrower, fully opaque Wi-Fi arcs while the connected state retains the
+/// original wave weight, making connection state readable without a faint icon.
 pub fn menubar_icon(height: u32, connected: bool) -> Raster {
     let [gx, gy, gw, gh] = GLYPH_BOUNDS;
     let h = height as f32;
@@ -53,21 +52,14 @@ pub fn menubar_icon(height: u32, connected: bool) -> Raster {
     let mut pixmap = Pixmap::new(width, height).expect("menu bar icon pixmap");
     let transform =
         Transform::from_scale(scale, scale).post_translate(pad - gx * scale, pad - gy * scale);
-    fill_path(&mut pixmap, MENUBAR_GLYPH, Color::BLACK, transform);
-    if connected {
-        let mut waves = Pixmap::new(width, height).expect("menu bar wave pixmap");
-        fill_path(&mut waves, LOGO_WAVE_1, Color::BLACK, transform);
-        fill_path(&mut waves, LOGO_WAVE_2, Color::BLACK, transform);
-        dilate_template(&mut waves, ((height as f32 * 0.02).round() as u32).max(1));
-        pixmap.draw_pixmap(
-            0,
-            0,
-            waves.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        );
-    }
+    fill_path(&mut pixmap, LOGO_HEAD, Color::BLACK, transform);
+    let (wave_1, wave_2) = if connected {
+        (LOGO_WAVE_1, LOGO_WAVE_2)
+    } else {
+        (DISCONNECTED_WAVE_1, DISCONNECTED_WAVE_2)
+    };
+    fill_path(&mut pixmap, wave_1, Color::BLACK, transform);
+    fill_path(&mut pixmap, wave_2, Color::BLACK, transform);
 
     Raster {
         width,
@@ -127,41 +119,6 @@ pub fn menubar_preview_png() -> Vec<u8> {
     }
 
     pixmap.encode_png().expect("preview png")
-}
-
-fn dilate_template(pixmap: &mut Pixmap, radius: u32) {
-    let source = pixmap.data().to_vec();
-    let width = pixmap.width() as i32;
-    let height = pixmap.height() as i32;
-    let radius = radius as i32;
-
-    for y in 0..height {
-        for x in 0..width {
-            let mut alpha = 0;
-            for dy in -radius..=radius {
-                for dx in -radius..=radius {
-                    if dx * dx + dy * dy > radius * radius {
-                        continue;
-                    }
-                    let neighbor_x = x + dx;
-                    let neighbor_y = y + dy;
-                    if neighbor_x < 0
-                        || neighbor_y < 0
-                        || neighbor_x >= width
-                        || neighbor_y >= height
-                    {
-                        continue;
-                    }
-                    let index = ((neighbor_y * width + neighbor_x) * 4 + 3) as usize;
-                    alpha = alpha.max(source[index]);
-                }
-            }
-
-            let index = (y * width + x) as usize;
-            pixmap.pixels_mut()[index] =
-                PremultipliedColorU8::from_rgba(0, 0, 0, alpha).expect("valid template pixel");
-        }
-    }
 }
 
 fn recolor(icon: &Raster, level: u8) -> Pixmap {
