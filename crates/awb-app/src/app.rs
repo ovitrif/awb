@@ -1201,11 +1201,13 @@ impl App {
             logs.join("\n")
         };
 
-        ui.add_space(8.0);
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // Keep breathing room in the resting state while letting
+                // scrolled output disappear directly beneath the tab divider.
+                ui.add_space(8.0);
                 ui.add(
                     TextEdit::multiline(&mut log_text)
                         .desired_width(f32::INFINITY)
@@ -1529,7 +1531,18 @@ impl RowAction {
 }
 
 fn icon_button(ui: &mut Ui, glyph: &str, size: f32, color: Color32) -> egui::Response {
+    let background = ui.painter().add(egui::Shape::Noop);
     let response = ui.add(Button::new(icon(glyph, size, color)).frame(false));
+    if response.hovered() {
+        ui.painter().set(
+            background,
+            egui::Shape::rect_filled(
+                response.rect.expand(4.0),
+                6.0,
+                interaction_overlay(&response),
+            ),
+        );
+    }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -1542,7 +1555,18 @@ fn tab_item(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
 
     let response = ui
         .vertical(|ui| {
+            let background = ui.painter().add(egui::Shape::Noop);
             let response = ui.add(Label::new(text).selectable(false).sense(Sense::click()));
+            if response.hovered() {
+                ui.painter().set(
+                    background,
+                    egui::Shape::rect_filled(
+                        response.rect.expand2(vec2(6.0, 4.0)),
+                        5.0,
+                        interaction_overlay(&response),
+                    ),
+                );
+            }
             ui.add_space(6.0);
             let (rect, _) =
                 ui.allocate_exact_size(vec2(response.rect.width(), 2.0), Sense::hover());
@@ -1600,6 +1624,10 @@ fn list_row(
                     },
                 );
                 ui.painter().rect_filled(rect, 6.0, theme::surface());
+                if response.hovered() {
+                    ui.painter()
+                        .rect_filled(rect, 6.0, interaction_overlay(&response));
+                }
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -1850,25 +1878,46 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
                 .show(ui, |ui| {
                     for (mode, label) in modes {
                         let active = *selected == mode;
-                        let text = if active {
-                            semibold(label, 11.5, theme::text_strong())
-                        } else {
-                            medium(label, 11.5, theme::text_muted())
-                        };
-                        let response = ui.add_sized(
-                            [56.0, 24.0],
-                            Button::new(text)
-                                .fill(if active {
-                                    theme::segment_selected()
-                                } else {
-                                    Color32::TRANSPARENT
-                                })
-                                .stroke(if active {
-                                    Stroke::new(1.0, theme::segment_selected_stroke())
-                                } else {
-                                    Stroke::NONE
-                                })
-                                .corner_radius(CornerRadius::same(6)),
+                        let (rect, response) =
+                            ui.allocate_exact_size(vec2(56.0, 24.0), Sense::click());
+                        if active {
+                            ui.painter()
+                                .rect_filled(rect, 6.0, theme::segment_selected());
+                        }
+                        if response.hovered() {
+                            ui.painter()
+                                .rect_filled(rect, 6.0, interaction_overlay(&response));
+                        }
+                        if active {
+                            ui.painter().rect_stroke(
+                                rect,
+                                6.0,
+                                Stroke::new(1.0, theme::segment_selected_stroke()),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            label,
+                            FontId::new(
+                                11.5,
+                                FontFamily::Name(
+                                    if active {
+                                        theme::SEMIBOLD
+                                    } else {
+                                        theme::MEDIUM
+                                    }
+                                    .into(),
+                                ),
+                            ),
+                            if active {
+                                theme::text_strong()
+                            } else if response.hovered() {
+                                theme::text_bright()
+                            } else {
+                                theme::text_muted()
+                            },
                         );
                         if response.clicked() && !active {
                             *selected = mode;
@@ -1887,6 +1936,7 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
     let mut changed = false;
 
     ui.horizontal(|ui| {
+        let background = ui.painter().add(egui::Shape::Noop);
         let (rect, response) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
@@ -1898,6 +1948,23 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
                     .sense(Sense::click()),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+        if response.hovered() || label_response.hovered() {
+            ui.painter().set(
+                background,
+                egui::Shape::rect_filled(
+                    rect.union(label_response.rect).expand2(vec2(5.0, 3.0)),
+                    5.0,
+                    if response.is_pointer_button_down_on()
+                        || label_response.is_pointer_button_down_on()
+                    {
+                        theme::control_pressed()
+                    } else {
+                        theme::control_hover()
+                    },
+                ),
+            );
+        }
 
         let painter = ui.painter();
         painter.add(
@@ -2059,6 +2126,9 @@ fn pill_button(
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter();
     painter.rect_filled(rect, 7.0, fill);
+    if response.hovered() {
+        painter.rect_filled(rect, 7.0, interaction_overlay(&response));
+    }
 
     let mut cursor_x = rect.min.x + 14.0;
     if let Some(glyph) = leading_icon {
@@ -2080,6 +2150,14 @@ fn pill_button(
     );
 
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn interaction_overlay(response: &egui::Response) -> Color32 {
+    if response.is_pointer_button_down_on() {
+        theme::control_pressed()
+    } else {
+        theme::control_hover()
+    }
 }
 
 #[cfg(test)]
