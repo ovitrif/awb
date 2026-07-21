@@ -27,6 +27,7 @@ const SHELL_W: f32 = 380.0;
 const SHELL_H: f32 = 349.0;
 
 const VIEWBOX: f32 = 100.0;
+const APP_ICON_GLYPH_SCALE: f32 = 0.98;
 
 pub struct Raster {
     pub width: u32,
@@ -374,7 +375,7 @@ pub fn app_icon_png(size: u32) -> Vec<u8> {
 
     // Glyph: 100-unit viewBox (content spans x 10-90, y 24-75) optically
     // centered around the glow.
-    let glyph_scale = tile * 0.62 / VIEWBOX;
+    let glyph_scale = tile * APP_ICON_GLYPH_SCALE / VIEWBOX;
     let offset_x = tile * 0.5 - 50.0 * glyph_scale;
     let offset_y = tile * 0.46 - 49.5 * glyph_scale;
     let transform =
@@ -453,6 +454,15 @@ fn fill_with_paint(pixmap: &mut Pixmap, svg_path: &str, paint: &Paint, transform
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_icon_glyph_uses_the_tile_footprint() {
+        let width_fraction = GLYPH_BOUNDS[2] * APP_ICON_GLYPH_SCALE / VIEWBOX;
+        let height_fraction = GLYPH_BOUNDS[3] * APP_ICON_GLYPH_SCALE / VIEWBOX;
+
+        assert!(width_fraction >= 0.75);
+        assert!(height_fraction >= 0.48);
+    }
 
     #[test]
     fn day_and_night_shells_share_geometry_but_not_pixels() {
