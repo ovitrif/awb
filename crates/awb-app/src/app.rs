@@ -338,7 +338,11 @@ impl App {
         }));
 
         let shared = Arc::new(Mutex::new(Shared::default()));
-        backend::refresh_status(shared.clone(), ctx.clone());
+        if needs_full_status_refresh(false, settings.auto_mirror) {
+            backend::refresh_status(shared.clone(), ctx.clone());
+        } else {
+            backend::refresh_connection_state(shared.clone(), ctx.clone());
+        }
 
         let width_text = settings.window_width.to_string();
         let height_text = settings.window_height.to_string();
@@ -647,6 +651,10 @@ fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
 fn menu_bar_icon(connected: bool) -> anyhow::Result<Icon> {
     let raster = glyph::menubar_icon(44, connected);
     Ok(Icon::from_rgba(raster.rgba, raster.width, raster.height)?)
+}
+
+fn needs_full_status_refresh(visible: bool, auto_mirror: bool) -> bool {
+    visible || auto_mirror
 }
 
 fn load_shell_texture(ctx: &Context, name: &str, appearance: theme::Appearance) -> TextureHandle {
@@ -966,7 +974,7 @@ impl eframe::App for App {
         // a lightweight ADB-only probe is enough to update the menu bar icon.
         if self.last_poll.elapsed() > STATUS_POLL {
             self.last_poll = Instant::now();
-            if self.visible || self.settings.auto_mirror {
+            if needs_full_status_refresh(self.visible, self.settings.auto_mirror) {
                 backend::refresh_status(self.shared.clone(), ctx.clone());
             } else {
                 backend::refresh_connection_state(self.shared.clone(), ctx.clone());
@@ -2354,6 +2362,13 @@ mod tests {
 
         assert!(keys.contains("adb-ready._adb-tls-connect._tcp"));
         assert!(!keys.contains("adb-offline._adb-tls-connect._tcp"));
+    }
+
+    #[test]
+    fn hidden_launch_uses_lightweight_status_refresh_without_auto_mirror() {
+        assert!(!needs_full_status_refresh(false, false));
+        assert!(needs_full_status_refresh(true, false));
+        assert!(needs_full_status_refresh(false, true));
     }
 
     #[test]
