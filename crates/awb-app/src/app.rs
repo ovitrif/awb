@@ -630,14 +630,21 @@ impl App {
             return;
         }
 
-        let result = menu_bar_icon(connected)
-            .and_then(|icon| self.status_icon.set_icon(Some(icon)).map_err(Into::into));
-        self.menu_icon_connected = connected;
-        if let Err(error) = result {
-            self.shared
-                .lock()
-                .unwrap()
-                .log(format!("Menu bar icon update failed: {error:#}"));
+        // `set_icon` clears the template flag on macOS, leaving a fixed black
+        // glyph after the connection state changes. Keep every replacement a
+        // template so AppKit recolors it when the menu-bar appearance changes.
+        match menu_bar_icon(connected).and_then(|icon| {
+            self.status_icon
+                .set_icon_with_as_template(Some(icon), true)
+                .map_err(Into::into)
+        }) {
+            Ok(()) => self.menu_icon_connected = connected,
+            Err(error) => {
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .log(format!("Menu bar icon update failed: {error:#}"));
+            }
         }
     }
 }
