@@ -26,7 +26,7 @@ tools match the source and the running menu bar app is not left stale:
 - `rtk cargo build --release`
 - `rtk proxy install -m 755 target/release/awb /Users/ovitrif/.local/bin/awb`
 - `rtk proxy install -m 755 target/release/awb-app /Users/ovitrif/.local/bin/awb-app`
-- Rebundle the app: `rtk proxy scripts/bundle-app.sh target/release/awb-app target/bundle`, then refresh `/Applications/AWB.app` from `target/bundle/AWB.app`.
+- Rebundle the app: `rtk proxy scripts/bundle-app.sh target/release/awb-app target/bundle`, then refresh `/Applications/Android Wifi Bridge.app` from `target/bundle/Android Wifi Bridge.app`.
 - Replace the running instance (overwriting the binary does not update an already-running process): `rtk proxy pkill -9 -f awb-app`, then relaunch `awb app`.
 - Verify: `rtk proxy /Users/ovitrif/.local/bin/awb --version`.
 

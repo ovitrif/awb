@@ -40,6 +40,8 @@ struct Palette {
     input_focus_stroke: Color32,
     check_stroke: Color32,
     control_shadow: Color32,
+    control_hover: Color32,
+    control_pressed: Color32,
     segment_bg: Color32,
     segment_selected: Color32,
     segment_selected_stroke: Color32,
@@ -73,6 +75,8 @@ impl Palette {
             input_focus_stroke: mix(from.input_focus_stroke, to.input_focus_stroke),
             check_stroke: mix(from.check_stroke, to.check_stroke),
             control_shadow: mix(from.control_shadow, to.control_shadow),
+            control_hover: mix(from.control_hover, to.control_hover),
+            control_pressed: mix(from.control_pressed, to.control_pressed),
             segment_bg: mix(from.segment_bg, to.segment_bg),
             segment_selected: mix(from.segment_selected, to.segment_selected),
             segment_selected_stroke: mix(from.segment_selected_stroke, to.segment_selected_stroke),
@@ -118,6 +122,8 @@ const NIGHT: Palette = Palette {
     input_focus_stroke: Color32::from_rgb(0x4D, 0x9F, 0xF5),
     check_stroke: Color32::from_rgba_premultiplied(0x26, 0x26, 0x26, 0x26),
     control_shadow: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x28),
+    control_hover: Color32::from_rgba_premultiplied(0x18, 0x18, 0x18, 0x18),
+    control_pressed: Color32::from_rgba_premultiplied(0x25, 0x25, 0x25, 0x25),
     segment_bg: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x2E),
     segment_selected: Color32::from_rgba_premultiplied(0x20, 0x20, 0x20, 0x20),
     segment_selected_stroke: Color32::from_rgba_premultiplied(0x34, 0x34, 0x34, 0x34),
@@ -148,6 +154,8 @@ const DAY: Palette = Palette {
     input_focus_stroke: Color32::from_rgb(0x3E, 0x8F, 0xE8),
     check_stroke: Color32::from_rgb(0x89, 0x99, 0xAC),
     control_shadow: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x16),
+    control_hover: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x0C),
+    control_pressed: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x18),
     segment_bg: Color32::from_rgb(0xE3, 0xE9, 0xF2),
     segment_selected: Color32::WHITE,
     segment_selected_stroke: Color32::from_rgb(0xC4, 0xCE, 0xDB),
@@ -210,6 +218,8 @@ color_token!(input_hover_stroke, input_hover_stroke);
 color_token!(input_focus_stroke, input_focus_stroke);
 color_token!(check_stroke, check_stroke);
 color_token!(control_shadow, control_shadow);
+color_token!(control_hover, control_hover);
+color_token!(control_pressed, control_pressed);
 color_token!(segment_bg, segment_bg);
 color_token!(segment_selected, segment_selected);
 color_token!(segment_selected_stroke, segment_selected_stroke);

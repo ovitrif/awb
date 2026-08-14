@@ -1,5 +1,5 @@
 #!/bin/sh
-# Wraps the awb-app binary into AWB.app (menu bar agent, no Dock icon).
+# Wraps the awb-app binary into Android Wifi Bridge.app (menu bar agent, no Dock icon).
 # Usage: scripts/bundle-app.sh [app-binary] [output-dir] [icon-renderer]
 #
 # icon-renderer defaults to app-binary, but can be a host-architecture build so
@@ -21,8 +21,9 @@ if [ ! -x "$ICON_BIN" ]; then
   exit 1
 fi
 
-APP="${OUT_DIR}/AWB.app"
-rm -rf "$APP"
+APP="${OUT_DIR}/Android Wifi Bridge.app"
+LEGACY_APP="${OUT_DIR}/AWB.app"
+rm -rf "$APP" "$LEGACY_APP"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
 cp "$APP_BIN" "${APP}/Contents/MacOS/awb-app"
@@ -43,8 +44,8 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>awb-app</string>
   <key>CFBundleIconFile</key><string>awb</string>
   <key>CFBundleIdentifier</key><string>com.ovitrif.awb</string>
-  <key>CFBundleName</key><string>AWB</string>
-  <key>CFBundleDisplayName</key><string>AWB</string>
+  <key>CFBundleName</key><string>Android Wifi Bridge</string>
+  <key>CFBundleDisplayName</key><string>Android Wifi Bridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
