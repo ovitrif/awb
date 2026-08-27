@@ -1,6 +1,6 @@
 [package]
 name = "awb-core"
-description = "Shared ADB wireless debugging, scrcpy, and QR pairing logic for awb."
+description = "Shared ADB, Android emulator, scrcpy, and QR pairing logic for awb."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

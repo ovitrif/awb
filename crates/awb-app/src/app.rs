@@ -1120,11 +1120,11 @@ impl App {
     }
 
     fn devices_tab(&mut self, ui: &mut Ui, ctx: &Context) {
-        let (snapshot, mirrors): (Option<Snapshot>, Vec<String>) = {
+        let (snapshot, mirrors, starting_avds): (Option<Snapshot>, Vec<String>, HashSet<String>) = {
             let state = self.shared.lock().unwrap();
             let mut mirrors = state.mirrors.keys().cloned().collect::<Vec<_>>();
             mirrors.extend(state.starting_mirrors.iter().cloned());
-            (state.snapshot.clone(), mirrors)
+            (state.snapshot.clone(), mirrors, state.starting_avds.clone())
         };
 
         let Some(snapshot) = snapshot else {
@@ -1139,7 +1139,7 @@ impl App {
             return;
         };
 
-        if snapshot.devices.is_empty() {
+        if snapshot.devices.is_empty() && snapshot.avds.is_empty() {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
                 ui.add(Label::new(regular(
@@ -1158,38 +1158,70 @@ impl App {
         }
 
         let scrcpy_ok = snapshot.scrcpy.available;
-        for (index, device) in snapshot.devices.iter().enumerate() {
-            if index > 0 {
-                divider(ui);
-            }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (index, device) in snapshot.devices.iter().enumerate() {
+                    if index > 0 {
+                        divider(ui);
+                    }
 
-            let mirroring = mirrors.contains(&device.mirror_key);
-            let action = if mirroring {
-                RowAction::enabled(ph::STOP, theme::green())
-            } else if device.ready && scrcpy_ok {
-                RowAction::enabled(ph::PLAY, theme::text_bright())
-            } else {
-                RowAction::disabled(ph::PLAY)
-            };
-            let detail = if device.ready {
-                device.serial.clone()
-            } else {
-                format!("{} · {}", device.serial, device.state)
-            };
+                    let mirroring = mirrors.contains(&device.mirror_key);
+                    let action = if mirroring {
+                        RowAction::enabled(ph::STOP, theme::green())
+                    } else if device.ready && scrcpy_ok {
+                        RowAction::enabled(ph::PLAY, theme::text_bright())
+                    } else {
+                        RowAction::disabled(ph::PLAY)
+                    };
+                    let detail = if device.ready {
+                        device.serial.clone()
+                    } else {
+                        format!("{} · {}", device.serial, device.state)
+                    };
 
-            if list_row(ui, ph::DEVICE_MOBILE, &device.name, &detail, Some(action)).clicked() {
-                if mirroring {
-                    backend::stop_mirror(&self.shared, &device.mirror_key);
-                } else {
-                    backend::start_mirror(
-                        self.shared.clone(),
-                        ctx.clone(),
-                        device.clone(),
-                        self.settings.scrcpy_options(),
-                    );
+                    let row_icon = if device.is_emulator {
+                        ph::DESKTOP
+                    } else {
+                        ph::DEVICE_MOBILE
+                    };
+                    if list_row(ui, row_icon, &device.name, &detail, Some(action)).clicked() {
+                        if mirroring {
+                            backend::stop_mirror(&self.shared, &device.mirror_key);
+                        } else {
+                            backend::start_mirror(
+                                self.shared.clone(),
+                                ctx.clone(),
+                                device.clone(),
+                                self.settings.scrcpy_options(),
+                            );
+                        }
+                    }
                 }
-            }
-        }
+
+                for (index, avd) in snapshot.avds.iter().enumerate() {
+                    if index > 0 || !snapshot.devices.is_empty() {
+                        divider(ui);
+                    }
+
+                    let starting = starting_avds.contains(avd);
+                    let action = if starting {
+                        RowAction::disabled(ph::PLAY)
+                    } else {
+                        RowAction::enabled(ph::PLAY, theme::text_bright())
+                    };
+                    let name = avd.replace('_', " ");
+                    let detail = if starting {
+                        "Starting…"
+                    } else {
+                        "Android Virtual Device"
+                    };
+
+                    if list_row(ui, ph::DESKTOP, &name, detail, Some(action)).clicked() {
+                        backend::start_avd(self.shared.clone(), ctx.clone(), avd.clone());
+                    }
+                }
+            });
     }
 
     fn logs_tab(&mut self, ui: &mut Ui) {
@@ -1347,12 +1379,18 @@ impl App {
                 );
 
                 let snapshot = self.shared.lock().unwrap().snapshot.clone();
-                let (adb, scrcpy) = match &snapshot {
-                    Some(snapshot) => (Some(&snapshot.adb), Some(&snapshot.scrcpy)),
-                    None => (None, None),
+                let (adb, emulator, scrcpy) = match &snapshot {
+                    Some(snapshot) => (
+                        Some(&snapshot.adb),
+                        Some(&snapshot.emulator),
+                        Some(&snapshot.scrcpy),
+                    ),
+                    None => (None, None, None),
                 };
 
                 dependency_row(ui, ph::TERMINAL_WINDOW, "ADB", adb);
+                divider(ui);
+                dependency_row(ui, ph::DESKTOP, "Android Emulator", emulator);
                 divider(ui);
                 dependency_row(ui, ph::MONITOR_PLAY, "scrcpy", scrcpy);
             });
@@ -1682,7 +1720,7 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
 
         let frame = Frame::new()
             .fill(theme::input_bg())
-            .stroke(Stroke::new(1.0, Color32::TRANSPARENT))
+            .stroke(Stroke::new(1.0_f32, Color32::TRANSPARENT))
             .shadow(Shadow {
                 offset: [0, 1],
                 blur: 4,
@@ -1704,11 +1742,11 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
             )
         });
         let (stroke_width, stroke_color) = if output.inner.has_focus() {
-            (1.5, theme::input_focus_stroke())
+            (1.5_f32, theme::input_focus_stroke())
         } else if output.response.hovered() || output.inner.hovered() {
-            (1.0, theme::input_hover_stroke())
+            (1.0_f32, theme::input_hover_stroke())
         } else {
-            (1.0, theme::input_stroke())
+            (1.0_f32, theme::input_stroke())
         };
         ui.painter().rect_stroke(
             output.response.rect,
@@ -1838,7 +1876,7 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
         |ui| {
             Frame::new()
                 .fill(theme::segment_bg())
-                .stroke(Stroke::new(1.0, theme::input_stroke()))
+                .stroke(Stroke::new(1.0_f32, theme::input_stroke()))
                 .shadow(Shadow {
                     offset: [0, 1],
                     blur: 4,
@@ -1864,7 +1902,7 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
                                     Color32::TRANSPARENT
                                 })
                                 .stroke(if active {
-                                    Stroke::new(1.0, theme::segment_selected_stroke())
+                                    Stroke::new(1.0_f32, theme::segment_selected_stroke())
                                 } else {
                                     Stroke::NONE
                                 })
@@ -1924,7 +1962,7 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
                 rect,
                 4.0,
                 Stroke::new(
-                    1.25,
+                    1.25_f32,
                     if response.hovered() || label_response.hovered() {
                         theme::input_hover_stroke()
                     } else {

@@ -1,6 +1,7 @@
 pub mod adb;
 pub mod command_path;
 pub mod dnssd;
+pub mod emulator;
 pub mod pairing;
 pub mod pairing_flow;
 pub mod qr;

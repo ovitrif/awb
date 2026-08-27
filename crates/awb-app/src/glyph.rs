@@ -109,7 +109,7 @@ fn recolor(icon: &Raster, level: u8) -> Pixmap {
     for (pixel, chunk) in pixmap
         .pixels_mut()
         .iter_mut()
-        .zip(icon.rgba.chunks_exact(4))
+        .zip(icon.rgba.as_chunks::<4>().0)
     {
         let alpha = chunk[3];
         let value = ((u16::from(level) * u16::from(alpha)) / 255) as u8;

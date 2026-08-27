@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use awb_core::adb::{self, Adb};
+use awb_core::emulator::Emulator;
 use awb_core::pairing_flow::{
     self, AlreadyConnectedChoice, PairingEvent, PairingFlowDelegate, PairingProgressKind,
 };
@@ -43,8 +44,10 @@ pub struct DeviceInfo {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub adb: ToolInfo,
+    pub emulator: ToolInfo,
     pub scrcpy: ToolInfo,
     pub devices: Vec<DeviceInfo>,
+    pub avds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +78,7 @@ pub struct Shared {
     pub pairing: Option<PairingSession>,
     pub mirrors: HashMap<String, Child>,
     pub starting_mirrors: HashSet<String>,
+    pub starting_avds: HashSet<String>,
 }
 
 impl Shared {
@@ -170,6 +174,36 @@ pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
 }
 
 fn collect_snapshot() -> Snapshot {
+    let emulator_handle = Emulator::resolve(None);
+    let (emulator_info, avds) = match &emulator_handle {
+        Ok(emulator) => match emulator.list_avds() {
+            Ok(avds) => (
+                ToolInfo {
+                    available: true,
+                    detail: emulator.path().display().to_string(),
+                    warnings: Vec::new(),
+                },
+                avds,
+            ),
+            Err(error) => (
+                ToolInfo {
+                    available: false,
+                    detail: format!("{error:#}"),
+                    warnings: Vec::new(),
+                },
+                Vec::new(),
+            ),
+        },
+        Err(error) => (
+            ToolInfo {
+                available: false,
+                detail: format!("{error:#}"),
+                warnings: Vec::new(),
+            },
+            Vec::new(),
+        ),
+    };
+
     let _adb_work = ADB_WORK_LOCK.lock().unwrap();
     let adb_handle = Adb::resolve(None);
 
@@ -222,37 +256,55 @@ fn collect_snapshot() -> Snapshot {
         },
     };
 
-    let devices = adb_handle
+    let (devices, running_avds) = adb_handle
+        .as_ref()
         .ok()
         .filter(|_| adb_info.available)
         .and_then(|adb| {
             let devices = adb.devices().ok()?;
+            let running_avds = devices
+                .iter()
+                .filter(|device| {
+                    device.state == adb::DeviceState::Device
+                        && device.serial.starts_with("emulator-")
+                })
+                .filter_map(|device| {
+                    adb.emulator_avd_name(&device.serial)
+                        .ok()
+                        .map(|name| (device.serial.clone(), name))
+                })
+                .collect::<HashMap<_, _>>();
             let services = adb.mdns_services().unwrap_or_default();
+            let devices = adb::dedupe_ready_devices(devices, &services)
+                .into_iter()
+                .map(|device| DeviceInfo {
+                    name: running_avds
+                        .get(&device.serial)
+                        .map(|name| name.replace('_', " "))
+                        .or_else(|| device.model.as_deref().map(|model| model.replace('_', " ")))
+                        .unwrap_or_else(|| device.serial.clone()),
+                    mirror_key: mirror_key_for_device(&device, &services),
+                    ready: device.state == adb::DeviceState::Device,
+                    state: state_label(&device.state).to_string(),
+                    is_emulator: is_emulator(&device),
+                    serial: device.serial,
+                })
+                .collect();
 
-            Some(
-                adb::dedupe_ready_devices(devices, &services)
-                    .into_iter()
-                    .map(|device| DeviceInfo {
-                        mirror_key: mirror_key_for_device(&device, &services),
-                        ready: device.state == adb::DeviceState::Device,
-                        state: state_label(&device.state).to_string(),
-                        is_emulator: is_emulator(&device),
-                        name: device
-                            .model
-                            .as_deref()
-                            .map(|model| model.replace('_', " "))
-                            .unwrap_or_else(|| device.serial.clone()),
-                        serial: device.serial,
-                    })
-                    .collect(),
-            )
+            Some((devices, running_avds.into_values().collect::<HashSet<_>>()))
         })
         .unwrap_or_default();
+    let avds = avds
+        .into_iter()
+        .filter(|name| !running_avds.contains(name))
+        .collect();
 
     Snapshot {
         adb: adb_info,
+        emulator: emulator_info,
         scrcpy: scrcpy_info,
         devices,
+        avds,
     }
 }
 
@@ -372,6 +424,58 @@ pub fn start_mirror(
         }
         drop(state);
         ctx.request_repaint();
+    });
+}
+
+pub fn start_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
+    {
+        let mut state = shared.lock().unwrap();
+        if !state.starting_avds.insert(name.clone()) {
+            state.log(format!("Already starting AVD {name}"));
+            drop(state);
+            ctx.request_repaint();
+            return;
+        }
+    }
+
+    thread::spawn(move || {
+        match Emulator::resolve(None).and_then(|emulator| emulator.launch(&name)) {
+            Ok(mut child) => {
+                {
+                    let mut state = shared.lock().unwrap();
+                    state.log(format!("Starting AVD {name} (pid {})", child.id()));
+                    if let Some(out) = child.stdout.take() {
+                        spawn_log_pump(shared.clone(), ctx.clone(), Box::new(BufReader::new(out)));
+                    }
+                    if let Some(err) = child.stderr.take() {
+                        spawn_log_pump(shared.clone(), ctx.clone(), Box::new(BufReader::new(err)));
+                    }
+                }
+                ctx.request_repaint();
+                refresh_status(shared.clone(), ctx.clone());
+
+                let status = child.wait();
+                let mut state = shared.lock().unwrap();
+                state.starting_avds.remove(&name);
+                match status {
+                    Ok(status) if !status.success() => {
+                        state.log(format!("AVD {name} exited with status {status}"));
+                    }
+                    Err(error) => state.log(format!("Could not wait for AVD {name}: {error}")),
+                    _ => {}
+                }
+                drop(state);
+                ctx.request_repaint();
+                refresh_status(shared, ctx);
+            }
+            Err(error) => {
+                let mut state = shared.lock().unwrap();
+                state.starting_avds.remove(&name);
+                state.log(format!("Could not start AVD {name}: {error:#}"));
+                drop(state);
+                ctx.request_repaint();
+            }
+        }
     });
 }
 

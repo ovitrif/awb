@@ -1,7 +1,7 @@
 # awb
 
-Android Wireless Bridge for macOS: pair, connect, and mirror Android phones over Wi-Fi
-without remembering a single `adb` command.
+Android Wireless Bridge for macOS: pair, connect, and mirror Android phones over Wi-Fi,
+or launch configured Android Virtual Devices, without remembering SDK commands.
 
 awb wraps Android's wireless debugging flow behind a QR code. Scan it with your phone and
 awb handles mDNS discovery, `adb pair`, `adb connect`, and reconnects, then launches
@@ -22,8 +22,9 @@ curl -fsSL https://github.com/ovitrif/awb/releases/latest/download/install.sh | 
 ```
 
 Requirements: `adb` on your PATH (Android SDK platform-tools). `scrcpy` is optional and
-only needed for screen mirroring. The phone needs Android 11+ with developer options
-enabled, on the same Wi-Fi network as your Mac.
+only needed for screen mirroring. Launching AVDs requires the Android SDK Emulator. The
+phone needs Android 11+ with developer options enabled, on the same Wi-Fi network as your
+Mac.
 
 ## Menu bar app
 
@@ -32,8 +33,8 @@ awb app
 ```
 
 The awb icon appears in the menu bar. Left-click toggles the popover: connected devices
-with one-click mirroring, a Logs tab, scrcpy settings, and QR pairing for new phones.
-Right-click offers Show, Pair, Refresh, and Quit.
+with one-click mirroring, configured AVDs with one-click launch, a Logs tab, scrcpy
+settings, and QR pairing for new phones. Right-click offers Show, Pair, Refresh, and Quit.
 
 macOS release archives also contain `AWB.app` for /Applications and login items; it is the
 same menu bar app in a bundle.

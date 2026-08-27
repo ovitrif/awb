@@ -238,6 +238,16 @@ impl Adb {
         Ok(())
     }
 
+    pub fn emulator_avd_name(&self, serial: &str) -> Result<String> {
+        let output = ensure_success(
+            "adb emu avd name",
+            self.run_with_timeout(["-s", serial, "emu", "avd", "name"], ADB_SHELL_TIMEOUT)?,
+        )?;
+
+        parse_emulator_avd_name(&output.stdout)
+            .with_context(|| format!("adb did not report an AVD name for {serial}"))
+    }
+
     pub fn wifi_status(&self, serial: &str) -> Result<String> {
         let output = self.run(["-s", serial, "shell", "cmd", "wifi", "status"])?;
         let combined = output.combined_output();
@@ -690,6 +700,14 @@ pub fn parse_mdns_services(output: &str) -> Vec<MdnsService> {
         .collect()
 }
 
+fn parse_emulator_avd_name(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "OK")
+        .map(ToString::to_string)
+}
+
 fn normalize_service_type(service_type: &str) -> String {
     service_type.trim_end_matches('.').to_string()
 }
@@ -832,6 +850,15 @@ ignored _printer._tcp 192.168.1.10:1234
         assert!(services[0].is_pairing_service());
         assert!(services[1].is_connect_service());
         assert_eq!(services[1].address, "192.168.1.23:40233");
+    }
+
+    #[test]
+    fn parses_emulator_avd_name() {
+        assert_eq!(
+            parse_emulator_avd_name("Pixel_9a\nOK\n").as_deref(),
+            Some("Pixel_9a")
+        );
+        assert_eq!(parse_emulator_avd_name("\nOK\n"), None);
     }
 
     #[test]

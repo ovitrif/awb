@@ -33,7 +33,7 @@ fn find_on_path(name: &str) -> Result<PathBuf> {
     }
 
     // GUI launches (Finder, Open-at-Login) don't inherit the shell PATH, so the
-    // menu bar app would otherwise miss a Homebrew or Android SDK adb/scrcpy.
+    // menu bar app would otherwise miss Homebrew or Android SDK tools.
     for dir in standard_dirs() {
         let candidate = dir.join(name);
         if is_executable_file(&candidate) {
@@ -62,7 +62,7 @@ pub(crate) fn path_env_with_tool_dirs(
     env::join_paths(dirs).ok()
 }
 
-/// Common macOS install locations for adb and scrcpy, probed when PATH is the
+/// Common macOS install locations for adb, emulator, and scrcpy, probed when PATH is the
 /// minimal launchd environment rather than the user's shell.
 fn standard_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![
@@ -72,16 +72,22 @@ fn standard_dirs() -> Vec<PathBuf> {
     ];
 
     if let Some(home) = env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join("Library/Android/sdk/platform-tools"));
+        dirs.extend(android_sdk_tool_dirs(
+            &PathBuf::from(home).join("Library/Android/sdk"),
+        ));
     }
 
     for var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
         if let Some(sdk) = env::var_os(var) {
-            dirs.push(PathBuf::from(sdk).join("platform-tools"));
+            dirs.extend(android_sdk_tool_dirs(&PathBuf::from(sdk)));
         }
     }
 
     dirs
+}
+
+fn android_sdk_tool_dirs(sdk: &Path) -> [PathBuf; 2] {
+    [sdk.join("platform-tools"), sdk.join("emulator")]
 }
 
 fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
@@ -119,5 +125,16 @@ mod tests {
         let dirs = standard_dirs();
         assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
         assert!(dirs.contains(&PathBuf::from("/usr/local/bin")));
+    }
+
+    #[test]
+    fn android_sdk_dirs_include_adb_and_emulator() {
+        assert_eq!(
+            android_sdk_tool_dirs(Path::new("/sdk")),
+            [
+                PathBuf::from("/sdk/platform-tools"),
+                PathBuf::from("/sdk/emulator")
+            ]
+        );
     }
 }
