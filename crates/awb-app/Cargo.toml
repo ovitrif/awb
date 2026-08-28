@@ -1,6 +1,6 @@
 [package]
 name = "awb-app"
-description = "awb (Android Wireless Bridge) macOS menu bar app."
+description = "awb (Android Wifi Bridge) macOS menu bar app."
 version.workspace = true
 edition.workspace = true
 rust-version = "1.92"

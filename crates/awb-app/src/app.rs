@@ -4,13 +4,15 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::containers::scroll_area::ScrollBarVisibility;
 use eframe::egui::{
-    self, Align, Button, Color32, Context, CornerRadius, FontFamily, FontId, Frame, Label, Layout,
-    Margin, Rect, Sense, Shadow, Stroke, TextEdit, TextureHandle, TextureOptions, Theme, Ui,
+    self, Align, Color32, Context, CornerRadius, FontFamily, FontId, Frame, Label, Layout, Margin,
+    Rect, Sense, Shadow, Stroke, TextEdit, TextureHandle, TextureOptions, Theme, Ui,
     ViewportCommand, vec2,
 };
 use egui_phosphor::regular as ph;
 use menu_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use menu_icon::{MenuBarIcon, MenuBarIconBuilder, MenuBarIconEvent, MouseButton, MouseButtonState};
+use menu_icon::{
+    Icon, MenuBarIcon, MenuBarIconBuilder, MenuBarIconEvent, MouseButton, MouseButtonState,
+};
 
 use crate::backend::{self, PairingPhase, PairingProgress, Shared, Snapshot};
 use crate::config::{Settings, ThemeMode};
@@ -33,6 +35,8 @@ const SCROLLBAR_HANDLE_HEIGHT: f32 = 44.0;
 const SCROLLBAR_HANDLE_WIDTH: f32 = 2.0;
 const SCROLLBAR_TRACK_INSET: f32 = 5.0;
 const SCROLLBAR_OPACITY_FADE: Duration = Duration::from_millis(100);
+const CONTROL_HOVER_TRANSITION: f32 = 0.14;
+const CONTROL_PRESS_TRANSITION: f32 = 0.07;
 /// How long after launch to keep forcing the window hidden, in case the
 /// platform surfaces it despite `with_visible(false)`.
 const STARTUP_HIDE: Duration = Duration::from_millis(800);
@@ -264,6 +268,7 @@ pub struct App {
     day_shell: TextureHandle,
     night_shell: TextureHandle,
     status_icon: MenuBarIcon,
+    menu_icon_connected: bool,
     show_item: MenuItem,
     pair_id: MenuId,
     refresh_id: MenuId,
@@ -313,15 +318,13 @@ impl App {
             &quit_item,
         ])?;
 
-        let icon_raster = glyph::menubar_icon(44);
-        let icon =
-            menu_icon::Icon::from_rgba(icon_raster.rgba, icon_raster.width, icon_raster.height)?;
+        let icon = menu_bar_icon(false)?;
         let status_icon = MenuBarIconBuilder::new()
             .with_icon(icon)
             .with_icon_as_template(true)
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
-            .with_tooltip("awb - Android Wireless Bridge")
+            .with_tooltip("awb - Android Wifi Bridge")
             .build()?;
 
         let status_ctx = ctx.clone();
@@ -337,7 +340,11 @@ impl App {
         }));
 
         let shared = Arc::new(Mutex::new(Shared::default()));
-        backend::refresh_status(shared.clone(), ctx.clone());
+        if needs_full_status_refresh(false, settings.auto_mirror) {
+            backend::refresh_status(shared.clone(), ctx.clone());
+        } else {
+            backend::refresh_connection_state(shared.clone(), ctx.clone());
+        }
 
         let width_text = settings.window_width.to_string();
         let height_text = settings.window_height.to_string();
@@ -353,6 +360,7 @@ impl App {
             day_shell,
             night_shell,
             status_icon,
+            menu_icon_connected: false,
             show_item,
             pair_id: pair_item.id().clone(),
             refresh_id: refresh_item.id().clone(),
@@ -627,6 +635,30 @@ impl App {
             }
         }
     }
+
+    fn sync_menu_icon(&mut self) {
+        let connected = self.shared.lock().unwrap().device_connected;
+        if connected == self.menu_icon_connected {
+            return;
+        }
+
+        // `set_icon` clears the template flag on macOS, leaving a fixed black
+        // glyph after the connection state changes. Keep every replacement a
+        // template so AppKit recolors it when the menu-bar appearance changes.
+        match menu_bar_icon(connected).and_then(|icon| {
+            self.status_icon
+                .set_icon_with_as_template(Some(icon), true)
+                .map_err(Into::into)
+        }) {
+            Ok(()) => self.menu_icon_connected = connected,
+            Err(error) => {
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .log(format!("Menu bar icon update failed: {error:#}"));
+            }
+        }
+    }
 }
 
 fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
@@ -635,6 +667,15 @@ fn ready_device_mirror_keys(devices: &[backend::DeviceInfo]) -> HashSet<&str> {
         .filter(|device| device.ready)
         .map(|device| device.mirror_key.as_str())
         .collect()
+}
+
+fn menu_bar_icon(connected: bool) -> anyhow::Result<Icon> {
+    let raster = glyph::menubar_icon(44, connected);
+    Ok(Icon::from_rgba(raster.rgba, raster.width, raster.height)?)
+}
+
+fn needs_full_status_refresh(visible: bool, auto_mirror: bool) -> bool {
+    visible || auto_mirror
 }
 
 fn load_shell_texture(ctx: &Context, name: &str, appearance: theme::Appearance) -> TextureHandle {
@@ -951,24 +992,26 @@ impl eframe::App for App {
         self.handle_escape(ctx);
         self.update_popover_transition(ctx);
 
-        // Poll while the popover is open, or in the background when auto-mirror
-        // must watch for newly connected phones.
-        let watching = self.visible || self.settings.auto_mirror;
-        if watching && self.last_poll.elapsed() > STATUS_POLL {
+        // Keep the full UI snapshot current while it is in use. When hidden,
+        // a lightweight ADB-only probe is enough to update the menu bar icon.
+        if self.last_poll.elapsed() > STATUS_POLL {
             self.last_poll = Instant::now();
-            backend::refresh_status(self.shared.clone(), ctx.clone());
+            if needs_full_status_refresh(self.visible, self.settings.auto_mirror) {
+                backend::refresh_status(self.shared.clone(), ctx.clone());
+            } else {
+                backend::refresh_connection_state(self.shared.clone(), ctx.clone());
+            }
         }
 
         self.maybe_auto_mirror(ctx);
+        self.sync_menu_icon();
 
-        if watching {
-            let interval = if self.visible {
-                Duration::from_secs(1)
-            } else {
-                STATUS_POLL
-            };
-            ctx.request_repaint_after(interval);
-        }
+        let interval = if self.visible {
+            Duration::from_secs(1)
+        } else {
+            STATUS_POLL
+        };
+        ctx.request_repaint_after(interval);
 
         let pairing_done = {
             let state = self.shared.lock().unwrap();
@@ -1097,7 +1140,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.add(Label::new(semibold("awb", 15.0, theme::text_strong())).selectable(false));
                 ui.add(
-                    Label::new(regular("Android Wireless Bridge", 11.0, theme::text_soft()))
+                    Label::new(regular("Android Wifi Bridge", 11.0, theme::text_soft()))
                         .selectable(false),
                 );
             });
@@ -1121,6 +1164,9 @@ impl App {
     fn tab_bar(&mut self, ui: &mut Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
+            // Keep the first tab's rounded hover treatment inside the screen
+            // clip instead of slicing off its left edge.
+            ui.add_space(7.0);
             if tab_item(ui, "Devices", self.tab == Tab::Devices).clicked() {
                 self.tab = Tab::Devices;
             }
@@ -1246,11 +1292,13 @@ impl App {
             logs.join("\n")
         };
 
-        ui.add_space(8.0);
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // Keep breathing room in the resting state while letting
+                // scrolled output disappear directly beneath the tab divider.
+                ui.add_space(8.0);
                 ui.add(
                     TextEdit::multiline(&mut log_text)
                         .desired_width(f32::INFINITY)
@@ -1580,7 +1628,21 @@ impl RowAction {
 }
 
 fn icon_button(ui: &mut Ui, glyph: &str, size: f32, color: Color32) -> egui::Response {
-    let response = ui.add(Button::new(icon(glyph, size, color)).frame(false));
+    let (rect, response) = ui.allocate_exact_size(vec2(size + 8.0, size + 8.0), Sense::click());
+    let interaction = interaction_visual(
+        ui,
+        response.id,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    );
+    ui.painter().rect_filled(rect, 6.0, interaction.overlay);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        theme::icon_font(size),
+        color,
+    );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -1593,7 +1655,22 @@ fn tab_item(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
 
     let response = ui
         .vertical(|ui| {
+            let background = ui.painter().add(egui::Shape::Noop);
             let response = ui.add(Label::new(text).selectable(false).sense(Sense::click()));
+            let interaction = interaction_visual(
+                ui,
+                response.id,
+                response.hovered(),
+                response.is_pointer_button_down_on(),
+            );
+            ui.painter().set(
+                background,
+                egui::Shape::rect_filled(
+                    response.rect.expand2(vec2(6.0, 4.0)),
+                    5.0,
+                    interaction.overlay,
+                ),
+            );
             ui.add_space(6.0);
             let (rect, _) =
                 ui.allocate_exact_size(vec2(response.rect.width(), 2.0), Sense::hover());
@@ -1651,6 +1728,13 @@ fn list_row(
                     },
                 );
                 ui.painter().rect_filled(rect, 6.0, theme::surface());
+                let interaction = interaction_visual(
+                    ui,
+                    response.id,
+                    response.hovered() && action.enabled,
+                    response.is_pointer_button_down_on() && action.enabled,
+                );
+                ui.painter().rect_filled(rect, 6.0, interaction.overlay);
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -1754,12 +1838,19 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
                     .desired_width(width - 20.0),
             )
         });
+        let hovered = output.response.hovered() || output.inner.hovered();
+        let hover_progress = ui.ctx().animate_bool_with_time(
+            output.response.id.with("input-hover"),
+            hovered,
+            CONTROL_HOVER_TRANSITION,
+        );
         let (stroke_width, stroke_color) = if output.inner.has_focus() {
             (1.5_f32, theme::input_focus_stroke())
-        } else if output.response.hovered() || output.inner.hovered() {
-            (1.0_f32, theme::input_hover_stroke())
         } else {
-            (1.0_f32, theme::input_stroke())
+            (
+                1.0_f32,
+                theme::input_stroke().lerp_to_gamma(theme::input_hover_stroke(), hover_progress),
+            )
         };
         ui.painter().rect_stroke(
             output.response.rect,
@@ -1901,25 +1992,48 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
                 .show(ui, |ui| {
                     for (mode, label) in modes {
                         let active = *selected == mode;
-                        let text = if active {
-                            semibold(label, 11.5, theme::text_strong())
-                        } else {
-                            medium(label, 11.5, theme::text_muted())
-                        };
-                        let response = ui.add_sized(
-                            [56.0, 24.0],
-                            Button::new(text)
-                                .fill(if active {
-                                    theme::segment_selected()
-                                } else {
-                                    Color32::TRANSPARENT
-                                })
-                                .stroke(if active {
-                                    Stroke::new(1.0_f32, theme::segment_selected_stroke())
-                                } else {
-                                    Stroke::NONE
-                                })
-                                .corner_radius(CornerRadius::same(6)),
+                        let (rect, response) =
+                            ui.allocate_exact_size(vec2(56.0, 24.0), Sense::click());
+                        if active {
+                            ui.painter()
+                                .rect_filled(rect, 6.0, theme::segment_selected());
+                        }
+                        let interaction = interaction_visual(
+                            ui,
+                            response.id,
+                            response.hovered(),
+                            response.is_pointer_button_down_on(),
+                        );
+                        ui.painter().rect_filled(rect, 6.0, interaction.overlay);
+                        if active {
+                            ui.painter().rect_stroke(
+                                rect,
+                                6.0,
+                                Stroke::new(1.0_f32, theme::segment_selected_stroke()),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            label,
+                            FontId::new(
+                                11.5,
+                                FontFamily::Name(
+                                    if active {
+                                        theme::SEMIBOLD
+                                    } else {
+                                        theme::MEDIUM
+                                    }
+                                    .into(),
+                                ),
+                            ),
+                            if active {
+                                theme::text_strong()
+                            } else {
+                                theme::text_muted()
+                                    .lerp_to_gamma(theme::text_bright(), interaction.hover_progress)
+                            },
                         );
                         if response.clicked() && !active {
                             *selected = mode;
@@ -1938,6 +2052,10 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
     let mut changed = false;
 
     ui.horizontal(|ui| {
+        // The hover shape expands by five points. Reserve those points inside
+        // the scroll viewport so the left rounded edge remains intact.
+        ui.add_space(6.0);
+        let background = ui.painter().add(egui::Shape::Noop);
         let (rect, response) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
@@ -1949,6 +2067,19 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
                     .sense(Sense::click()),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+        let hovered = response.hovered() || label_response.hovered();
+        let pressed =
+            response.is_pointer_button_down_on() || label_response.is_pointer_button_down_on();
+        let interaction = interaction_visual(ui, response.id, hovered, pressed);
+        ui.painter().set(
+            background,
+            egui::Shape::rect_filled(
+                rect.union(label_response.rect).expand2(vec2(5.0, 3.0)),
+                5.0,
+                interaction.overlay,
+            ),
+        );
 
         let painter = ui.painter();
         painter.add(
@@ -1976,11 +2107,8 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
                 4.0,
                 Stroke::new(
                     1.25_f32,
-                    if response.hovered() || label_response.hovered() {
-                        theme::input_hover_stroke()
-                    } else {
-                        theme::check_stroke()
-                    },
+                    theme::check_stroke()
+                        .lerp_to_gamma(theme::input_hover_stroke(), interaction.hover_progress),
                 ),
                 egui::StrokeKind::Inside,
             );
@@ -2110,6 +2238,13 @@ fn pill_button(
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter();
     painter.rect_filled(rect, 7.0, fill);
+    let interaction = interaction_visual(
+        ui,
+        response.id,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    );
+    painter.rect_filled(rect, 7.0, interaction.overlay);
 
     let mut cursor_x = rect.min.x + 14.0;
     if let Some(glyph) = leading_icon {
@@ -2133,12 +2268,52 @@ fn pill_button(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+struct InteractionVisual {
+    overlay: Color32,
+    hover_progress: f32,
+}
+
+fn interaction_visual(ui: &Ui, id: egui::Id, hovered: bool, pressed: bool) -> InteractionVisual {
+    let hover_progress = ui.ctx().animate_bool_with_time(
+        id.with("control-hover"),
+        hovered,
+        CONTROL_HOVER_TRANSITION,
+    );
+    let press_progress = ui.ctx().animate_bool_with_time(
+        id.with("control-press"),
+        pressed,
+        CONTROL_PRESS_TRANSITION,
+    );
+
+    InteractionVisual {
+        overlay: interaction_overlay_color(hover_progress, press_progress),
+        hover_progress,
+    }
+}
+
+fn interaction_overlay_color(hover_progress: f32, press_progress: f32) -> Color32 {
+    theme::control_hover()
+        .gamma_multiply(hover_progress)
+        .blend(theme::control_pressed().gamma_multiply(press_progress))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const WIDTH: f64 = 380.0;
     const MARGIN: f64 = 8.0;
+
+    #[test]
+    fn interaction_overlay_fades_fully_to_transparent() {
+        let hidden = interaction_overlay_color(0.0, 0.0);
+        let hovered = interaction_overlay_color(1.0, 0.0);
+        let pressed = interaction_overlay_color(1.0, 1.0);
+
+        assert_eq!(hidden, Color32::TRANSPARENT);
+        assert!(hovered.a() > hidden.a());
+        assert!(pressed.a() > hovered.a());
+    }
 
     #[test]
     fn automatic_theme_follows_the_system() {
@@ -2301,6 +2476,13 @@ mod tests {
 
         assert!(keys.contains("adb-ready._adb-tls-connect._tcp"));
         assert!(!keys.contains("adb-offline._adb-tls-connect._tcp"));
+    }
+
+    #[test]
+    fn hidden_launch_uses_lightweight_status_refresh_without_auto_mirror() {
+        assert!(!needs_full_status_refresh(false, false));
+        assert!(needs_full_status_refresh(true, false));
+        assert!(needs_full_status_refresh(false, true));
     }
 
     #[test]

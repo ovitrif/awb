@@ -20,13 +20,13 @@ use serde::Serialize;
 
 const BINARY_NAME: &str = "awb";
 const APP_BINARY_NAME: &str = "awb-app";
-const APP_BUNDLE_PATH: &str = "/Applications/AWB.app";
+const APP_BUNDLE_PATH: &str = "/Applications/Android Wifi Bridge.app";
 
 #[derive(Debug, Parser)]
 #[command(
     name = "awb",
     version,
-    about = "awb (Android Wireless Bridge): interactive QR pairing for Android wireless debugging."
+    about = "awb (Android Wifi Bridge): interactive QR pairing for Android wireless debugging."
 )]
 struct Args {
     #[command(subcommand)]
@@ -319,7 +319,7 @@ fn run() -> Result<()> {
 
     let timeout = Duration::from_secs(args.timeout);
 
-    ui::title("awb", "Android Wireless Bridge");
+    ui::title("awb", "Android Wifi Bridge");
     ui::status("Checking ADB...");
     let adb = Adb::resolve(args.adb.clone())?;
 

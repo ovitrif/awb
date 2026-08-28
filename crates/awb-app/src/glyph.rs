@@ -13,13 +13,12 @@ use crate::theme::Appearance;
 /// dome bottom sits at y=75 and the outer Wi-Fi wave peaks at y=24.
 const GLYPH_BOUNDS: [f32; 4] = [9.81, 24.0, 80.38, 51.0];
 
-/// Monochrome menu bar glyph: dome with punched-out eyes under two Wi-Fi arcs.
-const MENUBAR_GLYPH: &str = "M25 75a25 25 0 0 1 50 0z m-4.94-23.4a38 38 0 0 1 59.88 0l-5.51 4.31a31 31 0 0 0-48.86 0z m-10.25-8a51 51 0 0 1 80.38 0l-5.52 4.31a44 44 0 0 0-69.34 0z m28.69 19.4a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z m16 0a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z";
-
 /// Colored logo: green head with punched eyes, blue Wi-Fi waves.
 const LOGO_HEAD: &str = "M25 75a25 25 0 0 1 50 0z m13.5-12a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z m16 0a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0z";
 const LOGO_WAVE_1: &str = "M20.06 51.6a38 38 0 0 1 59.88 0l-5.51 4.31a31 31 0 0 0-48.86 0z";
 const LOGO_WAVE_2: &str = "M9.81 43.6a51 51 0 0 1 80.38 0l-5.52 4.31a44 44 0 0 0-69.34 0z";
+const DISCONNECTED_WAVE_1: &str = "M20.06 51.6a38 38 0 0 1 59.88 0l-3.94 3.08a33 33 0 0 0-52.02 0z";
+const DISCONNECTED_WAVE_2: &str = "M9.81 43.6a51 51 0 0 1 80.38 0l-3.94 3.08a46 46 0 0 0-72.5 0z";
 
 /// Popover shell: a 380x349 rounded body with a beak pointing up at the menu
 /// bar icon. Coordinates match the `Shell Shape` path in DESIGN.pen.
@@ -28,6 +27,7 @@ const SHELL_W: f32 = 380.0;
 const SHELL_H: f32 = 349.0;
 
 const VIEWBOX: f32 = 100.0;
+const APP_ICON_GLYPH_SCALE: f32 = 0.98;
 
 pub struct Raster {
     pub width: u32,
@@ -37,9 +37,10 @@ pub struct Raster {
 
 /// Menu bar icon: the glyph as a black template image, tightly fit to its
 /// bounds and rendered taller than its slot so macOS downscales it into a crisp
-/// white (dark mode) or black (light mode) status item. Width follows the
-/// glyph's aspect ratio so the Wi-Fi waves are not squeezed.
-pub fn menubar_icon(height: u32) -> Raster {
+/// white (dark mode) or black (light mode) status item. The disconnected state
+/// uses narrower, fully opaque Wi-Fi arcs while the connected state retains the
+/// original wave weight, making connection state readable without a faint icon.
+pub fn menubar_icon(height: u32, connected: bool) -> Raster {
     let [gx, gy, gw, gh] = GLYPH_BOUNDS;
     let h = height as f32;
     let pad = h * 0.12;
@@ -52,7 +53,14 @@ pub fn menubar_icon(height: u32) -> Raster {
     let mut pixmap = Pixmap::new(width, height).expect("menu bar icon pixmap");
     let transform =
         Transform::from_scale(scale, scale).post_translate(pad - gx * scale, pad - gy * scale);
-    fill_path(&mut pixmap, MENUBAR_GLYPH, Color::BLACK, transform);
+    fill_path(&mut pixmap, LOGO_HEAD, Color::BLACK, transform);
+    let (wave_1, wave_2) = if connected {
+        (LOGO_WAVE_1, LOGO_WAVE_2)
+    } else {
+        (DISCONNECTED_WAVE_1, DISCONNECTED_WAVE_2)
+    };
+    fill_path(&mut pixmap, wave_1, Color::BLACK, transform);
+    fill_path(&mut pixmap, wave_2, Color::BLACK, transform);
 
     Raster {
         width,
@@ -61,45 +69,55 @@ pub fn menubar_icon(height: u32) -> Raster {
     }
 }
 
-/// Side-by-side preview of how macOS recolors the menu bar template: white on a
-/// dark bar, black on a light bar. For `awb-app --render-menubar`.
+/// Preview of the disconnected (top) and connected (bottom) weights as macOS
+/// template images on dark and light menu bars. For `awb-app --render-menubar`.
 pub fn menubar_preview_png() -> Vec<u8> {
-    let icon = menubar_icon(36);
+    let disconnected = menubar_icon(44, false);
+    let connected = menubar_icon(44, true);
     let zoom = 6;
     let inset = 28;
-    let cell_w = icon.width * zoom + inset * 2;
-    let cell_h = icon.height * zoom + inset * 2;
+    let cell_w = connected.width * zoom + inset * 2;
+    let cell_h = connected.height * zoom + inset * 2;
 
-    let mut pixmap = Pixmap::new(cell_w * 2, cell_h).expect("preview pixmap");
-    fill_cell(&mut pixmap, 0.0, cell_w as f32, cell_h as f32, "#1D1D1F");
+    let mut pixmap = Pixmap::new(cell_w * 2, cell_h * 2).expect("preview pixmap");
+    fill_cell(
+        &mut pixmap,
+        0.0,
+        cell_w as f32,
+        (cell_h * 2) as f32,
+        "#1D1D1F",
+    );
     fill_cell(
         &mut pixmap,
         cell_w as f32,
         cell_w as f32,
-        cell_h as f32,
+        (cell_h * 2) as f32,
         "#ECECEE",
     );
 
     let paint = PixmapPaint::default();
-    let place = |dx: u32| {
-        Transform::from_scale(zoom as f32, zoom as f32).post_translate(dx as f32, inset as f32)
+    let place = |dx: u32, dy: u32| {
+        Transform::from_scale(zoom as f32, zoom as f32).post_translate(dx as f32, dy as f32)
     };
-    pixmap.draw_pixmap(
-        0,
-        0,
-        recolor(&icon, 0xFF).as_ref(),
-        &paint,
-        place(inset),
-        None,
-    );
-    pixmap.draw_pixmap(
-        0,
-        0,
-        recolor(&icon, 0x00).as_ref(),
-        &paint,
-        place(cell_w + inset),
-        None,
-    );
+    for (row, icon) in [&disconnected, &connected].into_iter().enumerate() {
+        let y = row as u32 * cell_h + inset;
+        pixmap.draw_pixmap(
+            0,
+            0,
+            recolor(icon, 0xFF).as_ref(),
+            &paint,
+            place(inset, y),
+            None,
+        );
+        pixmap.draw_pixmap(
+            0,
+            0,
+            recolor(icon, 0x00).as_ref(),
+            &paint,
+            place(cell_w + inset, y),
+            None,
+        );
+    }
 
     pixmap.encode_png().expect("preview png")
 }
@@ -357,7 +375,7 @@ pub fn app_icon_png(size: u32) -> Vec<u8> {
 
     // Glyph: 100-unit viewBox (content spans x 10-90, y 24-75) optically
     // centered around the glow.
-    let glyph_scale = tile * 0.62 / VIEWBOX;
+    let glyph_scale = tile * APP_ICON_GLYPH_SCALE / VIEWBOX;
     let offset_x = tile * 0.5 - 50.0 * glyph_scale;
     let offset_y = tile * 0.46 - 49.5 * glyph_scale;
     let transform =
@@ -438,6 +456,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn app_icon_glyph_uses_the_tile_footprint() {
+        let width_fraction = GLYPH_BOUNDS[2] * APP_ICON_GLYPH_SCALE / VIEWBOX;
+        let height_fraction = GLYPH_BOUNDS[3] * APP_ICON_GLYPH_SCALE / VIEWBOX;
+
+        assert!(width_fraction >= 0.75);
+        assert!(height_fraction >= 0.48);
+    }
+
+    #[test]
     fn day_and_night_shells_share_geometry_but_not_pixels() {
         let day = shell_background(1, Appearance::Day);
         let night = shell_background(1, Appearance::Night);
@@ -445,5 +472,27 @@ mod tests {
         assert_eq!((day.width, day.height), (380, 349));
         assert_eq!((night.width, night.height), (380, 349));
         assert_ne!(day.rgba, night.rgba);
+    }
+
+    #[test]
+    fn disconnected_menu_icon_preserves_size_with_lighter_weight() {
+        let disconnected = menubar_icon(44, false);
+        let connected = menubar_icon(44, true);
+        let alpha_coverage = |raster: &Raster| {
+            raster
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| u64::from(pixel[3]))
+                .sum::<u64>()
+        };
+
+        assert_eq!(disconnected.width, connected.width);
+        assert_eq!(disconnected.height, connected.height);
+        let disconnected_coverage = alpha_coverage(&disconnected);
+        let connected_coverage = alpha_coverage(&connected);
+        assert!(disconnected_coverage < connected_coverage);
+        assert!(disconnected_coverage * 4 >= connected_coverage * 3);
     }
 }
