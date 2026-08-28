@@ -519,6 +519,18 @@ impl App {
         }
     }
 
+    fn handle_escape(&mut self, ctx: &Context) {
+        if !self.visible || self.is_disappearing() {
+            return;
+        }
+
+        let escape =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if escape {
+            self.hide(ctx);
+        }
+    }
+
     fn menu_anchor(&self) -> Option<MenuAnchor> {
         self.last_menu_anchor.or_else(|| {
             self.status_icon.rect().map(|rect| {
@@ -936,6 +948,7 @@ impl eframe::App for App {
 
         self.handle_events(ctx);
         self.handle_focus(ctx);
+        self.handle_escape(ctx);
         self.update_popover_transition(ctx);
 
         // Poll while the popover is open, or in the background when auto-mirror
