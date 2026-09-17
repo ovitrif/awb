@@ -32,9 +32,12 @@ Mac.
 awb app
 ```
 
-The awb icon appears in the menu bar. Left-click toggles the popover: connected devices
-with one-click mirroring, configured AVDs with one-click launch, a Logs tab, scrcpy
-settings, and QR pairing for new phones. Right-click offers Show, Pair, Refresh, and Quit.
+The awb icon appears in the menu bar. Left-click toggles the popover: a Devices group
+with one-click phone mirroring, an Emulators group, a Logs tab, scrcpy settings, and QR
+pairing for new phones. Each configured AVD stays in the Emulators group while stopped,
+starting, or running. Click Launch to open its native Android Emulator window; running
+emulators have no mirror or second-launch action. Right-click offers Show, Pair, Refresh,
+and Quit.
 
 macOS release archives also contain `Android Wifi Bridge.app` for /Applications and login items; it is the
 same menu bar app in a bundle.

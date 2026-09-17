@@ -1220,7 +1220,15 @@ impl App {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for (index, device) in snapshot.devices.iter().enumerate() {
+                let devices: Vec<_> = snapshot
+                    .devices
+                    .iter()
+                    .filter(|device| !device.is_emulator)
+                    .collect();
+                if !devices.is_empty() {
+                    device_group_heading(ui, "Devices");
+                }
+                for (index, device) in devices.iter().enumerate() {
                     if index > 0 {
                         divider(ui);
                     }
@@ -1239,45 +1247,47 @@ impl App {
                         format!("{} · {}", device.serial, device.state)
                     };
 
-                    let row_icon = if device.is_emulator {
-                        ph::DESKTOP
-                    } else {
-                        ph::DEVICE_MOBILE
-                    };
-                    if list_row(ui, row_icon, &device.name, &detail, Some(action)).clicked() {
+                    if list_row(ui, ph::DEVICE_MOBILE, &device.name, &detail, Some(action))
+                        .clicked()
+                    {
                         if mirroring {
                             backend::stop_mirror(&self.shared, &device.mirror_key);
                         } else {
                             backend::start_mirror(
                                 self.shared.clone(),
                                 ctx.clone(),
-                                device.clone(),
+                                (*device).clone(),
                                 self.settings.scrcpy_options(),
                             );
                         }
                     }
                 }
 
+                if !snapshot.avds.is_empty() {
+                    if !devices.is_empty() {
+                        ui.add_space(6.0);
+                    }
+                    device_group_heading(ui, "Emulators");
+                }
                 for (index, avd) in snapshot.avds.iter().enumerate() {
-                    if index > 0 || !snapshot.devices.is_empty() {
+                    if index > 0 {
                         divider(ui);
                     }
 
-                    let starting = starting_avds.contains(avd);
-                    let action = if starting {
-                        RowAction::disabled(ph::PLAY)
-                    } else {
-                        RowAction::enabled(ph::PLAY, theme::text_bright())
-                    };
-                    let name = avd.replace('_', " ");
-                    let detail = if starting {
-                        "Starting…"
-                    } else {
-                        "Android Virtual Device"
-                    };
+                    let starting = starting_avds.contains(&avd.name);
+                    let action = avd.device.is_none().then(|| {
+                        if avd.can_launch(starting) {
+                            RowAction::enabled(ph::PLAY, theme::text_bright())
+                        } else {
+                            RowAction::disabled(ph::PLAY)
+                        }
+                        .with_label("Launch")
+                    });
+                    let name = avd.name.replace('_', " ");
+                    let detail = avd.status(starting);
 
-                    if list_row(ui, ph::DESKTOP, &name, detail, Some(action)).clicked() {
-                        backend::start_avd(self.shared.clone(), ctx.clone(), avd.clone());
+                    if list_row(ui, ph::DESKTOP, &name, detail, action).clicked() {
+                        backend::start_avd(self.shared.clone(), ctx.clone(), avd.name.clone());
                     }
                 }
             });
@@ -1605,6 +1615,7 @@ impl App {
 
 struct RowAction {
     glyph: &'static str,
+    label: Option<&'static str>,
     color: Color32,
     enabled: bool,
 }
@@ -1613,6 +1624,7 @@ impl RowAction {
     fn enabled(glyph: &'static str, color: Color32) -> Self {
         Self {
             glyph,
+            label: None,
             color,
             enabled: true,
         }
@@ -1621,9 +1633,19 @@ impl RowAction {
     fn disabled(glyph: &'static str) -> Self {
         Self {
             glyph,
+            label: None,
             color: theme::text_faint(),
             enabled: false,
         }
+    }
+
+    fn with_label(mut self, label: &'static str) -> Self {
+        self.label = Some(label);
+        self
+    }
+
+    fn width(&self) -> f32 {
+        if self.label.is_some() { 52.0 } else { 22.0 }
     }
 }
 
@@ -1689,6 +1711,12 @@ fn divider(ui: &mut Ui) {
     ui.painter().rect_filled(rect, 0.0, theme::hairline());
 }
 
+fn device_group_heading(ui: &mut Ui, title: &str) {
+    ui.add_space(8.0);
+    ui.add(Label::new(medium(title, 10.5, theme::text_label())).selectable(false));
+    ui.add_space(2.0);
+}
+
 fn list_row(
     ui: &mut Ui,
     row_icon: &str,
@@ -1697,16 +1725,24 @@ fn list_row(
     action: Option<RowAction>,
 ) -> egui::Response {
     let mut clicked = false;
+    let reserved = action.as_ref().map_or(4.0, |action| action.width() + 12.0);
 
     let response = ui.horizontal(|ui| {
         ui.set_height(38.0);
         ui.add_space(2.0);
         ui.add(Label::new(icon(row_icon, 14.0, theme::text_label())).selectable(false));
         ui.add_space(10.0);
-        ui.add(Label::new(medium(name, 12.5, theme::text_bright())).selectable(false));
+        ui.scope(|ui| {
+            ui.set_max_width((ui.available_width() - reserved - 85.0).max(20.0));
+            ui.add(
+                Label::new(medium(name, 12.5, theme::text_bright()))
+                    .truncate()
+                    .selectable(false),
+            )
+            .on_hover_text(name);
+        });
         ui.add_space(10.0);
 
-        let reserved = if action.is_some() { 34.0 } else { 4.0 };
         ui.scope(|ui| {
             ui.set_max_width((ui.available_width() - reserved).max(20.0));
             ui.add(
@@ -1720,7 +1756,7 @@ fn list_row(
             ui.add_space(2.0);
             if let Some(action) = action {
                 let (rect, response) = ui.allocate_exact_size(
-                    vec2(22.0, 22.0),
+                    vec2(action.width(), 22.0),
                     if action.enabled {
                         Sense::click()
                     } else {
@@ -1738,8 +1774,12 @@ fn list_row(
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    action.glyph,
-                    theme::icon_font(10.0),
+                    action.label.unwrap_or(action.glyph),
+                    if action.label.is_some() {
+                        FontId::new(10.5, FontFamily::Proportional)
+                    } else {
+                        theme::icon_font(10.0)
+                    },
                     action.color,
                 );
 
@@ -2303,6 +2343,48 @@ mod tests {
 
     const WIDTH: f64 = 380.0;
     const MARGIN: f64 = 8.0;
+
+    #[test]
+    fn long_avd_name_leaves_status_and_launch_button_visible() {
+        let ctx = Context::default();
+        theme::install_fonts(&ctx);
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(340.0, 100.0))),
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    list_row(
+                        ui,
+                        ph::DESKTOP,
+                        "bitkit recording with a very long emulator name",
+                        "Starting…",
+                        Some(RowAction::disabled(ph::PLAY).with_label("Launch")),
+                    );
+                });
+            },
+        );
+        let text: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        let status = text
+            .iter()
+            .find(|text| text.galley.text() == "Starting…")
+            .unwrap();
+        let launch = text
+            .iter()
+            .find(|text| text.galley.text() == "Launch")
+            .unwrap();
+        assert!(status.pos.x + status.galley.size().x < launch.pos.x);
+        assert!(launch.pos.x + launch.galley.size().x <= 332.0);
+        assert!(text.iter().any(|text| text.galley.elided));
+    }
 
     #[test]
     fn interaction_overlay_fades_fully_to_transparent() {

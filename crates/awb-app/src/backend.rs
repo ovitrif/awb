@@ -42,12 +42,33 @@ pub struct DeviceInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct AvdInfo {
+    pub name: String,
+    pub device: Option<DeviceInfo>,
+}
+
+impl AvdInfo {
+    pub fn status(&self, launching: bool) -> &str {
+        match &self.device {
+            Some(device) if device.ready => "Running",
+            _ if launching => "Starting…",
+            Some(device) => &device.state,
+            None => "Stopped",
+        }
+    }
+
+    pub fn can_launch(&self, launching: bool) -> bool {
+        self.device.is_none() && !launching
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Snapshot {
     pub adb: ToolInfo,
     pub emulator: ToolInfo,
     pub scrcpy: ToolInfo,
     pub devices: Vec<DeviceInfo>,
-    pub avds: Vec<String>,
+    pub avds: Vec<AvdInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,10 +317,7 @@ fn collect_snapshot() -> Snapshot {
             let devices = adb.devices().ok()?;
             let running_avds = devices
                 .iter()
-                .filter(|device| {
-                    device.state == adb::DeviceState::Device
-                        && device.serial.starts_with("emulator-")
-                })
+                .filter(|device| device.serial.starts_with("emulator-"))
                 .filter_map(|device| {
                     adb.emulator_avd_name(&device.serial)
                         .ok()
@@ -307,7 +325,7 @@ fn collect_snapshot() -> Snapshot {
                 })
                 .collect::<HashMap<_, _>>();
             let services = adb.mdns_services().unwrap_or_default();
-            let devices = adb::dedupe_ready_devices(devices, &services)
+            let devices: Vec<_> = adb::dedupe_ready_devices(devices, &services)
                 .into_iter()
                 .map(|device| DeviceInfo {
                     name: running_avds
@@ -323,13 +341,10 @@ fn collect_snapshot() -> Snapshot {
                 })
                 .collect();
 
-            Some((devices, running_avds.into_values().collect::<HashSet<_>>()))
+            Some((devices, running_avds))
         })
         .unwrap_or_default();
-    let avds = avds
-        .into_iter()
-        .filter(|name| !running_avds.contains(name))
-        .collect();
+    let avds = avd_rows(avds, &devices, &running_avds);
 
     Snapshot {
         adb: adb_info,
@@ -338,6 +353,37 @@ fn collect_snapshot() -> Snapshot {
         devices,
         avds,
     }
+}
+
+fn avd_rows(
+    names: Vec<String>,
+    devices: &[DeviceInfo],
+    running_avds: &HashMap<String, String>,
+) -> Vec<AvdInfo> {
+    let mut avds: Vec<_> = names
+        .into_iter()
+        .map(|name| AvdInfo { name, device: None })
+        .collect();
+
+    for device in devices.iter().filter(|device| device.is_emulator) {
+        let name = running_avds.get(&device.serial);
+        if let Some(avd) = avds.iter_mut().find(|avd| Some(&avd.name) == name) {
+            // Multiple instances of the same AVD still occupy one row. Prefer
+            // a ready instance if another is offline.
+            if avd.device.is_none() || device.ready {
+                avd.device = Some(device.clone());
+            }
+        } else {
+            // Keep externally started emulators visible even if AVD discovery
+            // or the name lookup is unavailable.
+            avds.push(AvdInfo {
+                name: name.cloned().unwrap_or_else(|| device.name.clone()),
+                device: Some(device.clone()),
+            });
+        }
+    }
+
+    avds
 }
 
 fn is_emulator(device: &adb::AdbDevice) -> bool {
@@ -468,6 +514,15 @@ pub fn start_mirror(
 pub fn start_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
     {
         let mut state = shared.lock().unwrap();
+        if state.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .avds
+                .iter()
+                .any(|avd| avd.name == name && !avd.can_launch(false))
+        }) {
+            state.log(format!("AVD {name} is already running"));
+            return;
+        }
         if !state.starting_avds.insert(name.clone()) {
             state.log(format!("Already starting AVD {name}"));
             drop(state);
@@ -819,6 +874,90 @@ fn sleep_or_cancel(cancel: &Arc<AtomicBool>, duration: Duration) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avd_keeps_its_row_through_launch_running_and_shutdown() {
+        let names = vec!["Pixel_9a".to_string(), "Pixel_10_Pro_XL".to_string()];
+        let running_avds = HashMap::from([("emulator-5554".to_string(), "Pixel_9a".to_string())]);
+        let phone = device_info("phone", false, true);
+        let emulator = device_info("emulator-5554", true, true);
+
+        for (devices, launching, expected_status, can_launch) in [
+            (vec![phone.clone()], false, "Stopped", true),
+            (vec![phone.clone()], true, "Starting…", false),
+            (
+                vec![phone.clone(), device_info("emulator-5554", true, false)],
+                true,
+                "Starting…",
+                false,
+            ),
+            (
+                vec![phone.clone(), emulator.clone()],
+                true,
+                "Running",
+                false,
+            ),
+            (vec![phone.clone(), emulator], false, "Running", false),
+            (vec![phone], false, "Stopped", true),
+        ] {
+            let rows = avd_rows(names.clone(), &devices, &running_avds);
+            assert_eq!(
+                rows.iter().map(|row| &row.name).collect::<Vec<_>>(),
+                names.iter().collect::<Vec<_>>()
+            );
+            assert_eq!(rows[0].status(launching), expected_status);
+            assert_eq!(rows[0].can_launch(launching), can_launch);
+            assert_eq!(rows[1].status(false), "Stopped");
+        }
+    }
+
+    #[test]
+    fn external_emulators_stay_visible_without_avd_discovery() {
+        let running = device_info("emulator-5554", true, true);
+        let offline = device_info("emulator-5556", true, false);
+        let rows = avd_rows(
+            vec![],
+            &[device_info("phone", false, true), running, offline],
+            &HashMap::from([("emulator-5554".to_string(), "Pixel_9a".to_string())]),
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Pixel_9a");
+        assert_eq!(rows[0].status(false), "Running");
+        assert_eq!(rows[1].name, "emulator-5556");
+        assert_eq!(rows[1].status(false), "offline");
+        assert!(rows.iter().all(|row| !row.can_launch(false)));
+    }
+
+    #[test]
+    fn multiple_instances_of_an_avd_use_one_running_row() {
+        let rows = avd_rows(
+            vec!["Pixel_9a".to_string()],
+            &[
+                device_info("emulator-5554", true, true),
+                device_info("emulator-5556", true, false),
+            ],
+            &HashMap::from([
+                ("emulator-5554".to_string(), "Pixel_9a".to_string()),
+                ("emulator-5556".to_string(), "Pixel_9a".to_string()),
+            ]),
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status(false), "Running");
+        assert!(!rows[0].can_launch(false));
+    }
+
+    fn device_info(serial: &str, is_emulator: bool, ready: bool) -> DeviceInfo {
+        DeviceInfo {
+            serial: serial.to_string(),
+            mirror_key: serial.to_string(),
+            name: serial.to_string(),
+            ready,
+            state: if ready { "device" } else { "offline" }.to_string(),
+            is_emulator,
+        }
+    }
 
     #[test]
     fn mirror_key_collapses_endpoint_and_mdns_aliases() {
