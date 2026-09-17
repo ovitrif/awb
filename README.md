@@ -22,9 +22,9 @@ curl -fsSL https://github.com/ovitrif/awb/releases/latest/download/install.sh | 
 ```
 
 Requirements: `adb` on your PATH (Android SDK platform-tools). `scrcpy` is optional and
-only needed for screen mirroring. Launching AVDs requires the Android SDK Emulator. The
-phone needs Android 11+ with developer options enabled, on the same Wi-Fi network as your
-Mac.
+only needed for screen mirroring. Launching AVDs requires the Android SDK Emulator;
+deleting them requires Android SDK Command-Line Tools (`avdmanager`). The phone needs
+Android 11+ with developer options enabled, on the same Wi-Fi network as your Mac.
 
 ## Menu bar app
 
@@ -35,9 +35,10 @@ awb app
 The awb icon appears in the menu bar. Left-click toggles the popover: a Devices group
 with one-click phone mirroring, an Emulators group, a Logs tab, scrcpy settings, and QR
 pairing for new phones. Each configured AVD stays in the Emulators group while stopped,
-starting, or running. Click Launch to open its native Android Emulator window; running
-emulators have no mirror or second-launch action. Right-click offers Show, Pair, Refresh,
-and Quit.
+starting, or running. Click the play icon to open its native Android Emulator window,
+or the trash icon to delete a stopped AVD and its saved data after confirmation.
+Both actions are disabled while the emulator is starting or running. Right-click
+offers Show, Pair, Refresh, and Quit.
 
 macOS release archives also contain `Android Wifi Bridge.app` for /Applications and login items; it is the
 same menu bar app in a bundle.

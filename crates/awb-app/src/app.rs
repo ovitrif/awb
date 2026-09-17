@@ -14,7 +14,7 @@ use menu_icon::{
     Icon, MenuBarIcon, MenuBarIconBuilder, MenuBarIconEvent, MouseButton, MouseButtonState,
 };
 
-use crate::backend::{self, PairingPhase, PairingProgress, Shared, Snapshot};
+use crate::backend::{self, PairingPhase, PairingProgress, Shared};
 use crate::config::{Settings, ThemeMode};
 use crate::glyph;
 use crate::login_item;
@@ -282,6 +282,7 @@ pub struct App {
     pending_show: bool,
     last_menu_anchor: Option<MenuAnchor>,
     auto_mirrored: HashSet<String>,
+    pending_avd_delete: Option<String>,
     settings_scroll_offset: f32,
     settings_scroll_active_at: Option<Instant>,
 }
@@ -374,6 +375,7 @@ impl App {
             pending_show: false,
             last_menu_anchor: None,
             auto_mirrored: HashSet::new(),
+            pending_avd_delete: None,
             settings_scroll_offset: 0.0,
             settings_scroll_active_at: None,
         })
@@ -1179,11 +1181,16 @@ impl App {
     }
 
     fn devices_tab(&mut self, ui: &mut Ui, ctx: &Context) {
-        let (snapshot, mirrors, starting_avds): (Option<Snapshot>, Vec<String>, HashSet<String>) = {
+        let (snapshot, mirrors, starting_avds, deleting_avds) = {
             let state = self.shared.lock().unwrap();
             let mut mirrors = state.mirrors.keys().cloned().collect::<Vec<_>>();
             mirrors.extend(state.starting_mirrors.iter().cloned());
-            (state.snapshot.clone(), mirrors, state.starting_avds.clone())
+            (
+                state.snapshot.clone(),
+                mirrors,
+                state.starting_avds.clone(),
+                state.deleting_avds.clone(),
+            )
         };
 
         let Some(snapshot) = snapshot else {
@@ -1247,9 +1254,7 @@ impl App {
                         format!("{} · {}", device.serial, device.state)
                     };
 
-                    if list_row(ui, ph::DEVICE_MOBILE, &device.name, &detail, Some(action))
-                        .clicked()
-                    {
+                    if list_row(ui, ph::DEVICE_MOBILE, &device.name, &detail, &[action]).is_some() {
                         if mirroring {
                             backend::stop_mirror(&self.shared, &device.mirror_key);
                         } else {
@@ -1275,22 +1280,71 @@ impl App {
                     }
 
                     let starting = starting_avds.contains(&avd.name);
-                    let action = avd.device.is_none().then(|| {
-                        if avd.can_launch(starting) {
+                    let deleting = deleting_avds.contains(&avd.name);
+                    let idle = avd.can_launch(starting) && !deleting;
+                    let actions = [
+                        if idle {
                             RowAction::enabled(ph::PLAY, theme::text_bright())
                         } else {
                             RowAction::disabled(ph::PLAY)
                         }
-                        .with_label("Launch")
-                    });
+                        .with_tooltip("Start emulator"),
+                        if idle {
+                            RowAction::enabled(ph::TRASH, theme::text_muted())
+                        } else {
+                            RowAction::disabled(ph::TRASH)
+                        }
+                        .with_tooltip("Delete emulator"),
+                    ];
                     let name = avd.name.replace('_', " ");
-                    let detail = avd.status(starting);
+                    let detail = if deleting {
+                        "Deleting…"
+                    } else {
+                        avd.status(starting)
+                    };
 
-                    if list_row(ui, ph::DESKTOP, &name, detail, action).clicked() {
-                        backend::start_avd(self.shared.clone(), ctx.clone(), avd.name.clone());
+                    match list_row(ui, ph::DESKTOP, &name, detail, &actions) {
+                        Some(0) => {
+                            backend::start_avd(self.shared.clone(), ctx.clone(), avd.name.clone())
+                        }
+                        Some(1) => self.pending_avd_delete = Some(avd.name.clone()),
+                        _ => {}
                     }
                 }
             });
+
+        if let Some(name) = self.pending_avd_delete.clone() {
+            let mut close = false;
+            let modal = egui::Modal::new(egui::Id::new("delete-avd")).show(ctx, |ui| {
+                ui.set_width(280.0);
+                ui.label(semibold("Delete emulator?", 14.0, theme::text_bright()));
+                ui.label(regular(&name, 12.0, theme::text_bright()));
+                ui.label(regular(
+                    "This permanently deletes the AVD and its saved data.",
+                    11.0,
+                    theme::text_muted(),
+                ));
+                ui.add_space(8.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, ph::TRASH, 16.0, theme::red())
+                        .on_hover_text("Delete emulator and its saved data")
+                        .clicked()
+                    {
+                        backend::delete_avd(self.shared.clone(), ctx.clone(), name.clone());
+                        close = true;
+                    }
+                    if icon_button(ui, ph::X, 16.0, theme::text_bright())
+                        .on_hover_text("Cancel")
+                        .clicked()
+                    {
+                        close = true;
+                    }
+                });
+            });
+            if close || modal.should_close() {
+                self.pending_avd_delete = None;
+            }
+        }
     }
 
     fn logs_tab(&mut self, ui: &mut Ui) {
@@ -1615,7 +1669,7 @@ impl App {
 
 struct RowAction {
     glyph: &'static str,
-    label: Option<&'static str>,
+    tooltip: Option<&'static str>,
     color: Color32,
     enabled: bool,
 }
@@ -1624,7 +1678,7 @@ impl RowAction {
     fn enabled(glyph: &'static str, color: Color32) -> Self {
         Self {
             glyph,
-            label: None,
+            tooltip: None,
             color,
             enabled: true,
         }
@@ -1633,19 +1687,15 @@ impl RowAction {
     fn disabled(glyph: &'static str) -> Self {
         Self {
             glyph,
-            label: None,
+            tooltip: None,
             color: theme::text_faint(),
             enabled: false,
         }
     }
 
-    fn with_label(mut self, label: &'static str) -> Self {
-        self.label = Some(label);
+    fn with_tooltip(mut self, tooltip: &'static str) -> Self {
+        self.tooltip = Some(tooltip);
         self
-    }
-
-    fn width(&self) -> f32 {
-        if self.label.is_some() { 52.0 } else { 22.0 }
     }
 }
 
@@ -1722,12 +1772,12 @@ fn list_row(
     row_icon: &str,
     name: &str,
     detail: &str,
-    action: Option<RowAction>,
-) -> egui::Response {
-    let mut clicked = false;
-    let reserved = action.as_ref().map_or(4.0, |action| action.width() + 12.0);
+    actions: &[RowAction],
+) -> Option<usize> {
+    let mut clicked = None;
+    let reserved = 4.0 + actions.len() as f32 * (22.0 + ui.spacing().item_spacing.x);
 
-    let response = ui.horizontal(|ui| {
+    ui.horizontal(|ui| {
         ui.set_height(38.0);
         ui.add_space(2.0);
         ui.add(Label::new(icon(row_icon, 14.0, theme::text_label())).selectable(false));
@@ -1754,9 +1804,9 @@ fn list_row(
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(2.0);
-            if let Some(action) = action {
+            for (index, action) in actions.iter().enumerate().rev() {
                 let (rect, response) = ui.allocate_exact_size(
-                    vec2(action.width(), 22.0),
+                    vec2(22.0, 22.0),
                     if action.enabled {
                         Sense::click()
                     } else {
@@ -1774,28 +1824,27 @@ fn list_row(
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    action.label.unwrap_or(action.glyph),
-                    if action.label.is_some() {
-                        FontId::new(10.5, FontFamily::Proportional)
-                    } else {
-                        theme::icon_font(10.0)
-                    },
+                    action.glyph,
+                    theme::icon_font(10.0),
                     action.color,
                 );
 
+                let response = if let Some(tooltip) = action.tooltip {
+                    response.on_hover_text(tooltip)
+                } else {
+                    response
+                };
                 if action.enabled {
                     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    clicked = response.clicked();
+                    if response.clicked() {
+                        clicked = Some(index);
+                    }
                 }
             }
         });
     });
 
-    let mut response = response.response;
-    if clicked {
-        response.flags |= egui::response::Flags::CLICKED;
-    }
-    response
+    clicked
 }
 
 fn dependency_row(ui: &mut Ui, row_icon: &str, name: &str, info: Option<&backend::ToolInfo>) {
@@ -2345,7 +2394,7 @@ mod tests {
     const MARGIN: f64 = 8.0;
 
     #[test]
-    fn long_avd_name_leaves_status_and_launch_button_visible() {
+    fn long_avd_name_leaves_status_and_action_icons_visible() {
         let ctx = Context::default();
         theme::install_fonts(&ctx);
         let output = ctx.run_ui(
@@ -2360,7 +2409,10 @@ mod tests {
                         ph::DESKTOP,
                         "bitkit recording with a very long emulator name",
                         "Starting…",
-                        Some(RowAction::disabled(ph::PLAY).with_label("Launch")),
+                        &[
+                            RowAction::disabled(ph::PLAY),
+                            RowAction::disabled(ph::TRASH),
+                        ],
                     );
                 });
             },
@@ -2377,13 +2429,86 @@ mod tests {
             .iter()
             .find(|text| text.galley.text() == "Starting…")
             .unwrap();
-        let launch = text
+        let play = text
             .iter()
-            .find(|text| text.galley.text() == "Launch")
+            .find(|text| text.galley.text() == ph::PLAY)
             .unwrap();
-        assert!(status.pos.x + status.galley.size().x < launch.pos.x);
-        assert!(launch.pos.x + launch.galley.size().x <= 332.0);
+        let trash = text
+            .iter()
+            .find(|text| text.galley.text() == ph::TRASH)
+            .unwrap();
+        assert!(status.pos.x + status.galley.size().x < play.pos.x);
+        assert!(play.pos.x + play.galley.size().x < trash.pos.x);
+        assert!(trash.pos.x + trash.galley.size().x <= 332.0);
+        assert!(text.iter().all(|text| text.galley.text() != "Launch"));
         assert!(text.iter().any(|text| text.galley.elided));
+    }
+
+    #[test]
+    fn row_icons_dispatch_separate_actions_and_ignore_disabled_clicks() {
+        let ctx = Context::default();
+        theme::install_fonts(&ctx);
+        let render = |events, enabled| {
+            let mut clicked = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(340.0, 100.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        let actions = [ph::PLAY, ph::TRASH].map(|glyph| {
+                            if enabled {
+                                RowAction::enabled(glyph, theme::text_bright())
+                            } else {
+                                RowAction::disabled(glyph)
+                            }
+                        });
+                        clicked = list_row(ui, ph::DESKTOP, "Pixel 9a", "Stopped", &actions);
+                    });
+                },
+            );
+            (output, clicked)
+        };
+        let (output, _) = render(vec![], true);
+        for (index, glyph) in [ph::PLAY, ph::TRASH].iter().enumerate() {
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == *glyph => {
+                        Some(text.pos + text.galley.size() / 2.0)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            for enabled in [true, false] {
+                render(vec![], enabled);
+                render(
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    enabled,
+                );
+                let (_, clicked) = render(
+                    vec![egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    enabled,
+                );
+                assert_eq!(clicked, enabled.then_some(index));
+            }
+        }
     }
 
     #[test]

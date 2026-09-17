@@ -86,8 +86,12 @@ fn standard_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn android_sdk_tool_dirs(sdk: &Path) -> [PathBuf; 2] {
-    [sdk.join("platform-tools"), sdk.join("emulator")]
+fn android_sdk_tool_dirs(sdk: &Path) -> [PathBuf; 3] {
+    [
+        sdk.join("platform-tools"),
+        sdk.join("emulator"),
+        sdk.join("cmdline-tools/latest/bin"),
+    ]
 }
 
 fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
@@ -128,12 +132,13 @@ mod tests {
     }
 
     #[test]
-    fn android_sdk_dirs_include_adb_and_emulator() {
+    fn android_sdk_dirs_include_adb_emulator_and_command_line_tools() {
         assert_eq!(
             android_sdk_tool_dirs(Path::new("/sdk")),
             [
                 PathBuf::from("/sdk/platform-tools"),
-                PathBuf::from("/sdk/emulator")
+                PathBuf::from("/sdk/emulator"),
+                PathBuf::from("/sdk/cmdline-tools/latest/bin")
             ]
         );
     }

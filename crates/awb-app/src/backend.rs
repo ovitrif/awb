@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use awb_core::adb::{self, Adb};
-use awb_core::emulator::Emulator;
+use awb_core::emulator::{self, Emulator};
 use awb_core::pairing_flow::{
     self, AlreadyConnectedChoice, PairingEvent, PairingFlowDelegate, PairingProgressKind,
 };
@@ -101,6 +101,7 @@ pub struct Shared {
     pub mirrors: HashMap<String, Child>,
     pub starting_mirrors: HashSet<String>,
     pub starting_avds: HashSet<String>,
+    pub deleting_avds: HashSet<String>,
 }
 
 impl Shared {
@@ -514,6 +515,9 @@ pub fn start_mirror(
 pub fn start_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
     {
         let mut state = shared.lock().unwrap();
+        if state.deleting_avds.contains(&name) {
+            return;
+        }
         if state.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot
                 .avds
@@ -569,6 +573,58 @@ pub fn start_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
                 ctx.request_repaint();
             }
         }
+    });
+}
+
+pub fn delete_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
+    {
+        let mut state = shared.lock().unwrap();
+        let stopped = state.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .avds
+                .iter()
+                .any(|avd| avd.name == name && avd.device.is_none())
+        });
+        if !stopped
+            || state.starting_avds.contains(&name)
+            || !state.deleting_avds.insert(name.clone())
+        {
+            return;
+        }
+    }
+    ctx.request_repaint();
+
+    thread::spawn(move || {
+        let result = (|| -> anyhow::Result<()> {
+            let _adb_work = ADB_WORK_LOCK.lock().unwrap();
+            let adb = Adb::resolve(None)?;
+            let devices = adb.devices()?;
+            let active_names = devices
+                .iter()
+                .filter(|device| is_emulator(device))
+                .map(|device| adb.emulator_avd_name(&device.serial))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            anyhow::ensure!(
+                !active_names.contains(&name),
+                "AVD {name} is running; stop it before deleting"
+            );
+            emulator::remove_avd(&name)
+        })();
+
+        let mut state = shared.lock().unwrap();
+        state.deleting_avds.remove(&name);
+        match result {
+            Ok(()) => {
+                if let Some(snapshot) = &mut state.snapshot {
+                    snapshot.avds.retain(|avd| avd.name != name);
+                }
+                state.log(format!("Deleted AVD {name}"));
+            }
+            Err(error) => state.log(format!("Could not delete AVD {name}: {error:#}")),
+        }
+        drop(state);
+        ctx.request_repaint();
+        refresh_status(shared, ctx);
     });
 }
 
@@ -874,6 +930,58 @@ fn sleep_or_cancel(cancel: &Arc<AtomicBool>, duration: Duration) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_rejects_running_starting_and_already_deleting_avds() {
+        let tool = ToolInfo {
+            available: true,
+            detail: String::new(),
+            warnings: vec![],
+        };
+        for (device, starting, deleting) in [
+            (Some(device_info("emulator-5554", true, true)), false, false),
+            (
+                Some(device_info("emulator-5554", true, false)),
+                false,
+                false,
+            ),
+            (None, true, false),
+            (None, false, true),
+        ] {
+            let shared = Arc::new(Mutex::new(Shared {
+                snapshot: Some(Snapshot {
+                    adb: tool.clone(),
+                    emulator: tool.clone(),
+                    scrcpy: tool.clone(),
+                    devices: vec![],
+                    avds: vec![AvdInfo {
+                        name: "Pixel_9a".to_string(),
+                        device,
+                    }],
+                }),
+                starting_avds: if starting {
+                    HashSet::from(["Pixel_9a".to_string()])
+                } else {
+                    HashSet::new()
+                },
+                deleting_avds: if deleting {
+                    HashSet::from(["Pixel_9a".to_string()])
+                } else {
+                    HashSet::new()
+                },
+                ..Default::default()
+            }));
+            delete_avd(shared.clone(), Context::default(), "Pixel_9a".to_string());
+            assert_eq!(
+                shared.lock().unwrap().deleting_avds.contains("Pixel_9a"),
+                deleting
+            );
+            if deleting {
+                start_avd(shared.clone(), Context::default(), "Pixel_9a".to_string());
+                assert!(shared.lock().unwrap().starting_avds.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn avd_keeps_its_row_through_launch_running_and_shutdown() {
