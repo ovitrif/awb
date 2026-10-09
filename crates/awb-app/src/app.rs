@@ -45,6 +45,8 @@ const SCROLLBAR_FADE: f64 = 0.25;
 const HEADER_HEIGHT: f32 = 26.0;
 const HEADER_GAP: f32 = 10.0;
 const HEADER_BUTTON_SIZE: f32 = 26.0;
+/// Width of the logo or back caret ahead of the page title.
+const HEADER_LEADING_WIDTH: f32 = 32.0;
 const HEADER_BUTTON_GAP: f32 = 6.0;
 const SHELL_OVERSAMPLE: u32 = 3;
 const ROW_HEIGHT: f32 = 38.0;
@@ -301,6 +303,7 @@ pub struct App {
     last_poll: Instant,
     created_at: Instant,
     open_at_login: Option<bool>,
+    login_query: Option<std::sync::mpsc::Receiver<bool>>,
     pending_show: bool,
     pending_egui_theme: Option<theme::Appearance>,
     last_menu_anchor: Option<MenuAnchor>,
@@ -424,6 +427,7 @@ impl App {
             last_poll: Instant::now(),
             created_at: Instant::now(),
             open_at_login: None,
+            login_query: None,
             pending_show: false,
             pending_egui_theme: None,
             last_menu_anchor: None,
@@ -1305,21 +1309,22 @@ impl eframe::App for App {
                 let outgoing_x = -transition.direction * SCREEN_OUTGOING_OFFSET * eased;
                 let incoming_x = transition.direction * SCREEN_INCOMING_OFFSET * (1.0 - eased);
 
-                self.header(
+                self.header(ui, &ctx, header, transition.from, transition.to, eased);
+                // The outgoing page clears early so the two never read as one.
+                let outgoing_opacity = (1.0 - eased * 1.8).max(0.0);
+                self.render_screen(
                     ui,
+                    body,
                     &ctx,
-                    header,
-                    &[
-                        (transition.from, outgoing_x * 0.4, 1.0 - eased),
-                        (transition.to, incoming_x * 0.4, eased),
-                    ],
+                    transition.from,
+                    outgoing_x,
+                    outgoing_opacity,
                 );
-                self.render_screen(ui, body, &ctx, transition.from, outgoing_x, 1.0 - eased);
                 self.render_screen(ui, body, &ctx, transition.to, incoming_x, eased);
                 ctx.request_repaint();
             }
             _ => {
-                self.header(ui, &ctx, header, &[(self.screen, 0.0, 1.0)]);
+                self.header(ui, &ctx, header, self.screen, self.screen, 1.0);
                 self.render_screen(ui, body, &ctx, self.screen, 0.0, 1.0);
             }
         }
@@ -1329,39 +1334,88 @@ impl eframe::App for App {
 impl App {
     /// The header stays put across pages: its title cross-fades with the page
     /// while refresh, settings and pairing remain in the top-right corner.
-    fn header(&mut self, ui: &mut Ui, ctx: &Context, rect: Rect, titles: &[(Screen, f32, f32)]) {
-        let settled = titles.len() == 1;
-        for &(screen, offset_x, opacity) in titles {
-            let mut title_ui = ui.new_child(
+    /// `progress` runs from `from` to `to`; equal screens mean a settled page.
+    /// Titles fade out and then in rather than overlapping, and the back caret
+    /// stays put when moving between two sub-pages.
+    fn header(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &Context,
+        rect: Rect,
+        from: Screen,
+        to: Screen,
+        progress: f32,
+    ) {
+        let settled = from == to;
+        let out_opacity = (1.0 - 2.0 * progress).max(0.0);
+        let in_opacity = if settled {
+            1.0
+        } else {
+            (2.0 * progress - 1.0).max(0.0)
+        };
+        let has_back = |screen| screen != Screen::Main;
+        let shared_back = has_back(from) && has_back(to);
+
+        let mut title_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("header-title")
+                .max_rect(rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        if !settled {
+            title_ui.disable();
+        }
+        let leading = Rect::from_min_size(rect.min, vec2(HEADER_LEADING_WIDTH, rect.height()));
+        let mut lead_ui = |ui: &mut Ui, screen: Screen, opacity: f32| {
+            let mut lead = ui.new_child(
                 egui::UiBuilder::new()
-                    .id_salt(("header-title", screen))
-                    .max_rect(rect.translate(vec2(offset_x, 0.0)))
+                    .id_salt(("header-leading", has_back(screen)))
+                    .max_rect(leading)
                     .layout(Layout::left_to_right(Align::Center)),
             );
-            title_ui.set_opacity(opacity);
-            if !settled {
-                title_ui.disable();
-            }
-            match screen {
-                Screen::Main => {
-                    title_ui.add(
-                        egui::Image::new(&self.logo)
-                            .fit_to_exact_size(vec2(24.0, 24.0))
-                            .corner_radius(0.0),
-                    );
-                    title_ui.add_space(9.0);
+            lead.set_opacity(opacity);
+            if has_back(screen) {
+                let back = icon_button(&mut lead, ph::CARET_LEFT, 14.0, theme::text_muted())
+                    .on_hover_text("Back");
+                if back.clicked() {
+                    self.nav_back(ctx, false);
                 }
-                Screen::Settings | Screen::Pair => {
-                    let back =
-                        icon_button(&mut title_ui, ph::CARET_LEFT, 14.0, theme::text_muted())
-                            .on_hover_text("Back");
-                    if back.clicked() {
-                        self.nav_back(ctx, false);
-                    }
-                    title_ui.add_space(6.0);
-                }
+            } else {
+                lead.add(
+                    egui::Image::new(&self.logo)
+                        .fit_to_exact_size(vec2(24.0, 24.0))
+                        .corner_radius(0.0),
+                );
             }
-            title_ui.add(
+        };
+        if settled || shared_back {
+            lead_ui(&mut title_ui, to, 1.0);
+        } else {
+            lead_ui(&mut title_ui, from, out_opacity);
+            lead_ui(&mut title_ui, to, in_opacity);
+        }
+
+        let text_rect = Rect::from_min_max(
+            egui::pos2(rect.left() + HEADER_LEADING_WIDTH, rect.top()),
+            rect.max,
+        );
+        let titles: &[(Screen, f32)] = if settled {
+            &[(to, 1.0)]
+        } else {
+            &[(from, out_opacity), (to, in_opacity)]
+        };
+        for &(screen, opacity) in titles {
+            if opacity <= 0.0 {
+                continue;
+            }
+            let mut text_ui = title_ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("header-text", screen))
+                    .max_rect(text_rect)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            text_ui.set_opacity(opacity);
+            text_ui.add(
                 Label::new(semibold(screen_title(screen), 14.0, theme::text_strong()))
                     .selectable(false),
             );
@@ -1742,17 +1796,29 @@ impl App {
             ui.add_space(10.0);
             // Queried lazily: the System Events lookup prompts for Automation
             // access the first time, so we defer it until Settings is opened.
-            let mut open_at_login = match self.open_at_login {
-                Some(value) => value,
-                None => {
-                    let enabled = login_item::is_enabled();
-                    self.open_at_login = Some(enabled);
-                    enabled
-                }
-            };
+            // It runs off the UI thread so opening Settings never stutters.
+            if self.open_at_login.is_none() && self.login_query.is_none() {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let repaint = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = sender.send(login_item::is_enabled());
+                    repaint.request_repaint();
+                });
+                self.login_query = Some(receiver);
+            }
+            if let Some(enabled) = self
+                .login_query
+                .as_ref()
+                .and_then(|receiver| receiver.try_recv().ok())
+            {
+                self.open_at_login = Some(enabled);
+                self.login_query = None;
+            }
+            let mut open_at_login = self.open_at_login.unwrap_or(false);
             if check_item(ui, "Open at Login", &mut open_at_login) {
                 login_item::set_enabled(open_at_login);
                 self.open_at_login = Some(open_at_login);
+                self.login_query = None;
             }
 
             if changed {
@@ -1800,43 +1866,39 @@ impl App {
 
         match phase {
             PairingPhase::Qr { modules, progress } => {
-                let block_height = QR_CARD_SIZE;
-                center_pad(ui, block_height);
-                ui.horizontal_top(|ui| {
+                let steps = [
+                    "Developer options",
+                    "Wireless debugging",
+                    "Pair device with QR code",
+                ];
+                let steps_height = steps.len() as f32 * PAIRING_STEP_HEIGHT;
+                center_pad(
+                    ui,
+                    QR_CARD_SIZE + 16.0 + 18.0 + 10.0 + steps_height + 10.0 + 16.0,
+                );
+                ui.vertical_centered(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(vec2(QR_CARD_SIZE, QR_CARD_SIZE), Sense::hover());
                     paint_qr_card(ui, rect, &modules);
-                    ui.add_space(18.0);
-                    ui.vertical(|ui| {
-                        ui.add_space(4.0);
-                        ui.add(
-                            Label::new(semibold(
-                                "Scan with your phone",
-                                13.0,
-                                theme::text_bright(),
-                            ))
+                    ui.add_space(16.0);
+                    ui.add(
+                        Label::new(semibold("Scan with your phone", 13.0, theme::text_bright()))
                             .selectable(false),
-                        );
-                        ui.add_space(4.0);
-                        ui.add(
-                            Label::new(regular("On the phone, open", 11.0, theme::text_soft()))
-                                .selectable(false),
-                        );
-                        ui.add_space(8.0);
-                        for (index, step) in [
-                            "Developer options",
-                            "Wireless debugging",
-                            "Pair device with QR code",
-                        ]
-                        .iter()
-                        .enumerate()
-                        {
-                            pairing_step(ui, index + 1, step);
-                            ui.add_space(5.0);
-                        }
-                        ui.add_space(7.0);
-                        pairing_progress_block(ui, &progress, ui.available_width(), Align::Min);
-                    });
+                    );
+                    ui.add_space(10.0);
+                    // The steps stay left-aligned as one block, centered under the code.
+                    let block_width = pairing_steps_width(ui, &steps);
+                    ui.allocate_ui_with_layout(
+                        vec2(block_width, steps_height),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            for (index, step) in steps.iter().enumerate() {
+                                pairing_step(ui, index + 1, step);
+                            }
+                        },
+                    );
+                    ui.add_space(10.0);
+                    pairing_progress_block(ui, &progress, 310.0, Align::Center);
                 });
             }
             PairingPhase::Connecting { progress } => {
@@ -2490,10 +2552,34 @@ fn paint_qr_card(ui: &Ui, rect: Rect, modules: &awb_core::qr::QrModules) {
     }
 }
 
+const PAIRING_STEP_HEIGHT: f32 = 22.0;
+const PAIRING_BADGE_SIZE: f32 = 17.0;
+const PAIRING_BADGE_GAP: f32 = 8.0;
+
+fn pairing_step_font() -> FontId {
+    FontId::new(11.5, FontFamily::Proportional)
+}
+
+/// Width of the widest numbered step, so the steps center as one block.
+fn pairing_steps_width(ui: &Ui, steps: &[&str]) -> f32 {
+    let text = steps
+        .iter()
+        .map(|step| {
+            ui.painter()
+                .layout_no_wrap((*step).to_owned(), pairing_step_font(), theme::text_check())
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    PAIRING_BADGE_SIZE + PAIRING_BADGE_GAP + text.ceil()
+}
+
 /// A numbered step of the phone-side pairing path.
 fn pairing_step(ui: &mut Ui, number: usize, text: &str) {
     ui.horizontal(|ui| {
-        let (badge, _) = ui.allocate_exact_size(vec2(17.0, 17.0), Sense::hover());
+        ui.set_height(PAIRING_STEP_HEIGHT);
+        let (badge, _) =
+            ui.allocate_exact_size(vec2(PAIRING_BADGE_SIZE, PAIRING_BADGE_SIZE), Sense::hover());
         ui.painter()
             .circle_filled(badge.center(), 8.5, theme::control_selected());
         ui.painter().text(
@@ -2503,8 +2589,15 @@ fn pairing_step(ui: &mut Ui, number: usize, text: &str) {
             FontId::new(10.0, FontFamily::Name(theme::SEMIBOLD.into())),
             theme::text_bright(),
         );
-        ui.add_space(8.0);
-        ui.add(Label::new(regular(text, 11.5, theme::text_check())).selectable(false));
+        ui.add_space(PAIRING_BADGE_GAP);
+        ui.add(
+            Label::new(
+                egui::RichText::new(text)
+                    .font(pairing_step_font())
+                    .color(theme::text_check()),
+            )
+            .selectable(false),
+        );
     });
 }
 
