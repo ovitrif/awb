@@ -47,7 +47,7 @@ fn parse(value: &str) -> Option<MockPairing> {
         _ => return None,
     };
     let scan_after = match seconds {
-        Some(seconds) => Duration::from_secs_f64(seconds.trim().parse().ok()?),
+        Some(seconds) => Duration::try_from_secs_f64(seconds.trim().parse().ok()?).ok()?,
         None => DEFAULT_SCAN_AFTER,
     };
     Some(MockPairing {
@@ -78,5 +78,7 @@ mod tests {
         );
         assert_eq!(parse("maybe"), None);
         assert_eq!(parse("success:soon"), None);
+        assert_eq!(parse("success:-1"), None);
+        assert_eq!(parse("success:inf"), None);
     }
 }

@@ -37,7 +37,8 @@ ICON_PLIST_KEYS="<key>CFBundleIconName</key><string>AppIcon</string>"
 if ! xcrun actool "$ICON_SOURCE" --compile "${APP}/Contents/Resources" \
   --platform macosx --minimum-deployment-target 11.0 --app-icon AppIcon \
   --output-partial-info-plist "$(mktemp -d)/icon.plist" >/dev/null 2>&1 \
-  || [ ! -f "${APP}/Contents/Resources/Assets.car" ]; then
+  || [ ! -f "${APP}/Contents/Resources/Assets.car" ] \
+  || [ ! -f "${APP}/Contents/Resources/AppIcon.icns" ]; then
   echo "actool could not compile ${ICON_SOURCE}; using the flat icon" >&2
   rm -f "${APP}/Contents/Resources/Assets.car" "${APP}/Contents/Resources/AppIcon.icns"
   ICON_NAME="awb"

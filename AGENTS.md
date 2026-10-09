@@ -47,9 +47,11 @@ screen, mouse or keyboard: drive the real popover headlessly.
   `gradients on|off`, `quit`. Coordinates are window points: 380 wide, 0 at
   the top of the beak; the header buttons sit at y 36, x 287 (Refresh), 319
   (Settings) and 351 (Pair). The full reference is in `crates/awb-app/src/drive.rs`.
-- The drive server always uses a throwaway config folder (seed it with
-  `AWB_DRIVE_CONFIG=<config.toml>`) and never touches the login item, so it
-  never changes the user's setup.
+- The drive server isolates settings only: it uses a throwaway config folder
+  (seed it with `AWB_DRIVE_CONFIG=<config.toml>`) and never touches the login
+  item. Everything else is real: adb, the emulator, `avdmanager` and scrcpy,
+  so confirming a delete removes a real AVD and Play starts a real emulator or
+  mirror. Run it with demo AVDs (below) unless real ones are the point.
 - Light and dark mode: `theme day` / `theme night` / `theme auto` over the
   socket. In the running app, use the Appearance control in Settings or set
   `theme = "day"`, `"night"` or `"auto"` in `~/.config/awb/config.toml`

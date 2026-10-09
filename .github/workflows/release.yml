@@ -59,6 +59,15 @@ jobs:
         if: matrix.build_kind == 'native'
         run: cargo build --release -p awb -p awb-app --target ${{ matrix.target }}
 
+      - name: Select Xcode 26 for the Liquid Glass icon
+        if: contains(matrix.target, 'apple-darwin')
+        run: |
+          # actool compiles .icon bundles from Xcode 26 on; older ones make
+          # the bundle fall back to the flat icon.
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_26*.app' | sort -V | tail -1)"
+          if [ -n "$xcode" ]; then sudo xcode-select -s "$xcode"; fi
+          xcrun actool --version | grep -A1 short-bundle-version | tail -1
+
       - name: Package
         shell: bash
         run: |

@@ -652,7 +652,14 @@ impl App {
 
         let escape =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        if escape {
+        if !escape {
+            return;
+        }
+        // Escape closes the innermost layer: an open delete dialog first,
+        // then the popover.
+        if self.pending_avd_delete.take().is_some() {
+            ctx.request_repaint();
+        } else {
             self.hide(ctx);
         }
     }
@@ -1787,7 +1794,10 @@ impl App {
                     avd.status(starting)
                 };
                 let row = Row {
-                    key: &avd.name,
+                    key: avd
+                        .device
+                        .as_ref()
+                        .map_or(avd.name.as_str(), |device| device.serial.as_str()),
                     icon: ph::ANDROID_LOGO,
                     name: &name,
                     tooltip: &name,
