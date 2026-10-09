@@ -1685,6 +1685,16 @@ impl App {
             )
         };
 
+        // The dialog only shows for a listed AVD; one that vanished (deleted
+        // elsewhere, or a list not loaded yet) drops its pending delete.
+        if let Some(name) = &self.pending_avd_delete
+            && !snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.avds.iter().any(|avd| &avd.name == name))
+        {
+            self.pending_avd_delete = None;
+        }
+
         let Some(snapshot) = snapshot else {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
