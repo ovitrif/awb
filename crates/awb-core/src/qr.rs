@@ -16,7 +16,8 @@ impl PairingQr {
         Self::with_instance(pairing_instance_name())
     }
 
-    fn with_instance(instance: String) -> Self {
+    /// A QR for a given mDNS instance name, e.g. a neutral name for demos.
+    pub fn with_instance(instance: String) -> Self {
         let secret = safe_random(16);
         let payload = format!("WIFI:T:ADB;S:{instance};P:{secret};;");
 

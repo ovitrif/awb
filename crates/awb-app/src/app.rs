@@ -57,6 +57,8 @@ const ROW_HOVER_BLEED: f32 = 7.0;
 /// How far pages may draw above the body, into the gap under the header.
 const SCREEN_TOP_BLEED: f32 = 6.0;
 const QR_CARD_SIZE: f32 = 164.0;
+/// How long the Pair page shows a successful pairing before going back.
+const PAIRED_HOLD: Duration = Duration::from_millis(1100);
 const CONTROL_HOVER_TRANSITION: f32 = 0.14;
 const CONTROL_PRESS_TRANSITION: f32 = 0.07;
 /// How long after launch to keep forcing the window hidden, in case the
@@ -1256,11 +1258,24 @@ impl eframe::App for App {
         };
         ctx.request_repaint_after(interval);
 
+        // A finished pairing holds its "Paired" state for a moment, then
+        // returns to the device list as a step back (Main slides in from the
+        // left while the Pair page slides out to the right).
         let pairing_done = {
             let state = self.shared.lock().unwrap();
-            self.screen == Screen::Pair && state.pairing.is_none()
+            match state.pairing.as_ref().map(|session| &session.phase) {
+                None => true,
+                Some(PairingPhase::Paired { at, .. }) => {
+                    let remaining = PAIRED_HOLD.saturating_sub(at.elapsed());
+                    if !remaining.is_zero() {
+                        ctx.request_repaint_after(remaining);
+                    }
+                    remaining.is_zero()
+                }
+                Some(_) => false,
+            }
         };
-        if pairing_done {
+        if self.screen == Screen::Pair && pairing_done {
             self.navigate(Screen::Main, ctx);
         }
     }
@@ -1946,6 +1961,16 @@ impl App {
                     hint_label(ui, &progress.detail, 300.0);
                     ui.add_space(10.0);
                     pairing_progress_block(ui, &progress, 310.0, Align::Center);
+                });
+            }
+            PairingPhase::Paired { device_name, .. } => {
+                center_pad(ui, 28.0 + 12.0 + 18.0 + 4.0 + 18.0);
+                ui.vertical_centered(|ui| {
+                    ui.add(Label::new(icon(ph::CHECK_CIRCLE, 28.0, theme::green())));
+                    ui.add_space(12.0);
+                    ui.add(Label::new(semibold("Paired", 13.0, theme::text_bright())));
+                    ui.add_space(4.0);
+                    hint_label(ui, &format!("{device_name} is connected."), 300.0);
                 });
             }
             PairingPhase::Failed { message } => {

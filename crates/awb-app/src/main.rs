@@ -5,6 +5,7 @@ mod backend;
 mod config;
 mod glyph;
 mod login_item;
+mod mock;
 #[cfg(target_os = "macos")]
 mod status_click;
 mod theme;

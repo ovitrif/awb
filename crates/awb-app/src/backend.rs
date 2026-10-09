@@ -14,10 +14,12 @@ use awb_core::emulator::{self, Emulator};
 use awb_core::pairing_flow::{
     self, AlreadyConnectedChoice, PairingEvent, PairingFlowDelegate, PairingProgressKind,
 };
-use awb_core::qr::QrModules;
+use awb_core::qr::{PairingQr, QrModules};
 use awb_core::scrcpy::Scrcpy;
 use awb_core::wifi;
 use eframe::egui::Context;
+
+use crate::mock;
 
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
 static ADB_WORK_LOCK: Mutex<()> = Mutex::new(());
@@ -83,6 +85,12 @@ pub enum PairingPhase {
     Failed {
         message: String,
     },
+    /// Pairing succeeded; the page shows this briefly before returning to the
+    /// device list, so the way back reads as a step back.
+    Paired {
+        device_name: String,
+        at: Instant,
+    },
 }
 
 pub struct PairingSession {
@@ -102,6 +110,8 @@ pub struct Shared {
     pub starting_mirrors: HashSet<String>,
     pub starting_avds: HashSet<String>,
     pub deleting_avds: HashSet<String>,
+    /// Phones "paired" by the mock pairing flow, listed with the real ones.
+    pub mock_devices: Vec<DeviceInfo>,
 }
 
 impl Shared {
@@ -184,10 +194,11 @@ pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
     ctx.request_repaint();
 
     thread::spawn(move || {
-        let snapshot = collect_snapshot();
+        let mut snapshot = collect_snapshot();
+        let mut state = shared.lock().unwrap();
+        snapshot.devices.extend(state.mock_devices.iter().cloned());
         let device_connected = snapshot.devices.iter().any(|device| device.ready);
 
-        let mut state = shared.lock().unwrap();
         state.reap_finished_mirrors();
         state.log_tool_warnings(&snapshot.scrcpy.warnings);
         state.snapshot = Some(snapshot);
@@ -676,7 +687,9 @@ pub fn start_pairing(shared: Arc<Mutex<Shared>>, ctx: Context) {
             session.cancel.store(true, Ordering::Relaxed);
         }
 
-        if let Err(error) = wifi::ensure_pairing_wifi_ready() {
+        if mock::pairing().is_none()
+            && let Err(error) = wifi::ensure_pairing_wifi_ready()
+        {
             let message = format!("{error:#}");
             state.pairing = Some(PairingSession {
                 phase: PairingPhase::Failed {
@@ -716,12 +729,17 @@ pub fn cancel_pairing(shared: &Arc<Mutex<Shared>>) {
 
     if let Some(session) = state.pairing.take() {
         session.cancel.store(true, Ordering::Relaxed);
-        state.log("Pairing cancelled");
+        if !matches!(session.phase, PairingPhase::Paired { .. }) {
+            state.log("Pairing cancelled");
+        }
     }
 }
 
 fn pairing_worker(shared: Arc<Mutex<Shared>>, ctx: Context, cancel: Arc<AtomicBool>) {
-    let result = run_pairing(&shared, &ctx, &cancel);
+    let result = match mock::pairing() {
+        Some(mock) => run_mock_pairing(&shared, &ctx, &cancel, mock),
+        None => run_pairing(&shared, &ctx, &cancel),
+    };
 
     if cancel.load(Ordering::Relaxed) {
         return;
@@ -735,7 +753,13 @@ fn pairing_worker(shared: Arc<Mutex<Shared>>, ctx: Context, cancel: Arc<AtomicBo
     match result {
         Ok(device_name) => {
             state.log(format!("Paired and connected to {device_name}"));
-            state.pairing = None;
+            set_phase(
+                &mut state,
+                PairingPhase::Paired {
+                    device_name,
+                    at: Instant::now(),
+                },
+            );
             drop(state);
             refresh_status(shared, ctx.clone());
         }
@@ -780,6 +804,73 @@ fn run_pairing(
     let phone = pairing_flow::pair_and_connect(&adb, PAIRING_TIMEOUT, &mut delegate)?;
 
     Ok(phone.display_name)
+}
+
+/// Feeds the app's pairing delegate a scripted pairing: the same events a real
+/// pairing produces, with a simulated scan instead of mDNS and adb.
+fn run_mock_pairing(
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &Context,
+    cancel: &Arc<AtomicBool>,
+    mock: mock::MockPairing,
+) -> anyhow::Result<String> {
+    let mut delegate = AppPairingDelegate {
+        shared,
+        ctx,
+        cancel,
+    };
+    delegate.on_event(PairingEvent::QrReady(PairingQr::with_instance(
+        "awb-mock".to_string(),
+    )))?;
+    delegate.sleep(mock.scan_after)?;
+
+    let steps = [
+        (
+            PairingProgressKind::CompletingPairing,
+            "Pairing",
+            "The phone scanned the code; completing pairing.",
+        ),
+        (
+            PairingProgressKind::Connecting,
+            "Connecting",
+            "Opening a wireless debugging connection.",
+        ),
+        (
+            PairingProgressKind::Verifying,
+            "Verifying",
+            "Checking that the phone answers over adb.",
+        ),
+    ];
+    for (kind, title, detail) in steps {
+        delegate.on_event(PairingEvent::Progress(
+            PairingProgress::new(kind, title, detail).endpoint(mock::PHONE_ENDPOINT),
+        ))?;
+        delegate.sleep(Duration::from_millis(900))?;
+    }
+
+    match mock.outcome {
+        mock::Outcome::Failure => {
+            anyhow::bail!("Mock pairing failed: the phone rejected the pairing code.")
+        }
+        mock::Outcome::Success => {
+            let mut state = shared.lock().unwrap();
+            if !state
+                .mock_devices
+                .iter()
+                .any(|device| device.serial == mock::PHONE_ENDPOINT)
+            {
+                state.mock_devices.push(DeviceInfo {
+                    serial: mock::PHONE_ENDPOINT.to_string(),
+                    mirror_key: mock::PHONE_ENDPOINT.to_string(),
+                    name: mock::PHONE_NAME.to_string(),
+                    ready: true,
+                    state: "device".to_string(),
+                    is_emulator: false,
+                });
+            }
+            Ok(mock::PHONE_NAME.to_string())
+        }
+    }
 }
 
 struct AppPairingDelegate<'a> {
