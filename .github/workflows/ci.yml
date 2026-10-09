@@ -29,6 +29,9 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Lint headless drive mode
+        run: cargo clippy -p awb-app --all-targets --features drive -- -D warnings
+
       - name: Unit tests
         run: cargo test
 
