@@ -285,6 +285,7 @@ pub struct App {
     created_at: Instant,
     open_at_login: Option<bool>,
     pending_show: bool,
+    pending_egui_theme: Option<theme::Appearance>,
     last_menu_anchor: Option<MenuAnchor>,
     auto_mirrored: HashSet<String>,
     pending_avd_delete: Option<String>,
@@ -402,6 +403,7 @@ impl App {
             created_at: Instant::now(),
             open_at_login: None,
             pending_show: false,
+            pending_egui_theme: None,
             last_menu_anchor: None,
             auto_mirrored: HashSet::new(),
             pending_avd_delete: None,
@@ -627,6 +629,19 @@ impl App {
         let update = self.animations.advance_skin_at(now);
         theme::set_day_weight(update.day_weight);
         if let Some(appearance) = update.committed {
+            self.pending_egui_theme = Some(appearance);
+        }
+        // Switching egui's theme changes its text anti-aliasing, which rebuilds
+        // the font atlas. eframe drops texture uploads while the window is
+        // hidden, so a rebuild then left the next popover drawing text from a
+        // stale atlas. Apply it only on a frame that is actually painted.
+        let painted = ctx
+            .input(|input| input.viewport().visible())
+            .unwrap_or(true);
+        if self.visible
+            && painted
+            && let Some(appearance) = self.pending_egui_theme.take()
+        {
             theme::apply(ctx, appearance);
         }
         if update.animating {
