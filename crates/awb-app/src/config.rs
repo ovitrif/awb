@@ -26,6 +26,8 @@ pub struct Settings {
     pub auto_mirror: bool,
     /// Follow the system appearance or force the light/dark app palette.
     pub theme: ThemeMode,
+    /// Light the popover surface with gradients and glows; off draws it flat.
+    pub gradients: bool,
 }
 
 impl Default for Settings {
@@ -40,6 +42,7 @@ impl Default for Settings {
             borderless: true,
             auto_mirror: false,
             theme: ThemeMode::Auto,
+            gradients: true,
         }
     }
 }
@@ -110,6 +113,7 @@ auto_mirror = false
         .expect("legacy settings should deserialize");
 
         assert_eq!(settings.theme, ThemeMode::Auto);
+        assert!(settings.gradients);
     }
 
     #[test]

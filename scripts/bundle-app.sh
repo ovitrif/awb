@@ -28,13 +28,29 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
 cp "$APP_BIN" "${APP}/Contents/MacOS/awb-app"
 
-iconset="$(mktemp -d)/awb.iconset"
-mkdir -p "$iconset"
-for size in 16 32 128 256 512; do
-  "$ICON_BIN" --render-icon "${iconset}/icon_${size}x${size}.png" "$size" >/dev/null
-  "$ICON_BIN" --render-icon "${iconset}/icon_${size}x${size}@2x.png" "$((size * 2))" >/dev/null
-done
-iconutil -c icns "$iconset" -o "${APP}/Contents/Resources/awb.icns"
+# Liquid Glass icon: actool compiles the Icon Composer bundle into Assets.car
+# (light, dark, clear and tinted variants) plus AppIcon.icns for older macOS.
+# Without an actool that understands .icon files, fall back to the flat icon.
+ICON_SOURCE="$(dirname "$0")/../crates/awb-app/assets/AppIcon.icon"
+ICON_NAME="AppIcon"
+ICON_PLIST_KEYS="<key>CFBundleIconName</key><string>AppIcon</string>"
+if ! xcrun actool "$ICON_SOURCE" --compile "${APP}/Contents/Resources" \
+  --platform macosx --minimum-deployment-target 11.0 --app-icon AppIcon \
+  --output-partial-info-plist "$(mktemp -d)/icon.plist" >/dev/null 2>&1 \
+  || [ ! -f "${APP}/Contents/Resources/Assets.car" ] \
+  || [ ! -f "${APP}/Contents/Resources/AppIcon.icns" ]; then
+  echo "actool could not compile ${ICON_SOURCE}; using the flat icon" >&2
+  rm -f "${APP}/Contents/Resources/Assets.car" "${APP}/Contents/Resources/AppIcon.icns"
+  ICON_NAME="awb"
+  ICON_PLIST_KEYS=""
+  iconset="$(mktemp -d)/awb.iconset"
+  mkdir -p "$iconset"
+  for size in 16 32 128 256 512; do
+    "$ICON_BIN" --render-icon "${iconset}/icon_${size}x${size}.png" "$size" >/dev/null
+    "$ICON_BIN" --render-icon "${iconset}/icon_${size}x${size}@2x.png" "$((size * 2))" >/dev/null
+  done
+  iconutil -c icns "$iconset" -o "${APP}/Contents/Resources/awb.icns"
+fi
 
 cat > "${APP}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -42,7 +58,8 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key><string>awb-app</string>
-  <key>CFBundleIconFile</key><string>awb</string>
+  <key>CFBundleIconFile</key><string>${ICON_NAME}</string>
+  ${ICON_PLIST_KEYS}
   <key>CFBundleIdentifier</key><string>com.ovitrif.awb</string>
   <key>CFBundleName</key><string>Android Wifi Bridge</string>
   <key>CFBundleDisplayName</key><string>Android Wifi Bridge</string>

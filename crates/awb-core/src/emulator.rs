@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::command_path::resolve_program;
 
 const EMULATOR_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+const AVD_REMOVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct Emulator {
@@ -35,7 +36,7 @@ impl Emulator {
             .arg("-list-avds")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let output = output_with_timeout(command, timeout)?;
+        let output = output_with_timeout(command, timeout, "emulator -list-avds")?;
 
         if !output.status.success() {
             bail!(
@@ -63,7 +64,52 @@ impl Emulator {
     }
 }
 
-fn output_with_timeout(mut command: Command, timeout: Duration) -> Result<Output> {
+pub fn remove_avd(name: &str) -> Result<()> {
+    let avdmanager = resolve_program("avdmanager", None)?;
+    remove_avd_with_program(&avdmanager, name)
+}
+
+fn remove_avd_with_program(avdmanager: &Path, name: &str) -> Result<()> {
+    let mut command = Command::new(avdmanager);
+    // avdmanager is a Java tool. An app launched from Finder or at login gets
+    // launchd's bare environment, so point it at Android Studio's bundled
+    // runtime when no JAVA_HOME is set and that runtime exists.
+    if std::env::var_os("JAVA_HOME").is_none()
+        && let Some(java_home) = bundled_java_home()
+    {
+        command.env("JAVA_HOME", java_home);
+    }
+    command
+        .args(["delete", "avd", "--name", name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = output_with_timeout(command, AVD_REMOVE_TIMEOUT, "avdmanager delete avd")?;
+    if !output.status.success() {
+        bail!(
+            "could not delete AVD {name}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Android Studio's bundled Java runtime, in `/Applications` or
+/// `~/Applications`.
+fn bundled_java_home() -> Option<PathBuf> {
+    let suffix = "Android Studio.app/Contents/jbr/Contents/Home";
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+    roots
+        .into_iter()
+        .map(|root| root.join(suffix))
+        .find(|java_home| java_home.join("bin/java").exists())
+}
+
+fn output_with_timeout(mut command: Command, timeout: Duration, action: &str) -> Result<Output> {
     let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command
         .spawn()
@@ -86,10 +132,7 @@ fn output_with_timeout(mut command: Command, timeout: Duration) -> Result<Output
             child
                 .wait()
                 .with_context(|| format!("failed to stop timed-out {program}"))?;
-            bail!(
-                "emulator -list-avds timed out after {} seconds",
-                timeout.as_secs_f32()
-            );
+            bail!("{action} timed out after {} seconds", timeout.as_secs_f32());
         }
 
         thread::sleep(Duration::from_millis(25));
@@ -108,6 +151,36 @@ fn parse_avds(output: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn removes_only_the_named_avd_and_reports_cli_errors() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let script = std::env::temp_dir().join(format!(
+            "awb-avdmanager-remove-{}-{unique}.sh",
+            std::process::id()
+        ));
+        fs::write(&script, "#!/bin/sh\n[ \"$#\" = 4 ] && [ \"$1\" = delete ] && [ \"$2\" = avd ] && [ \"$3\" = --name ] || exit 9\n[ \"$4\" = 'test avd' ] && exit 0\necho 'AVD is busy' >&2\nexit 1\n").unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let success = remove_avd_with_program(&script, "test avd");
+        let failure = remove_avd_with_program(&script, "busy");
+        fs::remove_file(script).unwrap();
+
+        success.unwrap();
+        let error = format!("{:#}", failure.unwrap_err());
+        assert!(error.contains("could not delete AVD busy"));
+        assert!(error.contains("AVD is busy"));
+    }
 
     #[test]
     fn parses_avd_names() {

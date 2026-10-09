@@ -3,6 +3,10 @@
 Android Wifi Bridge for macOS: pair, connect, and mirror Android phones over Wi-Fi,
 or launch configured Android Virtual Devices, without remembering SDK commands.
 
+<p align="center">
+  <img src="assets/popover.webp" alt="awb menu bar popover moving between its device list, settings and QR pairing pages" width="412">
+</p>
+
 awb wraps Android's wireless debugging flow behind a QR code. Scan it with your phone and
 awb handles mDNS discovery, `adb pair`, `adb connect`, and reconnects, then launches
 [scrcpy](https://github.com/Genymobile/scrcpy) screen mirroring if you want it. It ships as
@@ -22,9 +26,9 @@ curl -fsSL https://github.com/ovitrif/awb/releases/latest/download/install.sh | 
 ```
 
 Requirements: `adb` on your PATH (Android SDK platform-tools). `scrcpy` is optional and
-only needed for screen mirroring. Launching AVDs requires the Android SDK Emulator. The
-phone needs Android 11+ with developer options enabled, on the same Wi-Fi network as your
-Mac.
+only needed for screen mirroring. Launching AVDs requires the Android SDK Emulator;
+deleting them requires Android SDK Command-Line Tools (`avdmanager`). The phone needs
+Android 11+ with developer options enabled, on the same Wi-Fi network as your Mac.
 
 ## Menu bar app
 
@@ -32,9 +36,18 @@ Mac.
 awb app
 ```
 
-The awb icon appears in the menu bar. Left-click toggles the popover: connected devices
-with one-click mirroring, configured AVDs with one-click launch, a Logs tab, scrcpy
-settings, and QR pairing for new phones. Right-click offers Show, Pair, Refresh, and Quit.
+The awb icon appears in the menu bar. Left-click toggles the popover: a Devices tab
+listing connected phones (with one-click mirroring) and configured emulators, a Logs tab,
+Settings, and QR pairing for new phones. Refresh, Settings, and Pair stay in the top-right
+corner on every page. Each configured AVD stays listed while stopped, starting, or running.
+Click the play icon to open its native Android Emulator window, or the trash icon to delete
+a stopped AVD and its saved data after confirmation. Both actions are disabled while the
+emulator is starting or running. Right-click (or control-click) offers Show, Pair, Refresh,
+and Quit.
+
+The popover works from the keyboard: Tab moves between controls, Return or Space activates
+the focused one, Escape closes the popover, and ← / → step back and forward through the
+pages you visited, then through Main, Settings, and Pair in order.
 
 macOS release archives also contain `Android Wifi Bridge.app` for /Applications and login items; it is the
 same menu bar app in a bundle.

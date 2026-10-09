@@ -3,8 +3,8 @@
 
 use kurbo::{BezPath, PathEl};
 use tiny_skia::{
-    Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, PixmapPaint, Point,
-    PremultipliedColorU8, RadialGradient, Shader, SpreadMode, Stroke, Transform,
+    Color, FillRule, GradientStop, LinearGradient, Mask, Paint, PathBuilder, Pixmap, PixmapPaint,
+    Point, PremultipliedColorU8, RadialGradient, Shader, SpreadMode, Stroke, Transform,
 };
 
 use crate::theme::Appearance;
@@ -20,11 +20,17 @@ const LOGO_WAVE_2: &str = "M9.81 43.6a51 51 0 0 1 80.38 0l-5.52 4.31a44 44 0 0 0
 const DISCONNECTED_WAVE_1: &str = "M20.06 51.6a38 38 0 0 1 59.88 0l-3.94 3.08a33 33 0 0 0-52.02 0z";
 const DISCONNECTED_WAVE_2: &str = "M9.81 43.6a51 51 0 0 1 80.38 0l-3.94 3.08a46 46 0 0 0-72.5 0z";
 
-/// Popover shell: a 380x349 rounded body with a beak pointing up at the menu
-/// bar icon. Coordinates match the `Shell Shape` path in DESIGN.pen.
-const SHELL_PATH: &str = "M14 9l161 0c5 0 8.6-1.2 11-4.8 1.2-1.8 2.2-2.7 4-2.7 1.8 0 2.8 0.9 4 2.7 2.4 3.6 6 4.8 11 4.8l161 0a14 14 0 0 1 14 14l0 312a14 14 0 0 1-14 14l-352 0a14 14 0 0 1-14-14l0-312a14 14 0 0 1 14-14z";
+/// Popover shell: a 380-wide rounded body with a beak pointing up at the menu
+/// bar icon. Coordinates match the `Shell Shape` path in DESIGN.pen; the body
+/// height follows the window height.
 const SHELL_W: f32 = 380.0;
-const SHELL_H: f32 = 349.0;
+
+fn shell_path(height: f32) -> String {
+    let side = height - 9.0 - 28.0;
+    format!(
+        "M14 9l161 0c5 0 8.6-1.2 11-4.8 1.2-1.8 2.2-2.7 4-2.7 1.8 0 2.8 0.9 4 2.7 2.4 3.6 6 4.8 11 4.8l161 0a14 14 0 0 1 14 14l0 {side}a14 14 0 0 1-14 14l-352 0a14 14 0 0 1-14-14l0-{side}a14 14 0 0 1 14-14z"
+    )
+}
 
 const VIEWBOX: f32 = 100.0;
 const APP_ICON_GLYPH_SCALE: f32 = 0.98;
@@ -170,132 +176,201 @@ pub fn window_logo(frame_size: u32, glyph_size: f32, offset: f32, oversample: u3
     }
 }
 
-/// Rasterizes the popover shell (beak + rounded body) with the DESIGN.pen
-/// background: a vertical slate gradient, soft highlights along the top edge,
-/// and a hairline stroke. Drawn at `oversample` resolution for a crisp texture.
-fn render_shell(oversample: u32, appearance: Appearance) -> Pixmap {
+struct ShellStyle {
+    base: [Color; 3],
+    /// Color the bottom edge is lit with, as an ellipse fading up the body.
+    lift: Color,
+    /// Soft bloom and hairline along the lit bottom edge.
+    glow: Color,
+    highlight: Color,
+    border: Color,
+}
+
+fn shell_style(appearance: Appearance) -> ShellStyle {
+    match appearance {
+        Appearance::Night => ShellStyle {
+            base: [
+                Color::from_rgba8(0x2A, 0x2D, 0x39, 0xFF),
+                Color::from_rgba8(0x22, 0x24, 0x2E, 0xFF),
+                Color::from_rgba8(0x1B, 0x1D, 0x25, 0xFF),
+            ],
+            lift: Color::from_rgba8(0xB4, 0xBE, 0xEC, 0x1C),
+            glow: Color::from_rgba8(0xB8, 0xC2, 0xF2, 0x30),
+            highlight: Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x16),
+            border: Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x17),
+        },
+        Appearance::Day => ShellStyle {
+            base: [
+                Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF),
+                Color::from_rgba8(0xF7, 0xF8, 0xFB, 0xFF),
+                Color::from_rgba8(0xEE, 0xF1, 0xF7, 0xFF),
+            ],
+            lift: Color::from_rgba8(0xC4, 0xD4, 0xF6, 0x58),
+            glow: Color::from_rgba8(0x7E, 0x9C, 0xE6, 0x2E),
+            highlight: Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xD0),
+            border: Color::from_rgba8(0x1B, 0x22, 0x3A, 0x1E),
+        },
+    }
+}
+
+fn transparent(color: Color) -> Color {
+    let mut color = color;
+    color.set_alpha(0.0);
+    color
+}
+
+/// An elliptical radial fade centered on `(cx, cy)` with radii `rx`/`ry`,
+/// opaque at the center and transparent from `reach` (0-1) outward.
+fn ellipse_glow(cx: f32, cy: f32, rx: f32, ry: f32, color: Color, reach: f32) -> Shader<'static> {
+    RadialGradient::new(
+        Point::from_xy(0.0, 0.0),
+        0.0,
+        Point::from_xy(0.0, 0.0),
+        rx,
+        vec![
+            GradientStop::new(0.0, color),
+            GradientStop::new(reach, transparent(color)),
+        ],
+        SpreadMode::Pad,
+        Transform::from_translate(cx, cy).pre_scale(1.0, ry / rx),
+    )
+    .expect("shell glow gradient")
+}
+
+/// A horizontal line brightest in the middle and fading out toward both sides.
+fn edge_line(color: Color) -> Shader<'static> {
+    LinearGradient::new(
+        Point::from_xy(0.0, 0.0),
+        Point::from_xy(SHELL_W, 0.0),
+        vec![
+            GradientStop::new(0.08, transparent(color)),
+            GradientStop::new(0.5, color),
+            GradientStop::new(0.92, transparent(color)),
+        ],
+        SpreadMode::Pad,
+        Transform::identity(),
+    )
+    .expect("shell edge gradient")
+}
+
+/// Rasterizes the popover shell (beak + rounded body): a vertical base
+/// gradient lit from the bottom edge like the Agents Board cards, with a soft
+/// bloom and a center-weighted hairline on that edge, an inner highlight along
+/// the top and a hairline border. Drawn at `oversample` resolution.
+fn render_shell(oversample: u32, appearance: Appearance, height: f32, gradients: bool) -> Pixmap {
     let w = (SHELL_W as u32) * oversample;
-    let h = (SHELL_H as u32) * oversample;
+    let h = (height.round() as u32) * oversample;
     let mut pixmap = Pixmap::new(w, h).expect("shell pixmap");
     let transform = Transform::from_scale(oversample as f32, oversample as f32);
 
-    let Some(path) = skia_path(SHELL_PATH) else {
+    let Some(path) = skia_path(&shell_path(height)) else {
         return pixmap;
     };
+    let mut clip = Mask::new(w, h).expect("shell mask");
+    clip.fill_path(&path, FillRule::Winding, true, transform);
 
-    let (base_stops, glow_color, highlight_start, highlight_mid, stroke_color) = match appearance {
-        Appearance::Night => (
-            vec![
-                GradientStop::new(0.0, Color::from_rgba8(0x2F, 0x32, 0x42, 0xFF)),
-                GradientStop::new(0.5, Color::from_rgba8(0x27, 0x2A, 0x35, 0xFF)),
-                GradientStop::new(1.0, Color::from_rgba8(0x1C, 0x1F, 0x29, 0xFF)),
-            ],
-            Color::from_rgba8(0x9A, 0xA3, 0xD4, 0x1F),
-            Color::from_rgba8(0xEE, 0xF2, 0xFF, 0x19),
-            Color::from_rgba8(0xD8, 0xDF, 0xF7, 0x0B),
-            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x14),
-        ),
-        Appearance::Day => (
-            vec![
-                GradientStop::new(0.0, Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF)),
-                GradientStop::new(0.28, Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF)),
-                GradientStop::new(0.60, Color::from_rgba8(0xF3, 0xF6, 0xFC, 0xFF)),
-                GradientStop::new(1.0, Color::from_rgba8(0xDC, 0xE7, 0xF8, 0xFF)),
-            ],
-            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x10),
-            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x8A),
-            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x3D),
-            Color::from_rgba8(0x00, 0x00, 0x00, 0x18),
-        ),
-    };
+    let style = shell_style(appearance);
+    let body_top = 9.0;
+    let body_height = height - body_top;
+    let center = SHELL_W / 2.0;
 
     let base = LinearGradient::new(
-        Point::from_xy(SHELL_W / 2.0, 0.0),
-        Point::from_xy(SHELL_W / 2.0, SHELL_H),
-        base_stops,
+        Point::from_xy(center, 0.0),
+        Point::from_xy(center, height),
+        vec![
+            GradientStop::new(0.0, style.base[0]),
+            GradientStop::new(0.5, style.base[1]),
+            GradientStop::new(1.0, style.base[2]),
+        ],
         SpreadMode::Pad,
         Transform::identity(),
     )
     .expect("shell base gradient");
 
-    // Elliptical glow centered on the beak. Squashing y keeps the center at
-    // y=0, so the ellipse stays anchored to the top edge.
-    let glow = RadialGradient::new(
-        Point::from_xy(SHELL_W / 2.0, 0.0),
-        0.0,
-        Point::from_xy(SHELL_W / 2.0, 0.0),
-        SHELL_W * 0.8,
-        vec![
-            GradientStop::new(0.0, glow_color),
-            GradientStop::new(
-                1.0,
-                Color::from_rgba8(
-                    (glow_color.red() * 255.0) as u8,
-                    (glow_color.green() * 255.0) as u8,
-                    (glow_color.blue() * 255.0) as u8,
-                    0x00,
-                ),
-            ),
-        ],
-        SpreadMode::Pad,
-        Transform::from_scale(1.0, 0.459),
-    )
-    .expect("shell glow gradient");
-
-    // Arc-style edge sheen: a shallow ellipse clipped by the shell puts a
-    // restrained highlight inside the upper-left curve, then fades it before
-    // the center so the beak glow remains the visual anchor.
-    let top_highlight = RadialGradient::new(
-        Point::from_xy(48.0, 9.0),
-        0.0,
-        Point::from_xy(48.0, 9.0),
-        SHELL_W * 0.58,
-        vec![
-            GradientStop::new(0.0, highlight_start),
-            GradientStop::new(0.42, highlight_mid),
-            GradientStop::new(
-                1.0,
-                Color::from_rgba8(
-                    (highlight_mid.red() * 255.0) as u8,
-                    (highlight_mid.green() * 255.0) as u8,
-                    (highlight_mid.blue() * 255.0) as u8,
-                    0x00,
-                ),
-            ),
-        ],
-        SpreadMode::Pad,
-        Transform::from_scale(1.0, 0.09),
-    )
-    .expect("shell top highlight gradient");
-
     let mut paint = Paint {
         anti_alias: true,
         ..Default::default()
     };
-    paint.shader = base;
-    pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
-    paint.shader = glow;
-    pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
-    paint.shader = top_highlight;
-    pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
+    let full = tiny_skia::Rect::from_xywh(0.0, 0.0, SHELL_W, height).expect("shell rect");
+    let mut fill = |shader: Shader<'static>, rect: tiny_skia::Rect| {
+        paint.shader = shader;
+        pixmap.fill_rect(rect, &paint, transform, Some(&clip));
+    };
 
-    let mut stroke_paint = Paint {
+    if !gradients {
+        // Plain surface: one flat color under the hairline border.
+        paint.set_color(style.base[1]);
+        pixmap.fill_rect(full, &paint, transform, Some(&clip));
+        stroke_border(&mut pixmap, &path, style.border, transform);
+        return pixmap;
+    }
+
+    fill(base, full);
+    fill(
+        ellipse_glow(
+            center,
+            height,
+            SHELL_W * 0.8,
+            body_height * 1.1,
+            style.lift,
+            0.78,
+        ),
+        full,
+    );
+    fill(
+        ellipse_glow(center, height, SHELL_W * 0.6, 34.0, style.glow, 0.72),
+        full,
+    );
+    fill(
+        edge_line(style.glow.with_alpha_scaled(2.4)),
+        tiny_skia::Rect::from_xywh(0.0, height - 1.5, SHELL_W, 1.5).expect("glow line"),
+    );
+    fill(
+        edge_line(style.highlight),
+        tiny_skia::Rect::from_xywh(0.0, body_top, SHELL_W, 1.2).expect("highlight line"),
+    );
+    // A faint lift under the beak keeps the anchor point readable.
+    fill(
+        ellipse_glow(center, body_top, 70.0, 18.0, style.highlight, 1.0),
+        full,
+    );
+
+    stroke_border(&mut pixmap, &path, style.border, transform);
+    pixmap
+}
+
+fn stroke_border(pixmap: &mut Pixmap, path: &tiny_skia::Path, color: Color, transform: Transform) {
+    let mut paint = Paint {
         anti_alias: true,
         ..Default::default()
     };
-    stroke_paint.set_color(stroke_color);
+    paint.set_color(color);
     let stroke = Stroke {
         width: 1.0,
         ..Default::default()
     };
-    pixmap.stroke_path(&path, &stroke_paint, &stroke, transform, None);
+    pixmap.stroke_path(path, &paint, &stroke, transform, None);
+}
 
-    pixmap
+trait ScaleAlpha {
+    fn with_alpha_scaled(self, factor: f32) -> Self;
+}
+
+impl ScaleAlpha for Color {
+    fn with_alpha_scaled(mut self, factor: f32) -> Self {
+        self.set_alpha((self.alpha() * factor).min(1.0));
+        self
+    }
 }
 
 /// The shell as a premultiplied-RGBA raster for the in-window texture.
-pub fn shell_background(oversample: u32, appearance: Appearance) -> Raster {
-    let pixmap = render_shell(oversample, appearance);
+pub fn shell_background(
+    oversample: u32,
+    appearance: Appearance,
+    height: f32,
+    gradients: bool,
+) -> Raster {
+    let pixmap = render_shell(oversample, appearance, height, gradients);
     Raster {
         width: pixmap.width(),
         height: pixmap.height(),
@@ -304,8 +379,8 @@ pub fn shell_background(oversample: u32, appearance: Appearance) -> Raster {
 }
 
 /// The shell as a PNG, for offline preview via `awb-app --render-shell`.
-pub fn shell_background_png(oversample: u32, appearance: Appearance) -> Vec<u8> {
-    render_shell(oversample, appearance)
+pub fn shell_background_png(oversample: u32, appearance: Appearance, height: f32) -> Vec<u8> {
+    render_shell(oversample, appearance, height, true)
         .encode_png()
         .expect("shell png encoding")
 }
@@ -466,8 +541,8 @@ mod tests {
 
     #[test]
     fn day_and_night_shells_share_geometry_but_not_pixels() {
-        let day = shell_background(1, Appearance::Day);
-        let night = shell_background(1, Appearance::Night);
+        let day = shell_background(1, Appearance::Day, 349.0, true);
+        let night = shell_background(1, Appearance::Night, 349.0, true);
 
         assert_eq!((day.width, day.height), (380, 349));
         assert_eq!((night.width, night.height), (380, 349));

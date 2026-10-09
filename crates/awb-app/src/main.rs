@@ -3,8 +3,13 @@
 mod app;
 mod backend;
 mod config;
+#[cfg(feature = "drive")]
+mod drive;
 mod glyph;
 mod login_item;
+mod mock;
+#[cfg(target_os = "macos")]
+mod status_click;
 mod theme;
 
 use eframe::egui;
@@ -25,6 +30,20 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    #[cfg(feature = "drive")]
+    {
+        if let [_, flag, socket] = args.as_slice()
+            && flag == "--drive"
+        {
+            return drive::serve(std::path::Path::new(socket)).map_err(drive_error);
+        }
+        if let [_, command, socket, rest @ ..] = args.as_slice()
+            && command == "drive"
+        {
+            return drive::send(std::path::Path::new(socket), &rest.join(" ")).map_err(drive_error);
+        }
+    }
+
     if let Some(index) = args.iter().position(|arg| arg == "--render-shell") {
         let path = args
             .get(index + 1)
@@ -34,7 +53,11 @@ fn main() -> eframe::Result {
             Some("day") => theme::Appearance::Day,
             _ => theme::Appearance::Night,
         };
-        std::fs::write(path, glyph::shell_background_png(3, appearance)).expect("write shell");
+        std::fs::write(
+            path,
+            glyph::shell_background_png(3, appearance, theme::WINDOW_FULL_HEIGHT),
+        )
+        .expect("write shell");
         println!("wrote {path}");
         return Ok(());
     }
@@ -84,4 +107,10 @@ fn main() -> eframe::Result {
                 })
         }),
     )
+}
+
+#[cfg(feature = "drive")]
+fn drive_error(error: anyhow::Error) -> eframe::Error {
+    eprintln!("awb drive: {error:#}");
+    std::process::exit(1)
 }

@@ -7,7 +7,7 @@ use eframe::egui::{
 };
 
 pub const WINDOW_WIDTH: f32 = 380.0;
-pub const WINDOW_HEIGHT: f32 = 340.0;
+pub const WINDOW_HEIGHT: f32 = 432.0;
 /// The beak rises above the rounded body and points at the menu bar icon.
 pub const BEAK_HEIGHT: f32 = 9.0;
 pub const WINDOW_FULL_HEIGHT: f32 = WINDOW_HEIGHT + BEAK_HEIGHT;
@@ -45,9 +45,10 @@ struct Palette {
     segment_bg: Color32,
     segment_selected: Color32,
     segment_selected_stroke: Color32,
-    scroll_fade_top: Color32,
-    scroll_fade_bottom: Color32,
+    control_selected: Color32,
     scrollbar_thumb: Color32,
+    scrollbar_thumb_hover: Color32,
+    qr_card_stroke: Color32,
     qr_card: Color32,
     qr_ink: Color32,
 }
@@ -80,9 +81,10 @@ impl Palette {
             segment_bg: mix(from.segment_bg, to.segment_bg),
             segment_selected: mix(from.segment_selected, to.segment_selected),
             segment_selected_stroke: mix(from.segment_selected_stroke, to.segment_selected_stroke),
-            scroll_fade_top: mix(from.scroll_fade_top, to.scroll_fade_top),
-            scroll_fade_bottom: mix(from.scroll_fade_bottom, to.scroll_fade_bottom),
+            control_selected: mix(from.control_selected, to.control_selected),
             scrollbar_thumb: mix(from.scrollbar_thumb, to.scrollbar_thumb),
+            scrollbar_thumb_hover: mix(from.scrollbar_thumb_hover, to.scrollbar_thumb_hover),
+            qr_card_stroke: mix(from.qr_card_stroke, to.qr_card_stroke),
             qr_card: mix(from.qr_card, to.qr_card),
             qr_ink: mix(from.qr_ink, to.qr_ink),
         }
@@ -127,9 +129,10 @@ const NIGHT: Palette = Palette {
     segment_bg: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x2E),
     segment_selected: Color32::from_rgba_premultiplied(0x20, 0x20, 0x20, 0x20),
     segment_selected_stroke: Color32::from_rgba_premultiplied(0x34, 0x34, 0x34, 0x34),
-    scroll_fade_top: Color32::from_rgb(0x2C, 0x2F, 0x3E),
-    scroll_fade_bottom: Color32::from_rgb(0x1E, 0x21, 0x2B),
-    scrollbar_thumb: Color32::from_rgba_premultiplied(0x55, 0x57, 0x5C, 0x70),
+    control_selected: Color32::from_rgba_premultiplied(0x15, 0x15, 0x15, 0x15),
+    scrollbar_thumb: Color32::from_rgba_premultiplied(0x4A, 0x4C, 0x52, 0x60),
+    scrollbar_thumb_hover: Color32::from_rgba_premultiplied(0x8C, 0x8F, 0x99, 0xA0),
+    qr_card_stroke: Color32::TRANSPARENT,
     qr_card: Color32::WHITE,
     qr_ink: Color32::from_rgb(0x17, 0x18, 0x1C),
 };
@@ -159,9 +162,10 @@ const DAY: Palette = Palette {
     segment_bg: Color32::from_rgb(0xE3, 0xE9, 0xF2),
     segment_selected: Color32::WHITE,
     segment_selected_stroke: Color32::from_rgb(0xC4, 0xCE, 0xDB),
-    scroll_fade_top: Color32::WHITE,
-    scroll_fade_bottom: Color32::from_rgb(0xDF, 0xE9, 0xF8),
-    scrollbar_thumb: Color32::from_rgba_premultiplied(0x22, 0x27, 0x2D, 0x70),
+    control_selected: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x0F),
+    scrollbar_thumb: Color32::from_rgba_premultiplied(0x1A, 0x1D, 0x24, 0x48),
+    scrollbar_thumb_hover: Color32::from_rgba_premultiplied(0x2A, 0x2E, 0x38, 0x80),
+    qr_card_stroke: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x14),
     qr_card: Color32::WHITE,
     qr_ink: Color32::from_rgb(0x17, 0x18, 0x1C),
 };
@@ -223,9 +227,10 @@ color_token!(control_pressed, control_pressed);
 color_token!(segment_bg, segment_bg);
 color_token!(segment_selected, segment_selected);
 color_token!(segment_selected_stroke, segment_selected_stroke);
-color_token!(scroll_fade_top, scroll_fade_top);
-color_token!(scroll_fade_bottom, scroll_fade_bottom);
+color_token!(control_selected, control_selected);
 color_token!(scrollbar_thumb, scrollbar_thumb);
+color_token!(scrollbar_thumb_hover, scrollbar_thumb_hover);
+color_token!(qr_card_stroke, qr_card_stroke);
 color_token!(qr_card, qr_card);
 color_token!(qr_ink, qr_ink);
 

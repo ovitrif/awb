@@ -10,14 +10,16 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use awb_core::adb::{self, Adb};
-use awb_core::emulator::Emulator;
+use awb_core::emulator::{self, Emulator};
 use awb_core::pairing_flow::{
     self, AlreadyConnectedChoice, PairingEvent, PairingFlowDelegate, PairingProgressKind,
 };
-use awb_core::qr::QrModules;
+use awb_core::qr::{PairingQr, QrModules};
 use awb_core::scrcpy::Scrcpy;
 use awb_core::wifi;
 use eframe::egui::Context;
+
+use crate::mock;
 
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
 static ADB_WORK_LOCK: Mutex<()> = Mutex::new(());
@@ -42,12 +44,33 @@ pub struct DeviceInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct AvdInfo {
+    pub name: String,
+    pub device: Option<DeviceInfo>,
+}
+
+impl AvdInfo {
+    pub fn status(&self, launching: bool) -> &str {
+        match &self.device {
+            Some(device) if device.ready => "Running",
+            _ if launching => "Starting…",
+            Some(device) => &device.state,
+            None => "Stopped",
+        }
+    }
+
+    pub fn can_launch(&self, launching: bool) -> bool {
+        self.device.is_none() && !launching
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Snapshot {
     pub adb: ToolInfo,
     pub emulator: ToolInfo,
     pub scrcpy: ToolInfo,
     pub devices: Vec<DeviceInfo>,
-    pub avds: Vec<String>,
+    pub avds: Vec<AvdInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +84,12 @@ pub enum PairingPhase {
     },
     Failed {
         message: String,
+    },
+    /// Pairing succeeded; the page shows this briefly before returning to the
+    /// device list, so the way back reads as a step back.
+    Paired {
+        device_name: String,
+        at: Instant,
     },
 }
 
@@ -80,6 +109,12 @@ pub struct Shared {
     pub mirrors: HashMap<String, Child>,
     pub starting_mirrors: HashSet<String>,
     pub starting_avds: HashSet<String>,
+    pub deleting_avds: HashSet<String>,
+    /// Phones "paired" by the mock pairing flow, listed with the real ones.
+    pub mock_devices: Vec<DeviceInfo>,
+    /// Bumped when an AVD is deleted, so a status refresh that read the AVD
+    /// list before the deletion finished does not bring it back.
+    pub avd_generation: u64,
 }
 
 impl Shared {
@@ -149,7 +184,7 @@ fn local_utc_offset_seconds() -> i64 {
 }
 
 pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
-    {
+    let avd_generation = {
         let mut state = shared.lock().unwrap();
         if state.refreshing {
             return;
@@ -158,14 +193,21 @@ pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
             return;
         }
         state.refreshing = true;
-    }
+        state.avd_generation
+    };
     ctx.request_repaint();
 
     thread::spawn(move || {
-        let snapshot = collect_snapshot();
+        let mut snapshot = collect_snapshot();
+        let mut state = shared.lock().unwrap();
+        if state.avd_generation != avd_generation
+            && let Some(current) = &state.snapshot
+        {
+            snapshot.avds = current.avds.clone();
+        }
+        snapshot.devices.extend(state.mock_devices.iter().cloned());
         let device_connected = snapshot.devices.iter().any(|device| device.ready);
 
-        let mut state = shared.lock().unwrap();
         state.reap_finished_mirrors();
         state.log_tool_warnings(&snapshot.scrcpy.warnings);
         state.snapshot = Some(snapshot);
@@ -296,10 +338,7 @@ fn collect_snapshot() -> Snapshot {
             let devices = adb.devices().ok()?;
             let running_avds = devices
                 .iter()
-                .filter(|device| {
-                    device.state == adb::DeviceState::Device
-                        && device.serial.starts_with("emulator-")
-                })
+                .filter(|device| device.serial.starts_with("emulator-"))
                 .filter_map(|device| {
                     adb.emulator_avd_name(&device.serial)
                         .ok()
@@ -307,7 +346,7 @@ fn collect_snapshot() -> Snapshot {
                 })
                 .collect::<HashMap<_, _>>();
             let services = adb.mdns_services().unwrap_or_default();
-            let devices = adb::dedupe_ready_devices(devices, &services)
+            let devices: Vec<_> = adb::dedupe_ready_devices(devices, &services)
                 .into_iter()
                 .map(|device| DeviceInfo {
                     name: running_avds
@@ -323,13 +362,10 @@ fn collect_snapshot() -> Snapshot {
                 })
                 .collect();
 
-            Some((devices, running_avds.into_values().collect::<HashSet<_>>()))
+            Some((devices, running_avds))
         })
         .unwrap_or_default();
-    let avds = avds
-        .into_iter()
-        .filter(|name| !running_avds.contains(name))
-        .collect();
+    let avds = avd_rows(avds, &devices, &running_avds);
 
     Snapshot {
         adb: adb_info,
@@ -338,6 +374,37 @@ fn collect_snapshot() -> Snapshot {
         devices,
         avds,
     }
+}
+
+fn avd_rows(
+    names: Vec<String>,
+    devices: &[DeviceInfo],
+    running_avds: &HashMap<String, String>,
+) -> Vec<AvdInfo> {
+    let mut avds: Vec<_> = names
+        .into_iter()
+        .map(|name| AvdInfo { name, device: None })
+        .collect();
+
+    for device in devices.iter().filter(|device| device.is_emulator) {
+        let name = running_avds.get(&device.serial);
+        if let Some(avd) = avds.iter_mut().find(|avd| Some(&avd.name) == name) {
+            // Multiple instances of the same AVD still occupy one row. Prefer
+            // a ready instance if another is offline.
+            if avd.device.is_none() || device.ready {
+                avd.device = Some(device.clone());
+            }
+        } else {
+            // Keep externally started emulators visible even if AVD discovery
+            // or the name lookup is unavailable.
+            avds.push(AvdInfo {
+                name: name.cloned().unwrap_or_else(|| device.name.clone()),
+                device: Some(device.clone()),
+            });
+        }
+    }
+
+    avds
 }
 
 fn is_emulator(device: &adb::AdbDevice) -> bool {
@@ -468,6 +535,18 @@ pub fn start_mirror(
 pub fn start_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
     {
         let mut state = shared.lock().unwrap();
+        if state.deleting_avds.contains(&name) {
+            return;
+        }
+        if state.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .avds
+                .iter()
+                .any(|avd| avd.name == name && !avd.can_launch(false))
+        }) {
+            state.log(format!("AVD {name} is already running"));
+            return;
+        }
         if !state.starting_avds.insert(name.clone()) {
             state.log(format!("Already starting AVD {name}"));
             drop(state);
@@ -514,6 +593,61 @@ pub fn start_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
                 ctx.request_repaint();
             }
         }
+    });
+}
+
+pub fn delete_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
+    {
+        let mut state = shared.lock().unwrap();
+        let stopped = state.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .avds
+                .iter()
+                .any(|avd| avd.name == name && avd.device.is_none())
+        });
+        if !stopped
+            || state.starting_avds.contains(&name)
+            || !state.deleting_avds.insert(name.clone())
+        {
+            return;
+        }
+    }
+    ctx.request_repaint();
+
+    thread::spawn(move || {
+        let result = (|| -> anyhow::Result<()> {
+            let _adb_work = ADB_WORK_LOCK.lock().unwrap();
+            let adb = Adb::resolve(None)?;
+            let devices = adb.devices()?;
+            // A stale emulator entry that no longer answers cannot be running
+            // this AVD, so a failed lookup is skipped rather than blocking.
+            let active_names: Vec<_> = devices
+                .iter()
+                .filter(|device| is_emulator(device))
+                .filter_map(|device| adb.emulator_avd_name(&device.serial).ok())
+                .collect();
+            anyhow::ensure!(
+                !active_names.contains(&name),
+                "AVD {name} is running; stop it before deleting"
+            );
+            emulator::remove_avd(&name)
+        })();
+
+        let mut state = shared.lock().unwrap();
+        state.deleting_avds.remove(&name);
+        match result {
+            Ok(()) => {
+                if let Some(snapshot) = &mut state.snapshot {
+                    snapshot.avds.retain(|avd| avd.name != name);
+                }
+                state.avd_generation += 1;
+                state.log(format!("Deleted AVD {name}"));
+            }
+            Err(error) => state.log(format!("Could not delete AVD {name}: {error:#}")),
+        }
+        drop(state);
+        ctx.request_repaint();
+        refresh_status(shared, ctx);
     });
 }
 
@@ -565,7 +699,9 @@ pub fn start_pairing(shared: Arc<Mutex<Shared>>, ctx: Context) {
             session.cancel.store(true, Ordering::Relaxed);
         }
 
-        if let Err(error) = wifi::ensure_pairing_wifi_ready() {
+        if mock::pairing().is_none()
+            && let Err(error) = wifi::ensure_pairing_wifi_ready()
+        {
             let message = format!("{error:#}");
             state.pairing = Some(PairingSession {
                 phase: PairingPhase::Failed {
@@ -605,12 +741,17 @@ pub fn cancel_pairing(shared: &Arc<Mutex<Shared>>) {
 
     if let Some(session) = state.pairing.take() {
         session.cancel.store(true, Ordering::Relaxed);
-        state.log("Pairing cancelled");
+        if !matches!(session.phase, PairingPhase::Paired { .. }) {
+            state.log("Pairing cancelled");
+        }
     }
 }
 
 fn pairing_worker(shared: Arc<Mutex<Shared>>, ctx: Context, cancel: Arc<AtomicBool>) {
-    let result = run_pairing(&shared, &ctx, &cancel);
+    let result = match mock::pairing() {
+        Some(mock) => run_mock_pairing(&shared, &ctx, &cancel, mock),
+        None => run_pairing(&shared, &ctx, &cancel),
+    };
 
     if cancel.load(Ordering::Relaxed) {
         return;
@@ -624,7 +765,13 @@ fn pairing_worker(shared: Arc<Mutex<Shared>>, ctx: Context, cancel: Arc<AtomicBo
     match result {
         Ok(device_name) => {
             state.log(format!("Paired and connected to {device_name}"));
-            state.pairing = None;
+            set_phase(
+                &mut state,
+                PairingPhase::Paired {
+                    device_name,
+                    at: Instant::now(),
+                },
+            );
             drop(state);
             refresh_status(shared, ctx.clone());
         }
@@ -669,6 +816,73 @@ fn run_pairing(
     let phone = pairing_flow::pair_and_connect(&adb, PAIRING_TIMEOUT, &mut delegate)?;
 
     Ok(phone.display_name)
+}
+
+/// Feeds the app's pairing delegate a scripted pairing: the same events a real
+/// pairing produces, with a simulated scan instead of mDNS and adb.
+fn run_mock_pairing(
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &Context,
+    cancel: &Arc<AtomicBool>,
+    mock: mock::MockPairing,
+) -> anyhow::Result<String> {
+    let mut delegate = AppPairingDelegate {
+        shared,
+        ctx,
+        cancel,
+    };
+    delegate.on_event(PairingEvent::QrReady(PairingQr::with_instance(
+        "awb-mock".to_string(),
+    )))?;
+    delegate.sleep(mock.scan_after)?;
+
+    let steps = [
+        (
+            PairingProgressKind::CompletingPairing,
+            "Pairing",
+            "The phone scanned the code; completing pairing.",
+        ),
+        (
+            PairingProgressKind::Connecting,
+            "Connecting",
+            "Opening a wireless debugging connection.",
+        ),
+        (
+            PairingProgressKind::Verifying,
+            "Verifying",
+            "Checking that the phone answers over adb.",
+        ),
+    ];
+    for (kind, title, detail) in steps {
+        delegate.on_event(PairingEvent::Progress(
+            PairingProgress::new(kind, title, detail).endpoint(mock::PHONE_ENDPOINT),
+        ))?;
+        delegate.sleep(Duration::from_millis(900))?;
+    }
+
+    match mock.outcome {
+        mock::Outcome::Failure => {
+            anyhow::bail!("Mock pairing failed: the phone rejected the pairing code.")
+        }
+        mock::Outcome::Success => {
+            let mut state = shared.lock().unwrap();
+            if !state
+                .mock_devices
+                .iter()
+                .any(|device| device.serial == mock::PHONE_ENDPOINT)
+            {
+                state.mock_devices.push(DeviceInfo {
+                    serial: mock::PHONE_ENDPOINT.to_string(),
+                    mirror_key: mock::PHONE_ENDPOINT.to_string(),
+                    name: mock::PHONE_NAME.to_string(),
+                    ready: true,
+                    state: "device".to_string(),
+                    is_emulator: false,
+                });
+            }
+            Ok(mock::PHONE_NAME.to_string())
+        }
+    }
 }
 
 struct AppPairingDelegate<'a> {
@@ -819,6 +1033,142 @@ fn sleep_or_cancel(cancel: &Arc<AtomicBool>, duration: Duration) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_rejects_running_starting_and_already_deleting_avds() {
+        let tool = ToolInfo {
+            available: true,
+            detail: String::new(),
+            warnings: vec![],
+        };
+        for (device, starting, deleting) in [
+            (Some(device_info("emulator-5554", true, true)), false, false),
+            (
+                Some(device_info("emulator-5554", true, false)),
+                false,
+                false,
+            ),
+            (None, true, false),
+            (None, false, true),
+        ] {
+            let shared = Arc::new(Mutex::new(Shared {
+                snapshot: Some(Snapshot {
+                    adb: tool.clone(),
+                    emulator: tool.clone(),
+                    scrcpy: tool.clone(),
+                    devices: vec![],
+                    avds: vec![AvdInfo {
+                        name: "Pixel_9a".to_string(),
+                        device,
+                    }],
+                }),
+                starting_avds: if starting {
+                    HashSet::from(["Pixel_9a".to_string()])
+                } else {
+                    HashSet::new()
+                },
+                deleting_avds: if deleting {
+                    HashSet::from(["Pixel_9a".to_string()])
+                } else {
+                    HashSet::new()
+                },
+                ..Default::default()
+            }));
+            delete_avd(shared.clone(), Context::default(), "Pixel_9a".to_string());
+            assert_eq!(
+                shared.lock().unwrap().deleting_avds.contains("Pixel_9a"),
+                deleting
+            );
+            if deleting {
+                start_avd(shared.clone(), Context::default(), "Pixel_9a".to_string());
+                assert!(shared.lock().unwrap().starting_avds.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn avd_keeps_its_row_through_launch_running_and_shutdown() {
+        let names = vec!["Pixel_9a".to_string(), "Pixel_10_Pro_XL".to_string()];
+        let running_avds = HashMap::from([("emulator-5554".to_string(), "Pixel_9a".to_string())]);
+        let phone = device_info("phone", false, true);
+        let emulator = device_info("emulator-5554", true, true);
+
+        for (devices, launching, expected_status, can_launch) in [
+            (vec![phone.clone()], false, "Stopped", true),
+            (vec![phone.clone()], true, "Starting…", false),
+            (
+                vec![phone.clone(), device_info("emulator-5554", true, false)],
+                true,
+                "Starting…",
+                false,
+            ),
+            (
+                vec![phone.clone(), emulator.clone()],
+                true,
+                "Running",
+                false,
+            ),
+            (vec![phone.clone(), emulator], false, "Running", false),
+            (vec![phone], false, "Stopped", true),
+        ] {
+            let rows = avd_rows(names.clone(), &devices, &running_avds);
+            assert_eq!(
+                rows.iter().map(|row| &row.name).collect::<Vec<_>>(),
+                names.iter().collect::<Vec<_>>()
+            );
+            assert_eq!(rows[0].status(launching), expected_status);
+            assert_eq!(rows[0].can_launch(launching), can_launch);
+            assert_eq!(rows[1].status(false), "Stopped");
+        }
+    }
+
+    #[test]
+    fn external_emulators_stay_visible_without_avd_discovery() {
+        let running = device_info("emulator-5554", true, true);
+        let offline = device_info("emulator-5556", true, false);
+        let rows = avd_rows(
+            vec![],
+            &[device_info("phone", false, true), running, offline],
+            &HashMap::from([("emulator-5554".to_string(), "Pixel_9a".to_string())]),
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Pixel_9a");
+        assert_eq!(rows[0].status(false), "Running");
+        assert_eq!(rows[1].name, "emulator-5556");
+        assert_eq!(rows[1].status(false), "offline");
+        assert!(rows.iter().all(|row| !row.can_launch(false)));
+    }
+
+    #[test]
+    fn multiple_instances_of_an_avd_use_one_running_row() {
+        let rows = avd_rows(
+            vec!["Pixel_9a".to_string()],
+            &[
+                device_info("emulator-5554", true, true),
+                device_info("emulator-5556", true, false),
+            ],
+            &HashMap::from([
+                ("emulator-5554".to_string(), "Pixel_9a".to_string()),
+                ("emulator-5556".to_string(), "Pixel_9a".to_string()),
+            ]),
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status(false), "Running");
+        assert!(!rows[0].can_launch(false));
+    }
+
+    fn device_info(serial: &str, is_emulator: bool, ready: bool) -> DeviceInfo {
+        DeviceInfo {
+            serial: serial.to_string(),
+            mirror_key: serial.to_string(),
+            name: serial.to_string(),
+            ready,
+            state: if ready { "device" } else { "offline" }.to_string(),
+            is_emulator,
+        }
+    }
 
     #[test]
     fn mirror_key_collapses_endpoint_and_mdns_aliases() {
