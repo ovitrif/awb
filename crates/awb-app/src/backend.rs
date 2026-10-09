@@ -112,6 +112,9 @@ pub struct Shared {
     pub deleting_avds: HashSet<String>,
     /// Phones "paired" by the mock pairing flow, listed with the real ones.
     pub mock_devices: Vec<DeviceInfo>,
+    /// Bumped when an AVD is deleted, so a status refresh that read the AVD
+    /// list before the deletion finished does not bring it back.
+    pub avd_generation: u64,
 }
 
 impl Shared {
@@ -181,7 +184,7 @@ fn local_utc_offset_seconds() -> i64 {
 }
 
 pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
-    {
+    let avd_generation = {
         let mut state = shared.lock().unwrap();
         if state.refreshing {
             return;
@@ -190,12 +193,18 @@ pub fn refresh_status(shared: Arc<Mutex<Shared>>, ctx: Context) {
             return;
         }
         state.refreshing = true;
-    }
+        state.avd_generation
+    };
     ctx.request_repaint();
 
     thread::spawn(move || {
         let mut snapshot = collect_snapshot();
         let mut state = shared.lock().unwrap();
+        if state.avd_generation != avd_generation
+            && let Some(current) = &state.snapshot
+        {
+            snapshot.avds = current.avds.clone();
+        }
         snapshot.devices.extend(state.mock_devices.iter().cloned());
         let device_connected = snapshot.devices.iter().any(|device| device.ready);
 
@@ -631,6 +640,7 @@ pub fn delete_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
                 if let Some(snapshot) = &mut state.snapshot {
                     snapshot.avds.retain(|avd| avd.name != name);
                 }
+                state.avd_generation += 1;
                 state.log(format!("Deleted AVD {name}"));
             }
             Err(error) => state.log(format!("Could not delete AVD {name}: {error:#}")),
