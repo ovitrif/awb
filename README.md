@@ -4,7 +4,7 @@ Android Wifi Bridge for macOS: pair, connect, and mirror Android phones over Wi-
 or launch configured Android Virtual Devices, without remembering SDK commands.
 
 <p align="center">
-  <img src="assets/popover.png" alt="awb menu bar popover listing Android emulators" width="426">
+  <img src="assets/popover.webp" alt="awb menu bar popover moving between its device list, settings and QR pairing pages" width="412">
 </p>
 
 awb wraps Android's wireless debugging flow behind a QR code. Scan it with your phone and
