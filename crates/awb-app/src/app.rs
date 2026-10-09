@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,7 @@ const STARTUP_HIDE: Duration = Duration::from_millis(800);
 
 static STATUS_EVENTS: Mutex<Vec<MenuBarIconEvent>> = Mutex::new(Vec::new());
 static MENU_EVENTS: Mutex<Vec<MenuEvent>> = Mutex::new(Vec::new());
+static STATUS_PRIMARY_CLICK: AtomicBool = AtomicBool::new(false);
 
 const POPOVER_GAP: f64 = 6.5;
 const WINDOW_MARGIN: f64 = 8.0;
@@ -268,6 +270,9 @@ pub struct App {
     day_shell: TextureHandle,
     night_shell: TextureHandle,
     status_icon: MenuBarIcon,
+    _menu: Menu,
+    #[cfg(target_os = "macos")]
+    _status_click: objc2::rc::Retained<crate::status_click::StatusClickTarget>,
     menu_icon_connected: bool,
     show_item: MenuItem,
     pair_id: MenuId,
@@ -320,13 +325,34 @@ impl App {
         ])?;
 
         let icon = menu_bar_icon(false)?;
-        let status_icon = MenuBarIconBuilder::new()
+        let builder = MenuBarIconBuilder::new()
             .with_icon(icon)
             .with_icon_as_template(true)
-            .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false)
-            .with_tooltip("awb - Android Wifi Bridge")
-            .build()?;
+            .with_tooltip("awb - Android Wifi Bridge");
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder
+            .with_menu(Box::new(menu.clone()))
+            .with_menu_on_left_click(false);
+        let status_icon = builder.build()?;
+
+        #[cfg(target_os = "macos")]
+        let status_click = {
+            use menu_icon::menu::ContextMenu;
+            let primary_ctx = ctx.clone();
+            let ns_menu = unsafe {
+                objc2::rc::Retained::retain(menu.ns_menu().cast::<objc2_app_kit::NSMenu>())
+            };
+            status_icon
+                .ns_status_item()
+                .zip(ns_menu)
+                .and_then(|(item, ns_menu)| {
+                    crate::status_click::StatusClickTarget::install(item, ns_menu, move || {
+                        STATUS_PRIMARY_CLICK.store(true, Ordering::SeqCst);
+                        primary_ctx.request_repaint();
+                    })
+                })
+                .ok_or_else(|| anyhow::anyhow!("menu bar status item unavailable"))?
+        };
 
         let status_ctx = ctx.clone();
         MenuBarIconEvent::set_event_handler(Some(move |event| {
@@ -361,6 +387,9 @@ impl App {
             day_shell,
             night_shell,
             status_icon,
+            _menu: menu,
+            #[cfg(target_os = "macos")]
+            _status_click: status_click,
             menu_icon_connected: false,
             show_item,
             pair_id: pair_item.id().clone(),
@@ -496,6 +525,13 @@ impl App {
                     self.toggle(ctx, Some(anchor));
                 }
             }
+        }
+
+        if STATUS_PRIMARY_CLICK.swap(false, Ordering::SeqCst) {
+            self.last_menu_anchor = None;
+            let anchor = self.menu_anchor();
+            self.last_menu_anchor = anchor;
+            self.toggle(ctx, anchor);
         }
 
         let menu_events: Vec<MenuEvent> = std::mem::take(&mut *MENU_EVENTS.lock().unwrap());

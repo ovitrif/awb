@@ -5,6 +5,8 @@ mod backend;
 mod config;
 mod glyph;
 mod login_item;
+#[cfg(target_os = "macos")]
+mod status_click;
 mod theme;
 
 use eframe::egui;

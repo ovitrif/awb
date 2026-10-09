@@ -37,7 +37,7 @@ with one-click phone mirroring, an Emulators group, a Logs tab, scrcpy settings,
 pairing for new phones. Each configured AVD stays in the Emulators group while stopped,
 starting, or running. Click the play icon to open its native Android Emulator window,
 or the trash icon to delete a stopped AVD and its saved data after confirmation.
-Both actions are disabled while the emulator is starting or running. Right-click
+Both actions are disabled while the emulator is starting or running. Right-click (or control-click)
 offers Show, Pair, Refresh, and Quit.
 
 macOS release archives also contain `Android Wifi Bridge.app` for /Applications and login items; it is the

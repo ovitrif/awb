@@ -9,5 +9,5 @@ pub use tray_icon::{
 };
 
 pub mod menu {
-    pub use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+    pub use tray_icon::menu::{ContextMenu, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 }
