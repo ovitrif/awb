@@ -71,6 +71,14 @@ pub fn remove_avd(name: &str) -> Result<()> {
 
 fn remove_avd_with_program(avdmanager: &Path, name: &str) -> Result<()> {
     let mut command = Command::new(avdmanager);
+    // avdmanager is a Java tool. An app launched from Finder or at login gets
+    // launchd's bare environment, so point it at Android Studio's bundled
+    // runtime when no JAVA_HOME is set and that runtime exists.
+    if std::env::var_os("JAVA_HOME").is_none()
+        && let Some(java_home) = bundled_java_home()
+    {
+        command.env("JAVA_HOME", java_home);
+    }
     command
         .args(["delete", "avd", "--name", name])
         .stdin(Stdio::null())
@@ -85,6 +93,20 @@ fn remove_avd_with_program(avdmanager: &Path, name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Android Studio's bundled Java runtime, in `/Applications` or
+/// `~/Applications`.
+fn bundled_java_home() -> Option<PathBuf> {
+    let suffix = "Android Studio.app/Contents/jbr/Contents/Home";
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+    roots
+        .into_iter()
+        .map(|root| root.join(suffix))
+        .find(|java_home| java_home.join("bin/java").exists())
 }
 
 fn output_with_timeout(mut command: Command, timeout: Duration, action: &str) -> Result<Output> {

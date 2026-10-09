@@ -565,6 +565,8 @@ impl App {
         if self.screen == screen {
             return;
         }
+        // A delete dialog belongs to the device list; leaving it dismisses it.
+        self.pending_avd_delete = None;
         // A transition replaced mid-slide would drop its pending cancel and
         // leave the pairing session running; cancel it now instead.
         if self
@@ -623,7 +625,13 @@ impl App {
                     self.show(ctx, self.menu_anchor());
                 }
             } else if event.id == self.pair_id {
-                self.navigate(Screen::Pair, ctx);
+                // Already on Pair (say, with an expired or failed code): start a
+                // fresh pairing rather than reopening the old one.
+                if self.screen == Screen::Pair {
+                    backend::start_pairing(self.shared.clone(), ctx.clone());
+                } else {
+                    self.navigate(Screen::Pair, ctx);
+                }
                 self.show(ctx, self.menu_anchor());
             } else if event.id == self.refresh_id {
                 backend::refresh_status(self.shared.clone(), ctx.clone());
