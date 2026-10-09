@@ -2361,6 +2361,10 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
 struct ScrollChrome {
     offset: f32,
     active_at: f64,
+    /// Scrollbar drag not yet applied. It goes through `scroll_with_delta`
+    /// on the next frame, like the mouse wheel, because a written offset
+    /// would be pulled back to the end by `stick_to_bottom`.
+    pending_drag: f32,
 }
 
 /// A vertical scroll area with the popover's own chrome: content edges fade
@@ -2383,12 +2387,21 @@ fn chrome_scroll(
             .max_rect(viewport_rect)
             .layout(Layout::top_down(Align::Min)),
     );
+    let chrome_id = area_ui.id().with("chrome");
+    let mut chrome: ScrollChrome = ui
+        .ctx()
+        .data(|data| data.get_temp(chrome_id))
+        .unwrap_or_default();
+    let pending_drag = std::mem::take(&mut chrome.pending_drag);
     let output = egui::ScrollArea::vertical()
         .id_salt(salt)
         .auto_shrink([false, false])
         .stick_to_bottom(stick_to_bottom)
         .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
         .show(&mut area_ui, |ui| {
+            if pending_drag != 0.0 {
+                ui.scroll_with_delta(vec2(0.0, -pending_drag));
+            }
             Frame::NONE
                 .inner_margin(Margin::symmetric(SCROLL_BLEED as i8, 0))
                 .show(ui, |ui| {
@@ -2399,14 +2412,10 @@ fn chrome_scroll(
     ui.allocate_rect(column, Sense::hover());
 
     let ctx = ui.ctx().clone();
-    let chrome_id = output.id.with("chrome");
-    let mut chrome: ScrollChrome = ctx
-        .data(|data| data.get_temp(chrome_id))
-        .unwrap_or_default();
     let now = ctx.input(|input| input.time);
     let viewport = output.inner_rect;
     let max_offset = (output.content_size.y - viewport.height()).max(0.0);
-    let mut offset = output.state.offset.y;
+    let offset = output.state.offset.y;
     if (offset - chrome.offset).abs() > 0.01 {
         chrome.active_at = now;
     }
@@ -2422,10 +2431,8 @@ fn chrome_scroll(
 
         let bar = ui.interact(track, chrome_id.with("bar"), Sense::DRAG);
         if bar.dragged() {
-            offset = (offset + bar.drag_delta().y * max_offset / travel).clamp(0.0, max_offset);
-            let mut state = output.state;
-            state.offset.y = offset;
-            state.store(&ctx, output.id);
+            let target = (offset + bar.drag_delta().y * max_offset / travel).clamp(0.0, max_offset);
+            chrome.pending_drag = target - offset;
             ctx.request_repaint();
         }
         let engaged = bar.hovered() || bar.dragged();

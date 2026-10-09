@@ -9,7 +9,8 @@
 //! including the beak). Commands:
 //!
 //! - `state`: current screen, tab, transition, theme, pairing phase.
-//! - `click X Y`, `hover X Y`, `leave`, `scroll DY` (at the pointer).
+//! - `click X Y`, `hover X Y`, `leave`, `scroll DY` (at the pointer),
+//!   `drag X1 Y1 X2 Y2` (press, move over a few frames, release).
 //! - `key NAME` with egui key names (`Tab`, `Enter`, `ArrowLeft`, ...);
 //!   prefix `shift+` for Shift.
 //! - `wait MS`: let time pass, running frames at 60 fps.
@@ -172,6 +173,32 @@ impl Driver<'_> {
                     });
                     self.frame()?;
                 }
+            }
+            "drag" => {
+                let [x1, y1, x2, y2] = args.as_slice() else {
+                    bail!("expected X1 Y1 X2 Y2");
+                };
+                let from = egui::pos2(x1.parse()?, y1.parse()?);
+                let to = egui::pos2(x2.parse()?, y2.parse()?);
+                self.pointer_to(from)?;
+                self.push(Event::PointerButton {
+                    pos: from,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                });
+                self.frame()?;
+                const STEPS: usize = 12;
+                for step in 1..=STEPS {
+                    self.pointer_to(from.lerp(to, step as f32 / STEPS as f32))?;
+                }
+                self.push(Event::PointerButton {
+                    pos: to,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                });
+                self.frame()?;
             }
             "leave" => {
                 self.pointer = None;

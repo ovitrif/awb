@@ -41,7 +41,7 @@ screen, mouse or keyboard: drive the real popover headlessly.
 - Send commands with `target/release/awb-app drive /tmp/awbd.sock <command>`,
   or pipe one per line with `-`. Each reply is one `ok ...` line carrying the
   current `screen`, `tab`, `transition`, `theme`, `gradients` and `pairing`
-  phase. Commands: `state`, `click X Y`, `hover X Y`, `leave`, `scroll DY`,
+  phase. Commands: `state`, `click X Y`, `hover X Y`, `drag X1 Y1 X2 Y2`, `leave`, `scroll DY`,
   `key NAME` (egui names, `shift+Tab`), `wait MS`, `shot PATH`,
   `record DIR` / `stop` (every frame plus `times.txt`), `theme auto|day|night`,
   `gradients on|off`, `quit`. Coordinates are window points: 380 wide, 0 at
