@@ -36,13 +36,18 @@ Android 11+ with developer options enabled, on the same Wi-Fi network as your Ma
 awb app
 ```
 
-The awb icon appears in the menu bar. Left-click toggles the popover: a Devices group
-with one-click phone mirroring, an Emulators group, a Logs tab, scrcpy settings, and QR
-pairing for new phones. Each configured AVD stays in the Emulators group while stopped,
-starting, or running. Click the play icon to open its native Android Emulator window,
-or the trash icon to delete a stopped AVD and its saved data after confirmation.
-Both actions are disabled while the emulator is starting or running. Right-click (or control-click)
-offers Show, Pair, Refresh, and Quit.
+The awb icon appears in the menu bar. Left-click toggles the popover: a Devices tab
+listing connected phones (with one-click mirroring) and configured emulators, a Logs tab,
+Settings, and QR pairing for new phones. Refresh, Settings, and Pair stay in the top-right
+corner on every page. Each configured AVD stays listed while stopped, starting, or running.
+Click the play icon to open its native Android Emulator window, or the trash icon to delete
+a stopped AVD and its saved data after confirmation. Both actions are disabled while the
+emulator is starting or running. Right-click (or control-click) offers Show, Pair, Refresh,
+and Quit.
+
+The popover works from the keyboard: Tab moves between controls, Return or Space activates
+the focused one, Escape closes the popover, and ← / → step back and forward through the
+pages you visited, then through Main, Settings, and Pair in order.
 
 macOS release archives also contain `Android Wifi Bridge.app` for /Applications and login items; it is the
 same menu bar app in a bundle.

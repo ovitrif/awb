@@ -27,15 +27,32 @@ const SCREEN_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 const SKIN_TRANSITION_DURATION: Duration = Duration::from_millis(180);
 const POPOVER_APPEAR_DURATION: Duration = Duration::from_millis(160);
 const POPOVER_HIDE_DURATION: Duration = Duration::from_millis(120);
-const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(250);
 const SCREEN_INCOMING_OFFSET: f32 = 32.0;
 const SCREEN_OUTGOING_OFFSET: f32 = 18.0;
 const THEME_MODE_GROUP_SIZE: egui::Vec2 = vec2(172.0, 28.0);
 const SCROLL_EDGE_FADE_HEIGHT: f32 = 22.0;
-const SCROLLBAR_HANDLE_HEIGHT: f32 = 44.0;
-const SCROLLBAR_HANDLE_WIDTH: f32 = 2.0;
-const SCROLLBAR_TRACK_INSET: f32 = 5.0;
-const SCROLLBAR_OPACITY_FADE: Duration = Duration::from_millis(100);
+/// How far scroll viewports reach into the side margins: room for hover
+/// shapes and focus rings at the content edge, and for the scrollbar.
+const SCROLL_BLEED: f32 = 9.0;
+const SCROLLBAR_MIN_HANDLE: f32 = 28.0;
+const SCROLLBAR_WIDTH: f32 = 3.0;
+const SCROLLBAR_HOVER_WIDTH: f32 = 6.0;
+const SCROLLBAR_HIT_WIDTH: f32 = 9.0;
+const SCROLLBAR_TRACK_INSET: f32 = 4.0;
+/// Seconds the scrollbar stays after scrolling stops, then its fade length.
+const SCROLLBAR_LINGER: f64 = 0.8;
+const SCROLLBAR_FADE: f64 = 0.25;
+const HEADER_HEIGHT: f32 = 26.0;
+const HEADER_GAP: f32 = 10.0;
+const HEADER_BUTTON_SIZE: f32 = 26.0;
+const HEADER_BUTTON_GAP: f32 = 6.0;
+const SHELL_OVERSAMPLE: u32 = 3;
+const ROW_HEIGHT: f32 = 38.0;
+const ROW_ACTION_SIZE: f32 = 22.0;
+const ROW_ACTION_GAP: f32 = 4.0;
+const STATUS_COLUMN_WIDTH: f32 = 66.0;
+const ROW_ICON_SIZE: f32 = 16.0;
+const QR_CARD_SIZE: f32 = 164.0;
 const CONTROL_HOVER_TRANSITION: f32 = 0.14;
 const CONTROL_PRESS_TRANSITION: f32 = 0.07;
 /// How long after launch to keep forcing the window hidden, in case the
@@ -289,8 +306,10 @@ pub struct App {
     last_menu_anchor: Option<MenuAnchor>,
     auto_mirrored: HashSet<String>,
     pending_avd_delete: Option<String>,
-    settings_scroll_offset: f32,
-    settings_scroll_active_at: Option<Instant>,
+    shell: Arc<ShellSampler>,
+    back_stack: Vec<Screen>,
+    forward_stack: Vec<Screen>,
+    pending_page_step: Option<i8>,
 }
 
 impl App {
@@ -308,8 +327,11 @@ impl App {
         );
         let logo = ctx.load_texture("awb-logo", logo_image, TextureOptions::LINEAR);
 
-        let day_shell = load_shell_texture(&ctx, "awb-shell-day", theme::Appearance::Day);
-        let night_shell = load_shell_texture(&ctx, "awb-shell-night", theme::Appearance::Night);
+        let (day_shell, day_raster) =
+            load_shell_texture(&ctx, "awb-shell-day", theme::Appearance::Day);
+        let (night_shell, night_raster) =
+            load_shell_texture(&ctx, "awb-shell-night", theme::Appearance::Night);
+        let shell = Arc::new(ShellSampler::new(night_raster, day_raster));
 
         let menu = Menu::new();
         let show_item = MenuItem::new("Show awb", true, None);
@@ -407,8 +429,10 @@ impl App {
             last_menu_anchor: None,
             auto_mirrored: HashSet::new(),
             pending_avd_delete: None,
-            settings_scroll_offset: 0.0,
-            settings_scroll_active_at: None,
+            shell,
+            back_stack: Vec::new(),
+            forward_stack: Vec::new(),
+            pending_page_step: None,
         })
     }
 
@@ -478,9 +502,59 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
-    fn open_pairing(&mut self, ctx: &Context) {
-        self.navigate_to(Screen::Pair, ctx);
-        backend::start_pairing(self.shared.clone(), ctx.clone());
+    /// Opens `screen` as a new step in the navigation history.
+    fn navigate(&mut self, screen: Screen, ctx: &Context) {
+        if self.screen == screen {
+            return;
+        }
+        self.back_stack.push(self.screen);
+        self.forward_stack.clear();
+        self.go(screen, ctx);
+    }
+
+    /// Steps back through history; with none left, `ordered` moves to the
+    /// previous page in Main → Settings → Pair order instead of to Main.
+    fn nav_back(&mut self, ctx: &Context, ordered: bool) {
+        let target = self.back_stack.pop().or_else(|| {
+            if ordered {
+                screen_in_order(self.screen, -1)
+            } else {
+                (self.screen != Screen::Main).then_some(Screen::Main)
+            }
+        });
+        if let Some(target) = target {
+            self.forward_stack.push(self.screen);
+            self.go(target, ctx);
+        }
+    }
+
+    /// Steps forward through history, or to the next page in order.
+    fn nav_forward(&mut self, ctx: &Context) {
+        if let Some(target) = self
+            .forward_stack
+            .pop()
+            .or_else(|| screen_in_order(self.screen, 1))
+        {
+            self.back_stack.push(self.screen);
+            self.go(target, ctx);
+        }
+    }
+
+    /// Moves to `screen`, starting pairing on entering Pair and cancelling it
+    /// once the transition away from Pair completes.
+    fn go(&mut self, screen: Screen, ctx: &Context) {
+        let leaving_pair = self.screen == Screen::Pair && screen != Screen::Pair;
+        self.navigate_to(screen, ctx);
+        if leaving_pair {
+            if let Some(transition) = &mut self.animations.screen {
+                transition.cancel_pairing_on_complete = true;
+            } else {
+                backend::cancel_pairing(&self.shared);
+            }
+        }
+        if screen == Screen::Pair {
+            backend::start_pairing(self.shared.clone(), ctx.clone());
+        }
     }
 
     fn navigate_to(&mut self, screen: Screen, ctx: &Context) {
@@ -497,15 +571,6 @@ impl App {
         });
         self.screen = screen;
         ctx.request_repaint();
-    }
-
-    fn leave_pairing(&mut self, ctx: &Context) {
-        self.navigate_to(Screen::Main, ctx);
-        if let Some(transition) = &mut self.animations.screen {
-            transition.cancel_pairing_on_complete = true;
-        } else {
-            backend::cancel_pairing(&self.shared);
-        }
     }
 
     fn handle_events(&mut self, ctx: &Context) {
@@ -545,7 +610,7 @@ impl App {
                     self.show(ctx, self.menu_anchor());
                 }
             } else if event.id == self.pair_id {
-                self.open_pairing(ctx);
+                self.navigate(Screen::Pair, ctx);
                 self.show(ctx, self.menu_anchor());
             } else if event.id == self.refresh_id {
                 backend::refresh_status(self.shared.clone(), ctx.clone());
@@ -576,6 +641,29 @@ impl App {
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if escape {
             self.hide(ctx);
+        }
+    }
+
+    fn handle_keyboard_navigation(&mut self, ctx: &Context) {
+        let (tab, pointer) = ctx.input(|input| {
+            (
+                input.key_pressed(egui::Key::Tab),
+                input.pointer.any_pressed(),
+            )
+        });
+        if tab || pointer {
+            ctx.data_mut(|data| data.insert_temp(keyboard_focus_id(), tab));
+        }
+
+        match self.pending_page_step.take() {
+            Some(step) if self.visible && !self.is_disappearing() => {
+                if step < 0 {
+                    self.nav_back(ctx, true);
+                } else {
+                    self.nav_forward(ctx);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -731,13 +819,56 @@ fn needs_full_status_refresh(visible: bool, auto_mirror: bool) -> bool {
     visible || auto_mirror
 }
 
-fn load_shell_texture(ctx: &Context, name: &str, appearance: theme::Appearance) -> TextureHandle {
-    let raster = glyph::shell_background(3, appearance);
+fn load_shell_texture(
+    ctx: &Context,
+    name: &str,
+    appearance: theme::Appearance,
+) -> (TextureHandle, glyph::Raster) {
+    let raster = glyph::shell_background(SHELL_OVERSAMPLE, appearance, theme::WINDOW_FULL_HEIGHT);
     let image = egui::ColorImage::from_rgba_premultiplied(
         [raster.width as usize, raster.height as usize],
         &raster.rgba,
     );
-    ctx.load_texture(name, image, TextureOptions::LINEAR)
+    (
+        ctx.load_texture(name, image, TextureOptions::LINEAR),
+        raster,
+    )
+}
+
+/// Both shell rasters, kept so scroll edges can fade into the exact surface
+/// color beneath them instead of painting a flat band over the lit gradient.
+struct ShellSampler {
+    width: u32,
+    height: u32,
+    night: Vec<u8>,
+    day: Vec<u8>,
+}
+
+impl ShellSampler {
+    fn new(night: glyph::Raster, day: glyph::Raster) -> Self {
+        Self {
+            width: night.width,
+            height: night.height,
+            night: night.rgba,
+            day: day.rgba,
+        }
+    }
+
+    fn color_at(&self, pos: egui::Pos2, day_weight: f32) -> Color32 {
+        let scale = SHELL_OVERSAMPLE as f32;
+        let x = ((pos.x * scale).max(0.0) as u32).min(self.width - 1);
+        let y = ((pos.y * scale).max(0.0) as u32).min(self.height - 1);
+        let index = ((y * self.width + x) * 4) as usize;
+        let pick = |rgba: &[u8]| {
+            Color32::from_rgba_premultiplied(
+                rgba[index],
+                rgba[index + 1],
+                rgba[index + 2],
+                rgba[index + 3],
+            )
+        };
+        pick(&self.night).lerp_to_gamma(pick(&self.day), day_weight)
+    }
 }
 
 fn resolved_appearance(mode: ThemeMode, system_theme: Option<Theme>) -> theme::Appearance {
@@ -751,13 +882,20 @@ fn resolved_appearance(mode: ThemeMode, system_theme: Option<Theme>) -> theme::A
     }
 }
 
-fn screen_transition_direction(from: Screen, to: Screen) -> f32 {
-    let depth = |screen| match screen {
-        Screen::Main => 0,
-        Screen::Settings | Screen::Pair => 1,
-    };
+const SCREEN_ORDER: [Screen; 3] = [Screen::Main, Screen::Settings, Screen::Pair];
 
-    if depth(to) < depth(from) { -1.0 } else { 1.0 }
+fn screen_in_order(from: Screen, step: isize) -> Option<Screen> {
+    let index = SCREEN_ORDER.iter().position(|screen| *screen == from)?;
+    SCREEN_ORDER.get(index.checked_add_signed(step)?).copied()
+}
+
+fn screen_transition_direction(from: Screen, to: Screen) -> f32 {
+    let index = |screen| {
+        SCREEN_ORDER
+            .iter()
+            .position(|candidate| *candidate == screen)
+    };
+    if index(to) < index(from) { -1.0 } else { 1.0 }
 }
 
 fn popover_position(
@@ -1011,6 +1149,33 @@ impl eframe::App for App {
         [0.0, 0.0, 0.0, 0.0]
     }
 
+    /// ← and → move between pages. Take them before egui sees them, which
+    /// would otherwise use them to move focus between controls; text fields
+    /// keep them for the caret.
+    fn raw_input_hook(&mut self, ctx: &Context, raw_input: &mut egui::RawInput) {
+        let editing_text = ctx
+            .memory(|memory| memory.focused())
+            .is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some());
+        if !self.visible || self.pending_avd_delete.is_some() || editing_text {
+            return;
+        }
+        raw_input.events.retain(|event| match event {
+            egui::Event::Key {
+                key: key @ (egui::Key::ArrowLeft | egui::Key::ArrowRight),
+                pressed,
+                modifiers,
+                ..
+            } if modifiers.is_none() => {
+                if *pressed {
+                    self.pending_page_step =
+                        Some(if *key == egui::Key::ArrowLeft { -1 } else { 1 });
+                }
+                false
+            }
+            _ => true,
+        });
+    }
+
     fn on_exit(&mut self) {
         backend::cancel_pairing(&self.shared);
         backend::stop_all_mirrors(&self.shared);
@@ -1043,6 +1208,7 @@ impl eframe::App for App {
         self.handle_events(ctx);
         self.handle_focus(ctx);
         self.handle_escape(ctx);
+        self.handle_keyboard_navigation(ctx);
         self.update_popover_transition(ctx);
 
         // Keep the full UI snapshot current while it is in use. When hidden,
@@ -1071,7 +1237,7 @@ impl eframe::App for App {
             self.screen == Screen::Pair && state.pairing.is_none()
         };
         if pairing_done {
-            self.navigate_to(Screen::Main, ctx);
+            self.navigate(Screen::Main, ctx);
         }
     }
 
@@ -1112,33 +1278,140 @@ impl eframe::App for App {
             egui::pos2(rect.left() + 16.0, rect.top() + theme::BEAK_HEIGHT + 14.0),
             egui::pos2(rect.right() - 16.0, rect.bottom() - 14.0),
         );
-        if let Some(transition) = self.animations.screen {
+        let header = Rect::from_min_size(content.min, vec2(content.width(), HEADER_HEIGHT));
+        let body = Rect::from_min_max(
+            egui::pos2(content.left(), header.bottom() + HEADER_GAP),
+            content.max,
+        );
+
+        let transition = self.animations.screen.map(|transition| {
             let progress = (transition.started_at.elapsed().as_secs_f32()
                 / SCREEN_TRANSITION_DURATION.as_secs_f32())
             .clamp(0.0, 1.0);
+            (transition, progress)
+        });
+        if let Some((transition, progress)) = transition
+            && progress >= 1.0
+        {
+            self.animations.screen = None;
+            if transition.cancel_pairing_on_complete {
+                backend::cancel_pairing(&self.shared);
+            }
+        }
 
-            if progress >= 1.0 {
-                self.animations.screen = None;
-                if transition.cancel_pairing_on_complete {
-                    backend::cancel_pairing(&self.shared);
-                }
-                self.render_screen(ui, content, &ctx, transition.to, 0.0, 1.0);
-            } else {
+        match transition {
+            Some((transition, progress)) if progress < 1.0 => {
                 let eased = egui::emath::easing::cubic_in_out(progress);
                 let outgoing_x = -transition.direction * SCREEN_OUTGOING_OFFSET * eased;
                 let incoming_x = transition.direction * SCREEN_INCOMING_OFFSET * (1.0 - eased);
 
-                self.render_screen(ui, content, &ctx, transition.from, outgoing_x, 1.0 - eased);
-                self.render_screen(ui, content, &ctx, transition.to, incoming_x, eased);
+                self.header(
+                    ui,
+                    &ctx,
+                    header,
+                    &[
+                        (transition.from, outgoing_x * 0.4, 1.0 - eased),
+                        (transition.to, incoming_x * 0.4, eased),
+                    ],
+                );
+                self.render_screen(ui, body, &ctx, transition.from, outgoing_x, 1.0 - eased);
+                self.render_screen(ui, body, &ctx, transition.to, incoming_x, eased);
                 ctx.request_repaint();
             }
-        } else {
-            self.render_screen(ui, content, &ctx, self.screen, 0.0, 1.0);
+            _ => {
+                self.header(ui, &ctx, header, &[(self.screen, 0.0, 1.0)]);
+                self.render_screen(ui, body, &ctx, self.screen, 0.0, 1.0);
+            }
         }
     }
 }
 
 impl App {
+    /// The header stays put across pages: its title cross-fades with the page
+    /// while refresh, settings and pairing remain in the top-right corner.
+    fn header(&mut self, ui: &mut Ui, ctx: &Context, rect: Rect, titles: &[(Screen, f32, f32)]) {
+        let settled = titles.len() == 1;
+        for &(screen, offset_x, opacity) in titles {
+            let mut title_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("header-title", screen))
+                    .max_rect(rect.translate(vec2(offset_x, 0.0)))
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            title_ui.set_opacity(opacity);
+            if !settled {
+                title_ui.disable();
+            }
+            match screen {
+                Screen::Main => {
+                    title_ui.add(
+                        egui::Image::new(&self.logo)
+                            .fit_to_exact_size(vec2(24.0, 24.0))
+                            .corner_radius(0.0),
+                    );
+                    title_ui.add_space(9.0);
+                }
+                Screen::Settings | Screen::Pair => {
+                    let back =
+                        icon_button(&mut title_ui, ph::CARET_LEFT, 14.0, theme::text_muted())
+                            .on_hover_text("Back");
+                    if back.clicked() {
+                        self.nav_back(ctx, false);
+                    }
+                    title_ui.add_space(6.0);
+                }
+            }
+            title_ui.add(
+                Label::new(semibold(screen_title(screen), 14.0, theme::text_strong()))
+                    .selectable(false),
+            );
+        }
+
+        // Laid out left to right so Tab visits them in reading order.
+        let actions_width = 3.0 * HEADER_BUTTON_SIZE + 2.0 * HEADER_BUTTON_GAP;
+        let mut actions_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("header-actions")
+                .max_rect(Rect::from_min_max(
+                    egui::pos2(rect.right() - actions_width, rect.top()),
+                    rect.max,
+                ))
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        if header_button(&mut actions_ui, ph::ARROWS_CLOCKWISE, false)
+            .on_hover_text("Refresh")
+            .clicked()
+        {
+            backend::refresh_status(self.shared.clone(), ctx.clone());
+        }
+        actions_ui.add_space(HEADER_BUTTON_GAP);
+        if header_button(
+            &mut actions_ui,
+            ph::GEAR_SIX,
+            self.screen == Screen::Settings,
+        )
+        .on_hover_text("Settings")
+        .clicked()
+        {
+            if self.screen == Screen::Settings {
+                self.nav_back(ctx, false);
+            } else {
+                self.navigate(Screen::Settings, ctx);
+            }
+        }
+        actions_ui.add_space(HEADER_BUTTON_GAP);
+        if header_button(&mut actions_ui, ph::QR_CODE, self.screen == Screen::Pair)
+            .on_hover_text("Pair new device")
+            .clicked()
+        {
+            if self.screen == Screen::Pair {
+                self.nav_back(ctx, false);
+            } else {
+                self.navigate(Screen::Pair, ctx);
+            }
+        }
+    }
+
     fn render_screen(
         &mut self,
         ui: &mut Ui,
@@ -1154,7 +1427,9 @@ impl App {
                 .max_rect(content.translate(vec2(offset_x, 0.0)))
                 .layout(Layout::top_down(Align::Min)),
         );
-        screen_ui.set_clip_rect(content);
+        // Hover shapes, focus rings and scroll edges may bleed into the side
+        // margins, so the clip is wider than the aligned content column.
+        screen_ui.set_clip_rect(content.expand2(vec2(SCROLL_BLEED, 0.0)));
         screen_ui.set_opacity(opacity);
         if self.animations.screen.is_some() {
             // Both screens are painted during the transition. Keep their
@@ -1172,8 +1447,6 @@ impl App {
     }
 
     fn main_screen(&mut self, ui: &mut Ui, ctx: &Context) {
-        self.main_header(ui, ctx);
-        ui.add_space(12.0);
         self.tab_bar(ui);
 
         match self.tab {
@@ -1182,44 +1455,8 @@ impl App {
         }
     }
 
-    fn main_header(&mut self, ui: &mut Ui, ctx: &Context) {
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::Image::new(&self.logo)
-                    .fit_to_exact_size(vec2(26.0, 26.0))
-                    .corner_radius(0.0),
-            );
-            ui.add_space(10.0);
-            ui.vertical(|ui| {
-                ui.add(Label::new(semibold("awb", 15.0, theme::text_strong())).selectable(false));
-                ui.add(
-                    Label::new(regular("Android Wifi Bridge", 11.0, theme::text_soft()))
-                        .selectable(false),
-                );
-            });
-
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, ph::QR_CODE, 14.0, theme::text_muted()).clicked() {
-                    self.open_pairing(ctx);
-                }
-                ui.add_space(10.0);
-                if icon_button(ui, ph::GEAR_SIX, 14.0, theme::text_muted()).clicked() {
-                    self.navigate_to(Screen::Settings, ctx);
-                }
-                ui.add_space(10.0);
-                if icon_button(ui, ph::ARROWS_CLOCKWISE, 14.0, theme::text_muted()).clicked() {
-                    backend::refresh_status(self.shared.clone(), ctx.clone());
-                }
-            });
-        });
-    }
-
     fn tab_bar(&mut self, ui: &mut Ui) {
-        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            // Keep the first tab's rounded hover treatment inside the screen
-            // clip instead of slicing off its left edge.
-            ui.add_space(7.0);
             if tab_item(ui, "Devices", self.tab == Tab::Devices).clicked() {
                 self.tab = Tab::Devices;
             }
@@ -1275,94 +1512,107 @@ impl App {
         }
 
         let scrcpy_ok = snapshot.scrcpy.available;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let devices: Vec<_> = snapshot
-                    .devices
-                    .iter()
-                    .filter(|device| !device.is_emulator)
-                    .collect();
-                if !devices.is_empty() {
-                    device_group_heading(ui, "Devices");
+        let day_weight = self.animations.skin.day_weight;
+        let shell = Arc::clone(&self.shell);
+        let settings = &self.settings;
+        let shared = &self.shared;
+        let pending_avd_delete = &mut self.pending_avd_delete;
+        chrome_scroll(ui, "devices-scroll", &shell, day_weight, false, |ui| {
+            let devices = snapshot.devices.iter().filter(|device| !device.is_emulator);
+            let mut first = true;
+            for device in devices {
+                if !std::mem::take(&mut first) {
+                    divider(ui);
                 }
-                for (index, device) in devices.iter().enumerate() {
-                    if index > 0 {
-                        divider(ui);
-                    }
 
-                    let mirroring = mirrors.contains(&device.mirror_key);
-                    let action = if mirroring {
-                        RowAction::enabled(ph::STOP, theme::green())
-                    } else if device.ready && scrcpy_ok {
+                let mirroring = mirrors.contains(&device.mirror_key);
+                let action = if mirroring {
+                    RowAction::enabled(ph::STOP, theme::green()).with_tooltip("Stop mirroring")
+                } else if device.ready && scrcpy_ok {
+                    RowAction::enabled(ph::PLAY, theme::text_bright()).with_tooltip("Mirror screen")
+                } else {
+                    RowAction::disabled(ph::PLAY)
+                };
+                let status = if mirroring {
+                    "Mirroring"
+                } else if device.ready {
+                    "Ready"
+                } else {
+                    device.state.as_str()
+                };
+
+                let row = Row {
+                    icon: ph::DEVICE_MOBILE,
+                    name: &device.name,
+                    tooltip: &device.serial,
+                    status,
+                    status_color: if mirroring {
+                        theme::green()
+                    } else {
+                        theme::text_faint()
+                    },
+                };
+                if list_row_with(ui, &row, &[action]).is_some() {
+                    if mirroring {
+                        backend::stop_mirror(shared, &device.mirror_key);
+                    } else {
+                        backend::start_mirror(
+                            shared.clone(),
+                            ctx.clone(),
+                            device.clone(),
+                            settings.scrcpy_options(),
+                        );
+                    }
+                }
+            }
+
+            for avd in &snapshot.avds {
+                if !std::mem::take(&mut first) {
+                    divider(ui);
+                }
+
+                let starting = starting_avds.contains(&avd.name);
+                let deleting = deleting_avds.contains(&avd.name);
+                let idle = avd.can_launch(starting) && !deleting;
+                let actions = [
+                    if idle {
                         RowAction::enabled(ph::PLAY, theme::text_bright())
                     } else {
                         RowAction::disabled(ph::PLAY)
-                    };
-                    let detail = if device.ready {
-                        device.serial.clone()
+                    }
+                    .with_tooltip("Start emulator"),
+                    if idle {
+                        RowAction::enabled(ph::TRASH, theme::text_muted())
                     } else {
-                        format!("{} · {}", device.serial, device.state)
-                    };
-
-                    if list_row(ui, ph::DEVICE_MOBILE, &device.name, &detail, &[action]).is_some() {
-                        if mirroring {
-                            backend::stop_mirror(&self.shared, &device.mirror_key);
-                        } else {
-                            backend::start_mirror(
-                                self.shared.clone(),
-                                ctx.clone(),
-                                (*device).clone(),
-                                self.settings.scrcpy_options(),
-                            );
-                        }
+                        RowAction::disabled(ph::TRASH)
                     }
-                }
-
-                if !snapshot.avds.is_empty() {
-                    if !devices.is_empty() {
-                        ui.add_space(6.0);
-                    }
-                    device_group_heading(ui, "Emulators");
-                }
-                for (index, avd) in snapshot.avds.iter().enumerate() {
-                    if index > 0 {
-                        divider(ui);
-                    }
-
-                    let starting = starting_avds.contains(&avd.name);
-                    let deleting = deleting_avds.contains(&avd.name);
-                    let idle = avd.can_launch(starting) && !deleting;
-                    let actions = [
-                        if idle {
-                            RowAction::enabled(ph::PLAY, theme::text_bright())
-                        } else {
-                            RowAction::disabled(ph::PLAY)
-                        }
-                        .with_tooltip("Start emulator"),
-                        if idle {
-                            RowAction::enabled(ph::TRASH, theme::text_muted())
-                        } else {
-                            RowAction::disabled(ph::TRASH)
-                        }
-                        .with_tooltip("Delete emulator"),
-                    ];
-                    let name = avd.name.replace('_', " ");
-                    let detail = if deleting {
-                        "Deleting…"
+                    .with_tooltip("Delete emulator"),
+                ];
+                let name = avd.name.replace('_', " ");
+                let status = if deleting {
+                    "Deleting…"
+                } else {
+                    avd.status(starting)
+                };
+                let row = Row {
+                    icon: ph::ANDROID_LOGO,
+                    name: &name,
+                    tooltip: &name,
+                    status,
+                    status_color: if status == "Running" {
+                        theme::green()
                     } else {
-                        avd.status(starting)
-                    };
+                        theme::text_faint()
+                    },
+                };
 
-                    match list_row(ui, ph::DESKTOP, &name, detail, &actions) {
-                        Some(0) => {
-                            backend::start_avd(self.shared.clone(), ctx.clone(), avd.name.clone())
-                        }
-                        Some(1) => self.pending_avd_delete = Some(avd.name.clone()),
-                        _ => {}
-                    }
+                match list_row_with(ui, &row, &actions) {
+                    Some(0) => backend::start_avd(shared.clone(), ctx.clone(), avd.name.clone()),
+                    Some(1) => *pending_avd_delete = Some(avd.name.clone()),
+                    _ => {}
                 }
-            });
+            }
+        });
 
         if let Some(name) = self.pending_avd_delete.clone() {
             let mut close = false;
@@ -1407,10 +1657,14 @@ impl App {
             logs.join("\n")
         };
 
-        egui::ScrollArea::vertical()
-            .stick_to_bottom(true)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
+        let shell = Arc::clone(&self.shell);
+        chrome_scroll(
+            ui,
+            "logs-scroll",
+            &shell,
+            self.animations.skin.day_weight,
+            true,
+            |ui| {
                 // Keep breathing room in the resting state while letting
                 // scrolled output disappear directly beneath the tab divider.
                 ui.add_space(8.0);
@@ -1426,229 +1680,163 @@ impl App {
                         })
                         .frame(Frame::NONE),
                 );
-            });
-    }
-
-    fn settings_screen(&mut self, ui: &mut Ui, ctx: &Context) {
-        if nav_header(ui, "Settings").clicked() {
-            self.navigate_to(Screen::Main, ctx);
-        }
-        ui.add_space(12.0);
-
-        let scroll_rect = ui.available_rect_before_wrap();
-        let scroll_input_active = ctx.input(|input| {
-            let pointer_over = input
-                .pointer
-                .hover_pos()
-                .is_some_and(|position| scroll_rect.contains(position));
-            pointer_over
-                && (input.is_scrolling()
-                    || input.time_since_last_scroll() <= input.predicted_dt.max(0.05))
-        });
-        if scroll_input_active {
-            self.settings_scroll_active_at = Some(Instant::now());
-        }
-
-        let scrollbar_opacity = self
-            .settings_scroll_active_at
-            .map(scrollbar_opacity)
-            .unwrap_or(0.0);
-        if let Some(active_at) = self.settings_scroll_active_at
-            && let Some(remaining) = SCROLLBAR_HIDE_DELAY.checked_sub(active_at.elapsed())
-        {
-            ctx.request_repaint_after(remaining);
-            if remaining <= SCROLLBAR_OPACITY_FADE {
-                ctx.request_repaint_after(Duration::from_millis(16));
-            }
-        }
-
-        let output = egui::ScrollArea::vertical()
-            .id_salt("settings-scroll")
-            .auto_shrink([false, false])
-            .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.add(
-                    Label::new(semibold("Screen Mirroring", 12.5, theme::text_bright()))
-                        .selectable(false),
-                );
-                ui.add_space(10.0);
-
-                let mut changed = false;
-                ui.horizontal(|ui| {
-                    let total = ui.available_width();
-                    let title_width = total - 2.0 * 64.0 - 2.0 * 8.0;
-                    changed |=
-                        labeled_input(ui, "Title", title_width, &mut self.settings.window_title);
-                    ui.add_space(8.0);
-                    changed |= labeled_input(ui, "W", 64.0, &mut self.width_text);
-                    ui.add_space(8.0);
-                    changed |= labeled_input(ui, "H", 64.0, &mut self.height_text);
-                });
-
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    changed |= check_item(ui, "Always on top", &mut self.settings.always_on_top);
-                    ui.add_space(20.0);
-                    changed |= check_item(ui, "Borderless", &mut self.settings.borderless);
-                    ui.add_space(20.0);
-                    changed |= check_item(ui, "Auto mirror", &mut self.settings.auto_mirror);
-                });
-
-                ui.add_space(12.0);
-                divider(ui);
-                ui.add_space(12.0);
-
-                ui.add(
-                    Label::new(semibold("General", 12.5, theme::text_bright())).selectable(false),
-                );
-                ui.add_space(10.0);
-
-                let mut theme_changed = false;
-                ui.allocate_ui_with_layout(
-                    vec2(ui.available_width(), THEME_MODE_GROUP_SIZE.y),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.add(
-                            Label::new(regular("Appearance", 12.0, theme::text_check()))
-                                .selectable(false),
-                        );
-                        theme_changed |= ui
-                            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                theme_mode_group(ui, &mut self.settings.theme)
-                            })
-                            .inner;
-                    },
-                );
-                changed |= theme_changed;
-
-                ui.add_space(10.0);
-                // Queried lazily: the System Events lookup prompts for Automation
-                // access the first time, so we defer it until Settings is opened.
-                let mut open_at_login = match self.open_at_login {
-                    Some(value) => value,
-                    None => {
-                        let enabled = login_item::is_enabled();
-                        self.open_at_login = Some(enabled);
-                        enabled
-                    }
-                };
-                if check_item(ui, "Open at Login", &mut open_at_login) {
-                    login_item::set_enabled(open_at_login);
-                    self.open_at_login = Some(open_at_login);
-                }
-
-                if changed {
-                    self.save_settings();
-                }
-                if theme_changed {
-                    ctx.request_repaint();
-                }
-
-                ui.add_space(12.0);
-                divider(ui);
-                ui.add_space(12.0);
-
-                ui.add(
-                    Label::new(semibold("Dependencies", 12.5, theme::text_bright()))
-                        .selectable(false),
-                );
-
-                let snapshot = self.shared.lock().unwrap().snapshot.clone();
-                let (adb, emulator, scrcpy) = match &snapshot {
-                    Some(snapshot) => (
-                        Some(&snapshot.adb),
-                        Some(&snapshot.emulator),
-                        Some(&snapshot.scrcpy),
-                    ),
-                    None => (None, None, None),
-                };
-
-                dependency_row(ui, ph::TERMINAL_WINDOW, "ADB", adb);
-                divider(ui);
-                dependency_row(ui, ph::DESKTOP, "Android Emulator", emulator);
-                divider(ui);
-                dependency_row(ui, ph::MONITOR_PLAY, "scrcpy", scrcpy);
-            });
-
-        let scroll_moving = (output.state.offset.y - self.settings_scroll_offset).abs() > 0.01
-            || output.state.velocity().y.abs() > 0.01;
-        self.settings_scroll_offset = output.state.offset.y;
-        if scroll_moving {
-            self.settings_scroll_active_at = Some(Instant::now());
-            ctx.request_repaint_after(SCROLLBAR_HIDE_DELAY);
-        }
-
-        paint_settings_scroll_chrome(
-            ui,
-            output.inner_rect,
-            output.content_size.y,
-            output.state.offset.y,
-            scrollbar_opacity,
+            },
         );
     }
 
-    fn pair_screen(&mut self, ui: &mut Ui, ctx: &Context) {
-        if nav_header(ui, "Pair device").clicked() {
-            self.leave_pairing(ctx);
-            return;
-        }
+    fn settings_screen(&mut self, ui: &mut Ui, ctx: &Context) {
+        let day_weight = self.animations.skin.day_weight;
+        let shell = Arc::clone(&self.shell);
+        chrome_scroll(ui, "settings-scroll", &shell, day_weight, false, |ui| {
+            ui.add(
+                Label::new(semibold("Screen Mirroring", 12.5, theme::text_bright()))
+                    .selectable(false),
+            );
+            ui.add_space(10.0);
 
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                let total = ui.available_width();
+                let title_width = total - 2.0 * 64.0 - 2.0 * 8.0;
+                changed |= labeled_input(ui, "Title", title_width, &mut self.settings.window_title);
+                ui.add_space(8.0);
+                changed |= labeled_input(ui, "W", 64.0, &mut self.width_text);
+                ui.add_space(8.0);
+                changed |= labeled_input(ui, "H", 64.0, &mut self.height_text);
+            });
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                changed |= check_item(ui, "Always on top", &mut self.settings.always_on_top);
+                ui.add_space(20.0);
+                changed |= check_item(ui, "Borderless", &mut self.settings.borderless);
+                ui.add_space(20.0);
+                changed |= check_item(ui, "Auto mirror", &mut self.settings.auto_mirror);
+            });
+
+            ui.add_space(12.0);
+            divider(ui);
+            ui.add_space(12.0);
+
+            ui.add(Label::new(semibold("General", 12.5, theme::text_bright())).selectable(false));
+            ui.add_space(10.0);
+
+            let mut theme_changed = false;
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), THEME_MODE_GROUP_SIZE.y),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.add(
+                        Label::new(regular("Appearance", 12.0, theme::text_check()))
+                            .selectable(false),
+                    );
+                    theme_changed |= ui
+                        .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            theme_mode_group(ui, &mut self.settings.theme)
+                        })
+                        .inner;
+                },
+            );
+            changed |= theme_changed;
+
+            ui.add_space(10.0);
+            // Queried lazily: the System Events lookup prompts for Automation
+            // access the first time, so we defer it until Settings is opened.
+            let mut open_at_login = match self.open_at_login {
+                Some(value) => value,
+                None => {
+                    let enabled = login_item::is_enabled();
+                    self.open_at_login = Some(enabled);
+                    enabled
+                }
+            };
+            if check_item(ui, "Open at Login", &mut open_at_login) {
+                login_item::set_enabled(open_at_login);
+                self.open_at_login = Some(open_at_login);
+            }
+
+            if changed {
+                self.save_settings();
+            }
+            if theme_changed {
+                ctx.request_repaint();
+            }
+
+            ui.add_space(12.0);
+            divider(ui);
+            ui.add_space(12.0);
+
+            ui.add(
+                Label::new(semibold("Dependencies", 12.5, theme::text_bright())).selectable(false),
+            );
+
+            let snapshot = self.shared.lock().unwrap().snapshot.clone();
+            let (adb, emulator, scrcpy) = match &snapshot {
+                Some(snapshot) => (
+                    Some(&snapshot.adb),
+                    Some(&snapshot.emulator),
+                    Some(&snapshot.scrcpy),
+                ),
+                None => (None, None, None),
+            };
+
+            dependency_row(ui, ph::TERMINAL_WINDOW, "ADB", adb);
+            divider(ui);
+            dependency_row(ui, ph::DESKTOP, "Android Emulator", emulator);
+            divider(ui);
+            dependency_row(ui, ph::MONITOR_PLAY, "scrcpy", scrcpy);
+        });
+    }
+
+    fn pair_screen(&mut self, ui: &mut Ui, ctx: &Context) {
         let phase = {
             let state = self.shared.lock().unwrap();
             state.pairing.as_ref().map(|session| session.phase.clone())
         };
 
         let Some(phase) = phase else {
-            self.navigate_to(Screen::Main, ctx);
             return;
         };
 
         match phase {
             PairingPhase::Qr { modules, progress } => {
-                let content_height = 168.0 + 14.0 + 18.0 + 4.0 + 30.0 + 12.0 + 50.0;
-                center_pad_at_least(ui, content_height, 24.0);
-
-                ui.vertical_centered(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(168.0, 168.0), Sense::hover());
-                    let painter = ui.painter();
-                    painter.rect_filled(rect, 12.0, theme::qr_card());
-
-                    // Reserve a 4-module quiet zone inside the 144px area; the
-                    // raw matrix has none and Android's scanner rejects codes
-                    // without it.
-                    let qr_size = 144.0;
-                    let quiet = 4.0;
-                    let cell = qr_size / (modules.size as f32 + 2.0 * quiet);
-                    let origin = rect.center() - vec2(qr_size / 2.0, qr_size / 2.0)
-                        + vec2(quiet * cell, quiet * cell);
-                    for y in 0..modules.size {
-                        for x in 0..modules.size {
-                            if modules.dark[y * modules.size + x] {
-                                let min = origin + vec2(x as f32 * cell, y as f32 * cell);
-                                painter.rect_filled(
-                                    Rect::from_min_size(min, vec2(cell + 0.3, cell + 0.3)),
-                                    0.0,
-                                    theme::qr_ink(),
-                                );
-                            }
+                let block_height = QR_CARD_SIZE;
+                center_pad(ui, block_height);
+                ui.horizontal_top(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(vec2(QR_CARD_SIZE, QR_CARD_SIZE), Sense::hover());
+                    paint_qr_card(ui, rect, &modules);
+                    ui.add_space(18.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(4.0);
+                        ui.add(
+                            Label::new(semibold(
+                                "Scan with your phone",
+                                13.0,
+                                theme::text_bright(),
+                            ))
+                            .selectable(false),
+                        );
+                        ui.add_space(4.0);
+                        ui.add(
+                            Label::new(regular("On the phone, open", 11.0, theme::text_soft()))
+                                .selectable(false),
+                        );
+                        ui.add_space(8.0);
+                        for (index, step) in [
+                            "Developer options",
+                            "Wireless debugging",
+                            "Pair device with QR code",
+                        ]
+                        .iter()
+                        .enumerate()
+                        {
+                            pairing_step(ui, index + 1, step);
+                            ui.add_space(5.0);
                         }
-                    }
-
-                    ui.add_space(14.0);
-                    ui.add(Label::new(semibold(
-                        "Scan with your phone",
-                        13.0,
-                        theme::text_bright(),
-                    )));
-                    ui.add_space(4.0);
-                    hint_label(
-                        ui,
-                        "Developer options → Wireless debugging → Pair device with QR code",
-                        300.0,
-                    );
-                    ui.add_space(12.0);
-                    pairing_progress_block(ui, &progress, 310.0);
+                        ui.add_space(7.0);
+                        pairing_progress_block(ui, &progress, ui.available_width(), Align::Min);
+                    });
                 });
             }
             PairingPhase::Connecting { progress } => {
@@ -1664,7 +1852,7 @@ impl App {
                     ui.add_space(4.0);
                     hint_label(ui, &progress.detail, 300.0);
                     ui.add_space(10.0);
-                    pairing_progress_block(ui, &progress, 310.0);
+                    pairing_progress_block(ui, &progress, 310.0, Align::Center);
                 });
             }
             PairingPhase::Failed { message } => {
@@ -1709,7 +1897,7 @@ impl App {
                         )
                         .clicked()
                         {
-                            self.leave_pairing(ctx);
+                            self.navigate(Screen::Main, ctx);
                         }
                     });
                 });
@@ -1766,6 +1954,7 @@ fn icon_button(ui: &mut Ui, glyph: &str, size: f32, color: Color32) -> egui::Res
         theme::icon_font(size),
         color,
     );
+    focus_ring(ui, &response, rect, 6.0);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -1794,6 +1983,7 @@ fn tab_item(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
                     interaction.overlay,
                 ),
             );
+            focus_ring(ui, &response, response.rect.expand2(vec2(6.0, 4.0)), 5.0);
             ui.add_space(6.0);
             let (rect, _) =
                 ui.allocate_exact_size(vec2(response.rect.width(), 2.0), Sense::hover());
@@ -1812,96 +2002,9 @@ fn divider(ui: &mut Ui) {
     ui.painter().rect_filled(rect, 0.0, theme::hairline());
 }
 
-fn device_group_heading(ui: &mut Ui, title: &str) {
-    ui.add_space(8.0);
-    ui.add(Label::new(medium(title, 10.5, theme::text_label())).selectable(false));
-    ui.add_space(2.0);
-}
-
-fn list_row(
-    ui: &mut Ui,
-    row_icon: &str,
-    name: &str,
-    detail: &str,
-    actions: &[RowAction],
-) -> Option<usize> {
-    let mut clicked = None;
-    let reserved = 4.0 + actions.len() as f32 * (22.0 + ui.spacing().item_spacing.x);
-
-    ui.horizontal(|ui| {
-        ui.set_height(38.0);
-        ui.add_space(2.0);
-        ui.add(Label::new(icon(row_icon, 14.0, theme::text_label())).selectable(false));
-        ui.add_space(10.0);
-        ui.scope(|ui| {
-            ui.set_max_width((ui.available_width() - reserved - 85.0).max(20.0));
-            ui.add(
-                Label::new(medium(name, 12.5, theme::text_bright()))
-                    .truncate()
-                    .selectable(false),
-            )
-            .on_hover_text(name);
-        });
-        ui.add_space(10.0);
-
-        ui.scope(|ui| {
-            ui.set_max_width((ui.available_width() - reserved).max(20.0));
-            ui.add(
-                Label::new(regular(detail, 11.0, theme::text_faint()))
-                    .truncate()
-                    .selectable(false),
-            );
-        });
-
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(2.0);
-            for (index, action) in actions.iter().enumerate().rev() {
-                let (rect, response) = ui.allocate_exact_size(
-                    vec2(22.0, 22.0),
-                    if action.enabled {
-                        Sense::click()
-                    } else {
-                        Sense::hover()
-                    },
-                );
-                ui.painter().rect_filled(rect, 6.0, theme::surface());
-                let interaction = interaction_visual(
-                    ui,
-                    response.id,
-                    response.hovered() && action.enabled,
-                    response.is_pointer_button_down_on() && action.enabled,
-                );
-                ui.painter().rect_filled(rect, 6.0, interaction.overlay);
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    action.glyph,
-                    theme::icon_font(10.0),
-                    action.color,
-                );
-
-                let response = if let Some(tooltip) = action.tooltip {
-                    response.on_hover_text(tooltip)
-                } else {
-                    response
-                };
-                if action.enabled {
-                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if response.clicked() {
-                        clicked = Some(index);
-                    }
-                }
-            }
-        });
-    });
-
-    clicked
-}
-
 fn dependency_row(ui: &mut Ui, row_icon: &str, name: &str, info: Option<&backend::ToolInfo>) {
     ui.horizontal(|ui| {
-        ui.set_height(38.0);
-        ui.add_space(2.0);
+        ui.set_height(ROW_HEIGHT);
         ui.add(Label::new(icon(row_icon, 14.0, theme::text_label())).selectable(false));
         ui.add_space(10.0);
         ui.add(Label::new(medium(name, 12.5, theme::text_bright())).selectable(false));
@@ -1931,20 +2034,17 @@ fn dependency_row(ui: &mut Ui, row_icon: &str, name: &str, info: Option<&backend
             );
         });
 
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(2.0);
-            match info {
-                Some(tool) if tool.available && tool.warnings.is_empty() => {
-                    ui.add(Label::new(regular("Ready", 11.0, theme::green())).selectable(false));
-                }
-                Some(tool) if tool.available => {
-                    ui.add(Label::new(regular("Update", 11.0, theme::amber())).selectable(false));
-                }
-                Some(_) => {
-                    ui.add(Label::new(regular("Missing", 11.0, theme::red())).selectable(false));
-                }
-                None => {}
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| match info {
+            Some(tool) if tool.available && tool.warnings.is_empty() => {
+                ui.add(Label::new(regular("Ready", 11.0, theme::green())).selectable(false));
             }
+            Some(tool) if tool.available => {
+                ui.add(Label::new(regular("Update", 11.0, theme::amber())).selectable(false));
+            }
+            Some(_) => {
+                ui.add(Label::new(regular("Missing", 11.0, theme::red())).selectable(false));
+            }
+            None => {}
         });
     });
 }
@@ -2004,96 +2104,408 @@ fn labeled_input(ui: &mut Ui, label: &str, width: f32, value: &mut String) -> bo
     .inner
 }
 
-fn scrollbar_opacity(active_at: Instant) -> f32 {
-    let elapsed = active_at.elapsed();
-    let Some(remaining) = SCROLLBAR_HIDE_DELAY.checked_sub(elapsed) else {
-        return 0.0;
-    };
-
-    (remaining.as_secs_f32() / SCROLLBAR_OPACITY_FADE.as_secs_f32()).clamp(0.0, 1.0)
-}
-
-fn paint_settings_scroll_chrome(
-    ui: &Ui,
-    viewport: Rect,
-    content_height: f32,
+#[derive(Clone, Copy, Default)]
+struct ScrollChrome {
     offset: f32,
-    scrollbar_opacity: f32,
+    active_at: f64,
+}
+
+/// A vertical scroll area with the popover's own chrome: content edges fade
+/// into the shell surface, and a thin overlay scrollbar appears while
+/// scrolling, widens under the pointer and can be dragged. The viewport
+/// bleeds into the side margins so content stays aligned with the header.
+fn chrome_scroll(
+    ui: &mut Ui,
+    salt: &str,
+    shell: &ShellSampler,
+    day_weight: f32,
+    stick_to_bottom: bool,
+    add_contents: impl FnOnce(&mut Ui),
 ) {
-    let max_offset = (content_height - viewport.height()).max(0.0);
-    if max_offset <= 0.5 {
-        return;
+    let column = ui.available_rect_before_wrap();
+    let viewport_rect = column.expand2(vec2(SCROLL_BLEED, 0.0));
+    let mut area_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(salt)
+            .max_rect(viewport_rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    let output = egui::ScrollArea::vertical()
+        .id_salt(salt)
+        .auto_shrink([false, false])
+        .stick_to_bottom(stick_to_bottom)
+        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+        .show(&mut area_ui, |ui| {
+            Frame::NONE
+                .inner_margin(Margin::symmetric(SCROLL_BLEED as i8, 0))
+                .show(ui, |ui| {
+                    ui.set_width(column.width());
+                    add_contents(ui);
+                });
+        });
+    ui.allocate_rect(column, Sense::hover());
+
+    let ctx = ui.ctx().clone();
+    let chrome_id = output.id.with("chrome");
+    let mut chrome: ScrollChrome = ctx
+        .data(|data| data.get_temp(chrome_id))
+        .unwrap_or_default();
+    let now = ctx.input(|input| input.time);
+    let viewport = output.inner_rect;
+    let max_offset = (output.content_size.y - viewport.height()).max(0.0);
+    let mut offset = output.state.offset.y;
+    if (offset - chrome.offset).abs() > 0.01 {
+        chrome.active_at = now;
     }
 
-    let painter = ui.painter().with_clip_rect(viewport);
-    let top_strength = (offset / SCROLL_EDGE_FADE_HEIGHT).clamp(0.0, 1.0);
-    let bottom_strength = ((max_offset - offset) / SCROLL_EDGE_FADE_HEIGHT).clamp(0.0, 1.0);
-
-    if top_strength > 0.0 {
-        let rect = Rect::from_min_max(
-            viewport.min,
-            egui::pos2(viewport.right(), viewport.top() + SCROLL_EDGE_FADE_HEIGHT),
-        );
-        paint_vertical_gradient(
-            &painter,
-            rect,
-            with_opacity(theme::scroll_fade_top(), top_strength),
-            Color32::TRANSPARENT,
-        );
-    }
-
-    if bottom_strength > 0.0 {
-        let rect = Rect::from_min_max(
-            egui::pos2(viewport.left(), viewport.bottom() - SCROLL_EDGE_FADE_HEIGHT),
+    if max_offset > 0.5 {
+        let track = Rect::from_min_max(
+            egui::pos2(viewport.right() - SCROLLBAR_HIT_WIDTH, viewport.top()),
             viewport.max,
-        );
-        paint_vertical_gradient(
-            &painter,
-            rect,
-            Color32::TRANSPARENT,
-            with_opacity(theme::scroll_fade_bottom(), bottom_strength),
-        );
+        )
+        .shrink2(vec2(0.0, SCROLLBAR_TRACK_INSET));
+        let (handle_height, travel) =
+            scrollbar_handle(track.height(), viewport.height(), output.content_size.y);
+
+        let bar = ui.interact(track, chrome_id.with("bar"), Sense::DRAG);
+        if bar.dragged() {
+            offset = (offset + bar.drag_delta().y * max_offset / travel).clamp(0.0, max_offset);
+            let mut state = output.state;
+            state.offset.y = offset;
+            state.store(&ctx, output.id);
+            ctx.request_repaint();
+        }
+        let engaged = bar.hovered() || bar.dragged();
+        if engaged {
+            chrome.active_at = now;
+        }
+        let since = now - chrome.active_at;
+        let visibility = if since <= SCROLLBAR_LINGER {
+            1.0
+        } else {
+            (1.0 - (since - SCROLLBAR_LINGER) / SCROLLBAR_FADE).clamp(0.0, 1.0) as f32
+        };
+        if visibility > 0.0 {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+        let widen = ctx.animate_bool_with_time(chrome_id.with("widen"), engaged, 0.12);
+
+        let painter = ui.painter().with_clip_rect(viewport);
+        let top_strength = (offset / SCROLL_EDGE_FADE_HEIGHT).clamp(0.0, 1.0);
+        let bottom_strength = ((max_offset - offset) / SCROLL_EDGE_FADE_HEIGHT).clamp(0.0, 1.0);
+        let fade = |top: f32, strength: f32, solid_at_top: bool| {
+            let rect = Rect::from_min_max(
+                egui::pos2(viewport.left(), top),
+                egui::pos2(viewport.right(), top + SCROLL_EDGE_FADE_HEIGHT),
+            );
+            paint_edge_fade(&painter, shell, day_weight, rect, solid_at_top, strength);
+        };
+        if top_strength > 0.0 {
+            fade(viewport.top(), top_strength, true);
+        }
+        if bottom_strength > 0.0 {
+            fade(
+                viewport.bottom() - SCROLL_EDGE_FADE_HEIGHT,
+                bottom_strength,
+                false,
+            );
+        }
+
+        if visibility > 0.0 {
+            let width = egui::lerp(SCROLLBAR_WIDTH..=SCROLLBAR_HOVER_WIDTH, widen);
+            let top = track.top() + travel * (offset / max_offset).clamp(0.0, 1.0);
+            let handle = Rect::from_min_size(
+                egui::pos2(viewport.right() - 2.0 - width, top),
+                vec2(width, handle_height),
+            );
+            let color =
+                theme::scrollbar_thumb().lerp_to_gamma(theme::scrollbar_thumb_hover(), widen);
+            painter.rect_filled(handle, width / 2.0, with_opacity(color, visibility));
+        }
     }
 
-    if scrollbar_opacity > 0.0
-        && let Some(handle) = settings_scrollbar_rect(viewport, content_height, offset)
-    {
-        painter.rect_filled(
-            handle,
-            SCROLLBAR_HANDLE_WIDTH / 2.0,
-            with_opacity(theme::scrollbar_thumb(), scrollbar_opacity),
-        );
-    }
+    chrome.offset = offset;
+    ctx.data_mut(|data| data.insert_temp(chrome_id, chrome));
 }
 
-fn settings_scrollbar_rect(viewport: Rect, content_height: f32, offset: f32) -> Option<Rect> {
-    let max_offset = content_height - viewport.height();
-    if max_offset <= 0.5 {
-        return None;
-    }
-
-    let track_top = viewport.top() + SCROLLBAR_TRACK_INSET;
-    let track_height = (viewport.height() - 2.0 * SCROLLBAR_TRACK_INSET).max(0.0);
-    let handle_height = SCROLLBAR_HANDLE_HEIGHT.min(track_height);
-    let travel = (track_height - handle_height).max(0.0);
-    let progress = (offset / max_offset).clamp(0.0, 1.0);
-    let top = track_top + travel * progress;
-
-    Some(Rect::from_min_size(
-        egui::pos2(viewport.right() - SCROLLBAR_HANDLE_WIDTH - 1.0, top),
-        vec2(SCROLLBAR_HANDLE_WIDTH, handle_height),
-    ))
+/// Handle length, proportional to the visible share of the content but never
+/// shorter than a comfortable grab target, and the distance it can travel.
+fn scrollbar_handle(track_height: f32, viewport_height: f32, content_height: f32) -> (f32, f32) {
+    let handle = (track_height * viewport_height / content_height)
+        .clamp(SCROLLBAR_MIN_HANDLE.min(track_height), track_height);
+    (handle, (track_height - handle).max(1.0))
 }
 
-fn paint_vertical_gradient(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
+/// Fades content into the shell along one edge of `rect`, sampling the shell
+/// across the width so the band matches the lit surface beneath it.
+fn paint_edge_fade(
+    painter: &egui::Painter,
+    shell: &ShellSampler,
+    day_weight: f32,
+    rect: Rect,
+    solid_at_top: bool,
+    strength: f32,
+) {
+    let columns = ((rect.width() / 12.0).ceil() as u32).max(1);
+    let edge_y = if solid_at_top {
+        rect.top()
+    } else {
+        rect.bottom()
+    };
     let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(rect.left_top(), top);
-    mesh.colored_vertex(rect.right_top(), top);
-    mesh.colored_vertex(rect.right_bottom(), bottom);
-    mesh.colored_vertex(rect.left_bottom(), bottom);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
+    for column in 0..=columns {
+        let x = rect.left() + rect.width() * column as f32 / columns as f32;
+        let solid = shell
+            .color_at(egui::pos2(x, edge_y), day_weight)
+            .gamma_multiply(strength);
+        let (top, bottom) = if solid_at_top {
+            (solid, Color32::TRANSPARENT)
+        } else {
+            (Color32::TRANSPARENT, solid)
+        };
+        mesh.colored_vertex(egui::pos2(x, rect.top()), top);
+        mesh.colored_vertex(egui::pos2(x, rect.bottom()), bottom);
+    }
+    for column in 0..columns {
+        let index = column * 2;
+        mesh.add_triangle(index, index + 1, index + 2);
+        mesh.add_triangle(index + 1, index + 3, index + 2);
+    }
     painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Whether focus last moved by keyboard, so focus rings show for Tab
+/// navigation but not after a click.
+fn keyboard_focus_id() -> egui::Id {
+    egui::Id::new("awb-keyboard-focus")
+}
+
+fn focus_ring(ui: &Ui, response: &egui::Response, rect: Rect, radius: f32) {
+    let keyboard = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(keyboard_focus_id()))
+        .unwrap_or(false);
+    if keyboard && response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(1.5),
+            radius + 1.5,
+            Stroke::new(1.5_f32, theme::input_focus_stroke()),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
+fn screen_title(screen: Screen) -> &'static str {
+    match screen {
+        Screen::Main => "Android Wifi Bridge",
+        Screen::Settings => "Settings",
+        Screen::Pair => "Pair device",
+    }
+}
+
+/// A header action; `active` marks the page it opened.
+fn header_button(ui: &mut Ui, glyph: &str, active: bool) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(HEADER_BUTTON_SIZE, HEADER_BUTTON_SIZE), Sense::click());
+    let active_progress = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("active"), active, 0.16);
+    if active_progress > 0.0 {
+        ui.painter().rect_filled(
+            rect,
+            7.0,
+            theme::control_selected().gamma_multiply(active_progress),
+        );
+    }
+    let interaction = interaction_visual(
+        ui,
+        response.id,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    );
+    ui.painter().rect_filled(rect, 7.0, interaction.overlay);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        theme::icon_font(15.0),
+        theme::text_muted().lerp_to_gamma(
+            theme::text_strong(),
+            active_progress.max(interaction.hover_progress),
+        ),
+    );
+    focus_ring(ui, &response, rect, 7.0);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+struct Row<'a> {
+    icon: &'a str,
+    name: &'a str,
+    tooltip: &'a str,
+    status: &'a str,
+    status_color: Color32,
+}
+
+/// One device row: icon, name, a status column at a fixed position so the
+/// statuses line up, then the action buttons on the right edge.
+fn list_row_with(ui: &mut Ui, row: &Row<'_>, actions: &[RowAction]) -> Option<usize> {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::hover());
+    let center_y = rect.center().y;
+    ui.painter().text(
+        egui::pos2(rect.left() + ROW_ICON_SIZE / 2.0, center_y),
+        egui::Align2::CENTER_CENTER,
+        row.icon,
+        theme::icon_font(ROW_ICON_SIZE),
+        theme::text_label(),
+    );
+
+    let actions_width = actions.len() as f32 * ROW_ACTION_SIZE
+        + actions.len().saturating_sub(1) as f32 * ROW_ACTION_GAP;
+    let status_left = rect.right() - actions_width - 12.0 - STATUS_COLUMN_WIDTH;
+    let name_rect = Rect::from_min_max(
+        egui::pos2(rect.left() + 26.0, rect.top()),
+        egui::pos2(status_left - 10.0, rect.bottom()),
+    );
+    let status_rect = Rect::from_min_max(
+        egui::pos2(status_left, rect.top()),
+        egui::pos2(status_left + STATUS_COLUMN_WIDTH, rect.bottom()),
+    );
+    let left_aligned = |rect| {
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center))
+    };
+    ui.scope_builder(left_aligned(name_rect), |ui| {
+        ui.add(
+            Label::new(medium(row.name, 12.5, theme::text_bright()))
+                .truncate()
+                .selectable(false),
+        )
+        .on_hover_text(row.tooltip);
+    });
+    ui.scope_builder(left_aligned(status_rect), |ui| {
+        ui.add(
+            Label::new(regular(row.status, 11.0, row.status_color))
+                .truncate()
+                .selectable(false),
+        );
+    });
+
+    let mut clicked = None;
+    let mut right = rect.right();
+    for (index, action) in actions.iter().enumerate().rev() {
+        let action_rect = Rect::from_min_max(
+            egui::pos2(right - ROW_ACTION_SIZE, center_y - ROW_ACTION_SIZE / 2.0),
+            egui::pos2(right, center_y + ROW_ACTION_SIZE / 2.0),
+        );
+        right -= ROW_ACTION_SIZE + ROW_ACTION_GAP;
+        let response = ui.interact(
+            action_rect,
+            ui.id().with((row.name, index)),
+            if action.enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        );
+        ui.painter().rect_filled(action_rect, 6.0, theme::surface());
+        let interaction = interaction_visual(
+            ui,
+            response.id,
+            response.hovered() && action.enabled,
+            response.is_pointer_button_down_on() && action.enabled,
+        );
+        ui.painter()
+            .rect_filled(action_rect, 6.0, interaction.overlay);
+        ui.painter().text(
+            action_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            action.glyph,
+            theme::icon_font(10.0),
+            action.color,
+        );
+        focus_ring(ui, &response, action_rect, 6.0);
+
+        let response = if let Some(tooltip) = action.tooltip {
+            response.on_hover_text(tooltip)
+        } else {
+            response
+        };
+        if action.enabled {
+            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.clicked() {
+                clicked = Some(index);
+            }
+        }
+    }
+    clicked
+}
+
+#[cfg(test)]
+fn list_row(
+    ui: &mut Ui,
+    row_icon: &str,
+    name: &str,
+    detail: &str,
+    actions: &[RowAction],
+) -> Option<usize> {
+    let row = Row {
+        icon: row_icon,
+        name,
+        tooltip: name,
+        status: detail,
+        status_color: theme::text_faint(),
+    };
+    list_row_with(ui, &row, actions)
+}
+
+fn paint_qr_card(ui: &Ui, rect: Rect, modules: &awb_core::qr::QrModules) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, 14.0, theme::qr_card());
+    painter.rect_stroke(
+        rect,
+        14.0,
+        Stroke::new(1.0_f32, theme::qr_card_stroke()),
+        egui::StrokeKind::Inside,
+    );
+
+    // Reserve a 4-module quiet zone; the raw matrix has none and Android's
+    // scanner rejects codes without it.
+    let qr_size = rect.width() - 20.0;
+    let quiet = 4.0;
+    let cell = qr_size / (modules.size as f32 + 2.0 * quiet);
+    let origin =
+        rect.center() - vec2(qr_size / 2.0, qr_size / 2.0) + vec2(quiet * cell, quiet * cell);
+    for y in 0..modules.size {
+        for x in 0..modules.size {
+            if modules.dark[y * modules.size + x] {
+                let min = origin + vec2(x as f32 * cell, y as f32 * cell);
+                painter.rect_filled(
+                    Rect::from_min_size(min, vec2(cell + 0.3, cell + 0.3)),
+                    0.0,
+                    theme::qr_ink(),
+                );
+            }
+        }
+    }
+}
+
+/// A numbered step of the phone-side pairing path.
+fn pairing_step(ui: &mut Ui, number: usize, text: &str) {
+    ui.horizontal(|ui| {
+        let (badge, _) = ui.allocate_exact_size(vec2(17.0, 17.0), Sense::hover());
+        ui.painter()
+            .circle_filled(badge.center(), 8.5, theme::control_selected());
+        ui.painter().text(
+            badge.center(),
+            egui::Align2::CENTER_CENTER,
+            number.to_string(),
+            FontId::new(10.0, FontFamily::Name(theme::SEMIBOLD.into())),
+            theme::text_bright(),
+        );
+        ui.add_space(8.0);
+        ui.add(Label::new(regular(text, 11.5, theme::text_check())).selectable(false));
+    });
 }
 
 fn with_opacity(color: Color32, opacity: f32) -> Color32 {
@@ -2175,6 +2587,7 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
                                     .lerp_to_gamma(theme::text_bright(), interaction.hover_progress)
                             },
                         );
+                        focus_ring(ui, &response, rect, 6.0);
                         if response.clicked() && !active {
                             *selected = mode;
                             changed = true;
@@ -2192,9 +2605,6 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
     let mut changed = false;
 
     ui.horizontal(|ui| {
-        // The hover shape expands by five points. Reserve those points inside
-        // the scroll viewport so the left rounded edge remains intact.
-        ui.add_space(6.0);
         let background = ui.painter().add(egui::Shape::Noop);
         let (rect, response) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -2204,7 +2614,7 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
             .add(
                 Label::new(regular(label, 12.0, theme::text_check()))
                     .selectable(false)
-                    .sense(Sense::click()),
+                    .sense(Sense::CLICK),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
 
@@ -2221,6 +2631,7 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
             ),
         );
 
+        focus_ring(ui, &response, rect, 4.0);
         let painter = ui.painter();
         painter.add(
             Shadow {
@@ -2263,24 +2674,9 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
     changed
 }
 
-fn nav_header(ui: &mut Ui, title: &str) -> egui::Response {
-    ui.horizontal(|ui| {
-        let response = icon_button(ui, ph::CARET_LEFT, 16.0, theme::text_muted());
-        ui.add_space(10.0);
-        ui.add(Label::new(semibold(title, 15.0, theme::text_strong())).selectable(false));
-        response
-    })
-    .inner
-}
-
 fn center_pad(ui: &mut Ui, content_height: f32) {
     let pad = (ui.available_height() - content_height) / 2.0;
     ui.add_space(pad.max(0.0));
-}
-
-fn center_pad_at_least(ui: &mut Ui, content_height: f32, min_top: f32) {
-    let pad = (ui.available_height() - content_height) / 2.0;
-    ui.add_space(pad.max(min_top));
 }
 
 fn hint_label(ui: &mut Ui, text: &str, width: f32) {
@@ -2294,21 +2690,55 @@ fn hint_label(ui: &mut Ui, text: &str, width: f32) {
     });
 }
 
-fn pairing_progress_block(ui: &mut Ui, progress: &PairingProgress, width: f32) {
+/// Countdown with a timer icon (and the attempt, when retrying), then the
+/// endpoint being paired underneath.
+fn pairing_progress_block(ui: &mut Ui, progress: &PairingProgress, width: f32, align: Align) {
     if progress.deadline.is_some() {
         ui.ctx().request_repaint_after(Duration::from_secs(1));
     }
 
-    let meta = pairing_progress_meta(progress);
+    let mut meta = Vec::new();
+    if let Some(deadline) = progress.deadline {
+        meta.push(format!("{}s", display_remaining_seconds(deadline)));
+    }
+    if let Some(attempt) = progress.attempt {
+        meta.push(format!("attempt {attempt}"));
+    }
     if !meta.is_empty() {
-        ui.scope(|ui| {
-            ui.set_max_width(width);
-            ui.add(
-                Label::new(medium(meta, 11.0, theme::green()))
-                    .halign(egui::Align::Center)
-                    .wrap(),
-            );
-        });
+        let text = meta.join(" · ");
+        let font = FontId::new(11.5, FontFamily::Name(theme::MEDIUM.into()));
+        let text_width = ui
+            .painter()
+            .layout_no_wrap(text.clone(), font.clone(), theme::green())
+            .size()
+            .x;
+        let icon_width = 13.0 + 5.0;
+        let size = vec2(icon_width + text_width, 16.0);
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let rect = if align == Align::Center {
+            Rect::from_center_size(rect.center(), size)
+        } else {
+            rect
+        };
+        let painter = ui.painter();
+        painter.text(
+            egui::pos2(rect.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            if progress.deadline.is_some() {
+                ph::TIMER
+            } else {
+                ph::ARROWS_CLOCKWISE
+            },
+            theme::icon_font(13.0),
+            theme::green(),
+        );
+        painter.text(
+            egui::pos2(rect.left() + icon_width, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            font,
+            theme::green(),
+        );
     }
 
     if let Some(endpoint) = &progress.endpoint {
@@ -2317,26 +2747,11 @@ fn pairing_progress_block(ui: &mut Ui, progress: &PairingProgress, width: f32) {
             ui.set_max_width(width);
             ui.add(
                 Label::new(regular(endpoint, 10.5, theme::text_faint()))
-                    .halign(egui::Align::Center)
+                    .halign(align)
                     .wrap(),
             );
         });
     }
-}
-
-fn pairing_progress_meta(progress: &PairingProgress) -> String {
-    let mut parts = Vec::new();
-
-    if let Some(deadline) = progress.deadline {
-        let seconds = display_remaining_seconds(deadline);
-        parts.push(format!("{seconds}s remaining"));
-    }
-
-    if let Some(attempt) = progress.attempt {
-        parts.push(format!("attempt {attempt}"));
-    }
-
-    parts.join(" · ")
 }
 
 fn display_remaining_seconds(deadline: Instant) -> u64 {
@@ -2404,6 +2819,7 @@ fn pill_button(
         font,
         text_color,
     );
+    focus_ring(ui, &response, rect, 7.0);
 
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -2708,19 +3124,21 @@ mod tests {
     }
 
     #[test]
-    fn custom_scrollbar_keeps_a_short_handle_and_tracks_progress() {
-        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(100.0, 200.0));
+    fn scrollbar_handle_tracks_the_visible_share_with_a_minimum_size() {
+        assert_eq!(scrollbar_handle(200.0, 200.0, 400.0), (100.0, 100.0));
+        assert_eq!(
+            scrollbar_handle(200.0, 200.0, 10_000.0).0,
+            SCROLLBAR_MIN_HANDLE
+        );
+    }
 
-        let start = settings_scrollbar_rect(viewport, 400.0, 0.0).unwrap();
-        let middle = settings_scrollbar_rect(viewport, 400.0, 100.0).unwrap();
-        let end = settings_scrollbar_rect(viewport, 400.0, 200.0).unwrap();
-
-        assert_eq!(start.height(), SCROLLBAR_HANDLE_HEIGHT);
-        assert_eq!(middle.height(), SCROLLBAR_HANDLE_HEIGHT);
-        assert_eq!(end.height(), SCROLLBAR_HANDLE_HEIGHT);
-        assert_eq!(start.top(), viewport.top() + SCROLLBAR_TRACK_INSET);
-        assert!(middle.top() > start.top());
-        assert_eq!(end.bottom(), viewport.bottom() - SCROLLBAR_TRACK_INSET);
+    #[test]
+    fn arrow_keys_walk_pages_in_order_without_wrapping() {
+        assert_eq!(screen_in_order(Screen::Main, 1), Some(Screen::Settings));
+        assert_eq!(screen_in_order(Screen::Settings, 1), Some(Screen::Pair));
+        assert_eq!(screen_in_order(Screen::Pair, 1), None);
+        assert_eq!(screen_in_order(Screen::Pair, -1), Some(Screen::Settings));
+        assert_eq!(screen_in_order(Screen::Main, -1), None);
     }
 
     #[test]

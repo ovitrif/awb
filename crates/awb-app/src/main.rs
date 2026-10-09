@@ -36,7 +36,11 @@ fn main() -> eframe::Result {
             Some("day") => theme::Appearance::Day,
             _ => theme::Appearance::Night,
         };
-        std::fs::write(path, glyph::shell_background_png(3, appearance)).expect("write shell");
+        std::fs::write(
+            path,
+            glyph::shell_background_png(3, appearance, theme::WINDOW_FULL_HEIGHT),
+        )
+        .expect("write shell");
         println!("wrote {path}");
         return Ok(());
     }
