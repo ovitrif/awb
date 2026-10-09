@@ -23,12 +23,10 @@ use crate::theme::{self, icon, medium, regular, semibold};
 
 const FOCUS_GRACE: Duration = Duration::from_millis(300);
 const STATUS_POLL: Duration = Duration::from_secs(5);
-const SCREEN_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+const SCREEN_TRANSITION_DURATION: Duration = Duration::from_millis(280);
 const SKIN_TRANSITION_DURATION: Duration = Duration::from_millis(180);
 const POPOVER_APPEAR_DURATION: Duration = Duration::from_millis(160);
 const POPOVER_HIDE_DURATION: Duration = Duration::from_millis(120);
-const SCREEN_INCOMING_OFFSET: f32 = 32.0;
-const SCREEN_OUTGOING_OFFSET: f32 = 18.0;
 const THEME_MODE_GROUP_SIZE: egui::Vec2 = vec2(172.0, 28.0);
 const SCROLL_EDGE_FADE_HEIGHT: f32 = 22.0;
 /// How far scroll viewports reach into the side margins: room for hover
@@ -54,6 +52,10 @@ const ROW_ACTION_SIZE: f32 = 22.0;
 const ROW_ACTION_GAP: f32 = 4.0;
 const STATUS_COLUMN_WIDTH: f32 = 66.0;
 const ROW_ICON_SIZE: f32 = 16.0;
+/// How far a row's hover highlight reaches past the content column.
+const ROW_HOVER_BLEED: f32 = 7.0;
+/// How far pages may draw above the body, into the gap under the header.
+const SCREEN_TOP_BLEED: f32 = 6.0;
 const QR_CARD_SIZE: f32 = 164.0;
 const CONTROL_HOVER_TRANSITION: f32 = 0.14;
 const CONTROL_PRESS_TRANSITION: f32 = 0.07;
@@ -330,11 +332,7 @@ impl App {
         );
         let logo = ctx.load_texture("awb-logo", logo_image, TextureOptions::LINEAR);
 
-        let (day_shell, day_raster) =
-            load_shell_texture(&ctx, "awb-shell-day", theme::Appearance::Day);
-        let (night_shell, night_raster) =
-            load_shell_texture(&ctx, "awb-shell-night", theme::Appearance::Night);
-        let shell = Arc::new(ShellSampler::new(night_raster, day_raster));
+        let (day_shell, night_shell, shell) = load_shells(&ctx, settings.gradients);
 
         let menu = Menu::new();
         let show_item = MenuItem::new("Show awb", true, None);
@@ -823,12 +821,34 @@ fn needs_full_status_refresh(visible: bool, auto_mirror: bool) -> bool {
     visible || auto_mirror
 }
 
+/// Day and night shell textures plus the sampler over both rasters.
+fn load_shells(
+    ctx: &Context,
+    gradients: bool,
+) -> (TextureHandle, TextureHandle, Arc<ShellSampler>) {
+    let (day, day_raster) =
+        load_shell_texture(ctx, "awb-shell-day", theme::Appearance::Day, gradients);
+    let (night, night_raster) =
+        load_shell_texture(ctx, "awb-shell-night", theme::Appearance::Night, gradients);
+    (
+        day,
+        night,
+        Arc::new(ShellSampler::new(night_raster, day_raster)),
+    )
+}
+
 fn load_shell_texture(
     ctx: &Context,
     name: &str,
     appearance: theme::Appearance,
+    gradients: bool,
 ) -> (TextureHandle, glyph::Raster) {
-    let raster = glyph::shell_background(SHELL_OVERSAMPLE, appearance, theme::WINDOW_FULL_HEIGHT);
+    let raster = glyph::shell_background(
+        SHELL_OVERSAMPLE,
+        appearance,
+        theme::WINDOW_FULL_HEIGHT,
+        gradients,
+    );
     let image = egui::ColorImage::from_rgba_premultiplied(
         [raster.width as usize, raster.height as usize],
         &raster.rgba,
@@ -1306,21 +1326,15 @@ impl eframe::App for App {
         match transition {
             Some((transition, progress)) if progress < 1.0 => {
                 let eased = egui::emath::easing::cubic_in_out(progress);
-                let outgoing_x = -transition.direction * SCREEN_OUTGOING_OFFSET * eased;
-                let incoming_x = transition.direction * SCREEN_INCOMING_OFFSET * (1.0 - eased);
+                // A push: both pages stay opaque and move side by side, so
+                // they never draw over each other.
+                let distance = body.width() + 2.0 * SCROLL_BLEED + 16.0;
+                let outgoing_x = -transition.direction * distance * eased;
+                let incoming_x = transition.direction * distance * (1.0 - eased);
 
                 self.header(ui, &ctx, header, transition.from, transition.to, eased);
-                // The outgoing page clears early so the two never read as one.
-                let outgoing_opacity = (1.0 - eased * 1.8).max(0.0);
-                self.render_screen(
-                    ui,
-                    body,
-                    &ctx,
-                    transition.from,
-                    outgoing_x,
-                    outgoing_opacity,
-                );
-                self.render_screen(ui, body, &ctx, transition.to, incoming_x, eased);
+                self.render_screen(ui, body, &ctx, transition.from, outgoing_x, 1.0);
+                self.render_screen(ui, body, &ctx, transition.to, incoming_x, 1.0);
                 ctx.request_repaint();
             }
             _ => {
@@ -1481,9 +1495,14 @@ impl App {
                 .max_rect(content.translate(vec2(offset_x, 0.0)))
                 .layout(Layout::top_down(Align::Min)),
         );
-        // Hover shapes, focus rings and scroll edges may bleed into the side
-        // margins, so the clip is wider than the aligned content column.
-        screen_ui.set_clip_rect(content.expand2(vec2(SCROLL_BLEED, 0.0)));
+        // Hover shapes and scroll edges may bleed into the side margins, and
+        // sliding pages run edge to edge, so the clip spans the window width
+        // (inside its hairline border) rather than the content column.
+        let window = ui.max_rect();
+        screen_ui.set_clip_rect(Rect::from_min_max(
+            egui::pos2(window.left() + 1.0, content.top() - SCREEN_TOP_BLEED),
+            egui::pos2(window.right() - 1.0, content.bottom()),
+        ));
         screen_ui.set_opacity(opacity);
         if self.animations.screen.is_some() {
             // Both screens are painted during the transition. Keep their
@@ -1628,19 +1647,21 @@ impl App {
                 let starting = starting_avds.contains(&avd.name);
                 let deleting = deleting_avds.contains(&avd.name);
                 let idle = avd.can_launch(starting) && !deleting;
+                // Play sits on the right edge; actions are laid out from the
+                // right, so it is also the first to take Tab focus.
                 let actions = [
-                    if idle {
-                        RowAction::enabled(ph::PLAY, theme::text_bright())
-                    } else {
-                        RowAction::disabled(ph::PLAY)
-                    }
-                    .with_tooltip("Start emulator"),
                     if idle {
                         RowAction::enabled(ph::TRASH, theme::text_muted())
                     } else {
                         RowAction::disabled(ph::TRASH)
                     }
                     .with_tooltip("Delete emulator"),
+                    if idle {
+                        RowAction::enabled(ph::PLAY, theme::text_bright())
+                    } else {
+                        RowAction::disabled(ph::PLAY)
+                    }
+                    .with_tooltip("Start emulator"),
                 ];
                 let name = avd.name.replace('_', " ");
                 let status = if deleting {
@@ -1661,8 +1682,8 @@ impl App {
                 };
 
                 match list_row_with(ui, &row, &actions) {
-                    Some(0) => backend::start_avd(shared.clone(), ctx.clone(), avd.name.clone()),
-                    Some(1) => *pending_avd_delete = Some(avd.name.clone()),
+                    Some(0) => *pending_avd_delete = Some(avd.name.clone()),
+                    Some(1) => backend::start_avd(shared.clone(), ctx.clone(), avd.name.clone()),
                     _ => {}
                 }
             }
@@ -1815,10 +1836,20 @@ impl App {
                 self.login_query = None;
             }
             let mut open_at_login = self.open_at_login.unwrap_or(false);
-            if check_item(ui, "Open at Login", &mut open_at_login) {
-                login_item::set_enabled(open_at_login);
-                self.open_at_login = Some(open_at_login);
-                self.login_query = None;
+            let mut gradients_changed = false;
+            ui.horizontal(|ui| {
+                if check_item(ui, "Open at Login", &mut open_at_login) {
+                    login_item::set_enabled(open_at_login);
+                    self.open_at_login = Some(open_at_login);
+                    self.login_query = None;
+                }
+                ui.add_space(20.0);
+                gradients_changed = check_item(ui, "Gradients", &mut self.settings.gradients);
+            });
+            if gradients_changed {
+                changed = true;
+                (self.day_shell, self.night_shell, self.shell) =
+                    load_shells(ctx, self.settings.gradients);
             }
 
             if changed {
@@ -2016,7 +2047,6 @@ fn icon_button(ui: &mut Ui, glyph: &str, size: f32, color: Color32) -> egui::Res
         theme::icon_font(size),
         color,
     );
-    focus_ring(ui, &response, rect, 6.0);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -2030,7 +2060,10 @@ fn tab_item(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
     let response = ui
         .vertical(|ui| {
             let background = ui.painter().add(egui::Shape::Noop);
-            let response = ui.add(Label::new(text).selectable(false).sense(Sense::click()));
+            // The label only shows text; a separate click area takes focus so
+            // egui does not underline the focused label.
+            let label = ui.add(Label::new(text).selectable(false));
+            let response = ui.interact(label.rect, label.id.with("tab"), Sense::click());
             let interaction = interaction_visual(
                 ui,
                 response.id,
@@ -2045,7 +2078,6 @@ fn tab_item(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
                     interaction.overlay,
                 ),
             );
-            focus_ring(ui, &response, response.rect.expand2(vec2(6.0, 4.0)), 5.0);
             ui.add_space(6.0);
             let (rect, _) =
                 ui.allocate_exact_size(vec2(response.rect.width(), 2.0), Sense::hover());
@@ -2336,25 +2368,18 @@ fn paint_edge_fade(
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Whether focus last moved by keyboard, so focus rings show for Tab
+/// Whether focus last moved by keyboard, so focus highlights show for Tab
 /// navigation but not after a click.
 fn keyboard_focus_id() -> egui::Id {
     egui::Id::new("awb-keyboard-focus")
 }
 
-fn focus_ring(ui: &Ui, response: &egui::Response, rect: Rect, radius: f32) {
-    let keyboard = ui
-        .ctx()
-        .data(|data| data.get_temp::<bool>(keyboard_focus_id()))
-        .unwrap_or(false);
-    if keyboard && response.has_focus() {
-        ui.painter().rect_stroke(
-            rect.expand(1.5),
-            radius + 1.5,
-            Stroke::new(1.5_f32, theme::input_focus_stroke()),
-            egui::StrokeKind::Outside,
-        );
-    }
+fn keyboard_focused(ui: &Ui, id: egui::Id) -> bool {
+    ui.memory(|memory| memory.has_focus(id))
+        && ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(keyboard_focus_id()))
+            .unwrap_or(false)
 }
 
 fn screen_title(screen: Screen) -> &'static str {
@@ -2396,7 +2421,6 @@ fn header_button(ui: &mut Ui, glyph: &str, active: bool) -> egui::Response {
             active_progress.max(interaction.hover_progress),
         ),
     );
-    focus_ring(ui, &response, rect, 7.0);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -2412,6 +2436,18 @@ struct Row<'a> {
 /// statuses line up, then the action buttons on the right edge.
 fn list_row_with(ui: &mut Ui, row: &Row<'_>, actions: &[RowAction]) -> Option<usize> {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::hover());
+    let hover = ui.ctx().animate_bool_with_time(
+        ui.id().with(("row-hover", row.name)),
+        ui.is_enabled() && ui.rect_contains_pointer(rect),
+        CONTROL_HOVER_TRANSITION,
+    );
+    if hover > 0.0 {
+        ui.painter().rect_filled(
+            rect.expand2(vec2(ROW_HOVER_BLEED, -2.0)),
+            8.0,
+            theme::control_hover().gamma_multiply(hover),
+        );
+    }
     let center_y = rect.center().y;
     ui.painter().text(
         egui::pos2(rect.left() + ROW_ICON_SIZE / 2.0, center_y),
@@ -2486,7 +2522,6 @@ fn list_row_with(ui: &mut Ui, row: &Row<'_>, actions: &[RowAction]) -> Option<us
             theme::icon_font(10.0),
             action.color,
         );
-        focus_ring(ui, &response, action_rect, 6.0);
 
         let response = if let Some(tooltip) = action.tooltip {
             response.on_hover_text(tooltip)
@@ -2680,7 +2715,6 @@ fn theme_mode_group(ui: &mut Ui, selected: &mut ThemeMode) -> bool {
                                     .lerp_to_gamma(theme::text_bright(), interaction.hover_progress)
                             },
                         );
-                        focus_ring(ui, &response, rect, 6.0);
                         if response.clicked() && !active {
                             *selected = mode;
                             changed = true;
@@ -2724,7 +2758,6 @@ fn check_item(ui: &mut Ui, label: &str, value: &mut bool) -> bool {
             ),
         );
 
-        focus_ring(ui, &response, rect, 4.0);
         let painter = ui.painter();
         painter.add(
             Shadow {
@@ -2912,7 +2945,6 @@ fn pill_button(
         font,
         text_color,
     );
-    focus_ring(ui, &response, rect, 7.0);
 
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -2922,7 +2954,10 @@ struct InteractionVisual {
     hover_progress: f32,
 }
 
+/// Hover and press feedback. A control focused from the keyboard takes the
+/// hover highlight, so focus reads as a lit background rather than an outline.
 fn interaction_visual(ui: &Ui, id: egui::Id, hovered: bool, pressed: bool) -> InteractionVisual {
+    let hovered = hovered || keyboard_focused(ui, id);
     let hover_progress = ui.ctx().animate_bool_with_time(
         id.with("control-hover"),
         hovered,

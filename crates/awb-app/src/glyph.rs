@@ -257,7 +257,7 @@ fn edge_line(color: Color) -> Shader<'static> {
 /// gradient lit from the bottom edge like the Agents Board cards, with a soft
 /// bloom and a center-weighted hairline on that edge, an inner highlight along
 /// the top and a hairline border. Drawn at `oversample` resolution.
-fn render_shell(oversample: u32, appearance: Appearance, height: f32) -> Pixmap {
+fn render_shell(oversample: u32, appearance: Appearance, height: f32, gradients: bool) -> Pixmap {
     let w = (SHELL_W as u32) * oversample;
     let h = (height.round() as u32) * oversample;
     let mut pixmap = Pixmap::new(w, h).expect("shell pixmap");
@@ -297,6 +297,14 @@ fn render_shell(oversample: u32, appearance: Appearance, height: f32) -> Pixmap 
         pixmap.fill_rect(rect, &paint, transform, Some(&clip));
     };
 
+    if !gradients {
+        // Plain surface: one flat color under the hairline border.
+        paint.set_color(style.base[1]);
+        pixmap.fill_rect(full, &paint, transform, Some(&clip));
+        stroke_border(&mut pixmap, &path, style.border, transform);
+        return pixmap;
+    }
+
     fill(base, full);
     fill(
         ellipse_glow(
@@ -327,18 +335,21 @@ fn render_shell(oversample: u32, appearance: Appearance, height: f32) -> Pixmap 
         full,
     );
 
-    let mut stroke_paint = Paint {
+    stroke_border(&mut pixmap, &path, style.border, transform);
+    pixmap
+}
+
+fn stroke_border(pixmap: &mut Pixmap, path: &tiny_skia::Path, color: Color, transform: Transform) {
+    let mut paint = Paint {
         anti_alias: true,
         ..Default::default()
     };
-    stroke_paint.set_color(style.border);
+    paint.set_color(color);
     let stroke = Stroke {
         width: 1.0,
         ..Default::default()
     };
-    pixmap.stroke_path(&path, &stroke_paint, &stroke, transform, None);
-
-    pixmap
+    pixmap.stroke_path(path, &paint, &stroke, transform, None);
 }
 
 trait ScaleAlpha {
@@ -353,8 +364,13 @@ impl ScaleAlpha for Color {
 }
 
 /// The shell as a premultiplied-RGBA raster for the in-window texture.
-pub fn shell_background(oversample: u32, appearance: Appearance, height: f32) -> Raster {
-    let pixmap = render_shell(oversample, appearance, height);
+pub fn shell_background(
+    oversample: u32,
+    appearance: Appearance,
+    height: f32,
+    gradients: bool,
+) -> Raster {
+    let pixmap = render_shell(oversample, appearance, height, gradients);
     Raster {
         width: pixmap.width(),
         height: pixmap.height(),
@@ -364,7 +380,7 @@ pub fn shell_background(oversample: u32, appearance: Appearance, height: f32) ->
 
 /// The shell as a PNG, for offline preview via `awb-app --render-shell`.
 pub fn shell_background_png(oversample: u32, appearance: Appearance, height: f32) -> Vec<u8> {
-    render_shell(oversample, appearance, height)
+    render_shell(oversample, appearance, height, true)
         .encode_png()
         .expect("shell png encoding")
 }
@@ -525,8 +541,8 @@ mod tests {
 
     #[test]
     fn day_and_night_shells_share_geometry_but_not_pixels() {
-        let day = shell_background(1, Appearance::Day, 349.0);
-        let night = shell_background(1, Appearance::Night, 349.0);
+        let day = shell_background(1, Appearance::Day, 349.0, true);
+        let night = shell_background(1, Appearance::Night, 349.0, true);
 
         assert_eq!((day.width, day.height), (380, 349));
         assert_eq!((night.width, night.height), (380, 349));
