@@ -2400,7 +2400,11 @@ fn chrome_scroll(
         .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
         .show(&mut area_ui, |ui| {
             if pending_drag != 0.0 {
-                ui.scroll_with_delta(vec2(0.0, -pending_drag));
+                // Unanimated, so the content tracks the pointer exactly.
+                ui.scroll_with_delta_animation(
+                    vec2(0.0, -pending_drag),
+                    egui::style::ScrollAnimation::none(),
+                );
             }
             Frame::NONE
                 .inner_margin(Margin::symmetric(SCROLL_BLEED as i8, 0))
