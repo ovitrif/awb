@@ -22,6 +22,13 @@ tiny-skia = "0.12"
 toml = "0.9"
 menu-icon = { path = "../menu-icon" }
 winit = "0.30"
+egui_kittest = { version = "0.34.3", features = ["eframe", "wgpu"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[features]
+# Headless drive mode: renders the UI offscreen and takes commands over a
+# Unix socket, for agents and scripts to verify screens (see AGENTS.md).
+drive = ["dep:egui_kittest", "dep:image"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.23"

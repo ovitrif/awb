@@ -3,6 +3,8 @@
 mod app;
 mod backend;
 mod config;
+#[cfg(feature = "drive")]
+mod drive;
 mod glyph;
 mod login_item;
 mod mock;
@@ -26,6 +28,20 @@ fn main() -> eframe::Result {
         std::fs::write(path, glyph::app_icon_png(size)).expect("write icon");
         println!("wrote {path} ({size}x{size})");
         return Ok(());
+    }
+
+    #[cfg(feature = "drive")]
+    {
+        if let [_, flag, socket] = args.as_slice()
+            && flag == "--drive"
+        {
+            return drive::serve(std::path::Path::new(socket)).map_err(drive_error);
+        }
+        if let [_, command, socket, rest @ ..] = args.as_slice()
+            && command == "drive"
+        {
+            return drive::send(std::path::Path::new(socket), &rest.join(" ")).map_err(drive_error);
+        }
     }
 
     if let Some(index) = args.iter().position(|arg| arg == "--render-shell") {
@@ -91,4 +107,10 @@ fn main() -> eframe::Result {
                 })
         }),
     )
+}
+
+#[cfg(feature = "drive")]
+fn drive_error(error: anyhow::Error) -> eframe::Error {
+    eprintln!("awb drive: {error:#}");
+    std::process::exit(1)
 }

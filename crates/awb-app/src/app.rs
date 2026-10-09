@@ -292,10 +292,11 @@ pub struct App {
     logo: TextureHandle,
     day_shell: TextureHandle,
     night_shell: TextureHandle,
-    status_icon: MenuBarIcon,
+    /// The menu bar status item; absent in the headless drive mode.
+    menu_bar: Option<MenuBar>,
+    /// Headless drive mode: no window or status item, always shown.
+    headless: bool,
     _menu: Menu,
-    #[cfg(target_os = "macos")]
-    _status_click: objc2::rc::Retained<crate::status_click::StatusClickTarget>,
     menu_icon_connected: bool,
     show_item: MenuItem,
     pair_id: MenuId,
@@ -321,6 +322,17 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+        Self::create(cc, false)
+    }
+
+    /// The app without a window or menu bar item, shown from the start, for
+    /// the headless drive mode.
+    #[cfg(feature = "drive")]
+    pub fn new_headless(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+        Self::create(cc, true)
+    }
+
+    fn create(cc: &eframe::CreationContext<'_>, headless: bool) -> anyhow::Result<Self> {
         let ctx = cc.egui_ctx.clone();
         theme::install_fonts(&ctx);
         let settings = Settings::load();
@@ -350,34 +362,10 @@ impl App {
             &quit_item,
         ])?;
 
-        let icon = menu_bar_icon(false)?;
-        let builder = MenuBarIconBuilder::new()
-            .with_icon(icon)
-            .with_icon_as_template(true)
-            .with_tooltip("awb - Android Wifi Bridge");
-        #[cfg(not(target_os = "macos"))]
-        let builder = builder
-            .with_menu(Box::new(menu.clone()))
-            .with_menu_on_left_click(false);
-        let status_icon = builder.build()?;
-
-        #[cfg(target_os = "macos")]
-        let status_click = {
-            use menu_icon::menu::ContextMenu;
-            let primary_ctx = ctx.clone();
-            let ns_menu = unsafe {
-                objc2::rc::Retained::retain(menu.ns_menu().cast::<objc2_app_kit::NSMenu>())
-            };
-            status_icon
-                .ns_status_item()
-                .zip(ns_menu)
-                .and_then(|(item, ns_menu)| {
-                    crate::status_click::StatusClickTarget::install(item, ns_menu, move || {
-                        STATUS_PRIMARY_CLICK.store(true, Ordering::SeqCst);
-                        primary_ctx.request_repaint();
-                    })
-                })
-                .ok_or_else(|| anyhow::anyhow!("menu bar status item unavailable"))?
+        let menu_bar = if headless {
+            None
+        } else {
+            Some(MenuBar::install(&ctx, &menu)?)
         };
 
         let status_ctx = ctx.clone();
@@ -412,16 +400,15 @@ impl App {
             logo,
             day_shell,
             night_shell,
-            status_icon,
+            menu_bar,
+            headless,
             _menu: menu,
-            #[cfg(target_os = "macos")]
-            _status_click: status_click,
             menu_icon_connected: false,
             show_item,
             pair_id: pair_item.id().clone(),
             refresh_id: refresh_item.id().clone(),
             quit_id: quit_item.id().clone(),
-            visible: false,
+            visible: headless,
             shown_at: Instant::now(),
             focus_hidden_at: None,
             last_poll: Instant::now(),
@@ -630,7 +617,7 @@ impl App {
         }
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        if !focused && self.shown_at.elapsed() > FOCUS_GRACE {
+        if !focused && !self.headless && self.shown_at.elapsed() > FOCUS_GRACE {
             self.hide(ctx);
             self.focus_hidden_at = Some(Instant::now());
         }
@@ -673,7 +660,7 @@ impl App {
 
     fn menu_anchor(&self) -> Option<MenuAnchor> {
         self.last_menu_anchor.or_else(|| {
-            self.status_icon.rect().map(|rect| {
+            self.menu_bar.as_ref()?.icon.rect().map(|rect| {
                 let click_x = rect.position.x + f64::from(rect.size.width) / 2.0;
                 let click_y = rect.position.y + f64::from(rect.size.height) / 2.0;
                 MenuAnchor::new(rect, click_x, click_y)
@@ -790,8 +777,12 @@ impl App {
         // `set_icon` clears the template flag on macOS, leaving a fixed black
         // glyph after the connection state changes. Keep every replacement a
         // template so AppKit recolors it when the menu-bar appearance changes.
+        let Some(menu_bar) = &self.menu_bar else {
+            return;
+        };
         match menu_bar_icon(connected).and_then(|icon| {
-            self.status_icon
+            menu_bar
+                .icon
                 .set_icon_with_as_template(Some(icon), true)
                 .map_err(Into::into)
         }) {
@@ -803,6 +794,94 @@ impl App {
                     .log(format!("Menu bar icon update failed: {error:#}"));
             }
         }
+    }
+}
+
+/// Hooks for the headless drive mode (see `drive.rs`).
+#[cfg(feature = "drive")]
+impl App {
+    /// One line describing what is on screen, for drive replies.
+    pub fn drive_state(&self) -> String {
+        let pairing = self
+            .shared
+            .lock()
+            .unwrap()
+            .pairing
+            .as_ref()
+            .map_or("none", |session| match session.phase {
+                PairingPhase::Qr { .. } => "qr",
+                PairingPhase::Connecting { .. } => "connecting",
+                PairingPhase::Failed { .. } => "failed",
+                PairingPhase::Paired { .. } => "paired",
+            });
+        let transition = self
+            .animations
+            .screen
+            .map_or(String::from("none"), |transition| {
+                format!("{:?}->{:?}", transition.from, transition.to)
+            });
+        format!(
+            "screen={:?} tab={:?} transition={transition} theme={:?} gradients={} pairing={pairing}",
+            self.screen, self.tab, self.settings.theme, self.settings.gradients,
+        )
+    }
+
+    pub fn drive_set_theme(&mut self, mode: ThemeMode) {
+        self.settings.theme = mode;
+    }
+
+    pub fn drive_set_gradients(&mut self, ctx: &Context, on: bool) {
+        self.settings.gradients = on;
+        (self.day_shell, self.night_shell, self.shell) = load_shells(ctx, on);
+    }
+}
+
+/// The menu bar status item and, on macOS, the target routing its clicks.
+struct MenuBar {
+    icon: MenuBarIcon,
+    #[cfg(target_os = "macos")]
+    _click: objc2::rc::Retained<crate::status_click::StatusClickTarget>,
+}
+
+impl MenuBar {
+    fn install(ctx: &Context, menu: &Menu) -> anyhow::Result<Self> {
+        let icon = menu_bar_icon(false)?;
+        let builder = MenuBarIconBuilder::new()
+            .with_icon(icon)
+            .with_icon_as_template(true)
+            .with_tooltip("awb - Android Wifi Bridge");
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder
+            .with_menu(Box::new(menu.clone()))
+            .with_menu_on_left_click(false);
+        let status_icon = builder.build()?;
+
+        #[cfg(target_os = "macos")]
+        let click = {
+            use menu_icon::menu::ContextMenu;
+            let primary_ctx = ctx.clone();
+            let ns_menu = unsafe {
+                objc2::rc::Retained::retain(menu.ns_menu().cast::<objc2_app_kit::NSMenu>())
+            };
+            status_icon
+                .ns_status_item()
+                .zip(ns_menu)
+                .and_then(|(item, ns_menu)| {
+                    crate::status_click::StatusClickTarget::install(item, ns_menu, move || {
+                        STATUS_PRIMARY_CLICK.store(true, Ordering::SeqCst);
+                        primary_ctx.request_repaint();
+                    })
+                })
+                .ok_or_else(|| anyhow::anyhow!("menu bar status item unavailable"))?
+        };
+        #[cfg(not(target_os = "macos"))]
+        let _ = ctx;
+
+        Ok(Self {
+            icon: status_icon,
+            #[cfg(target_os = "macos")]
+            _click: click,
+        })
     }
 }
 
