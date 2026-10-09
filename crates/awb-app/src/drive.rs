@@ -39,12 +39,17 @@ const PIXELS_PER_POINT: f32 = 2.0;
 
 /// Runs the headless app and serves commands on `socket` until `quit`.
 pub fn serve(socket: &Path) -> anyhow::Result<()> {
-    if std::env::var_os("XDG_CONFIG_HOME").is_none() {
-        let dir = std::env::temp_dir().join("awb-drive-config");
-        // SAFETY: set on the main thread before the app or any worker thread
-        // exists. It keeps driven settings changes out of the user's config.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir) };
+    // Driven settings changes never reach the user's config: always use a
+    // throwaway config folder, seeded from `AWB_DRIVE_CONFIG` when given.
+    let config_home = std::env::temp_dir().join(format!("awb-drive-{}", std::process::id()));
+    std::fs::create_dir_all(config_home.join("awb"))?;
+    if let Some(seed) = std::env::var_os("AWB_DRIVE_CONFIG") {
+        std::fs::copy(&seed, config_home.join("awb/config.toml"))
+            .context("failed to copy AWB_DRIVE_CONFIG")?;
     }
+    // SAFETY: set on the main thread before the app or any worker thread
+    // exists.
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_home) };
 
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket)

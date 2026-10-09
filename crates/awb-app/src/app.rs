@@ -503,6 +503,19 @@ impl App {
         self.go(screen, ctx);
     }
 
+    /// Leaves Pair for the device list as a step back, the way ← does: the
+    /// history before Main is kept and Pair becomes the step forward.
+    fn return_to_main(&mut self, ctx: &Context) {
+        while let Some(screen) = self.back_stack.pop() {
+            if screen == Screen::Main {
+                break;
+            }
+        }
+        self.forward_stack.clear();
+        self.forward_stack.push(self.screen);
+        self.go(Screen::Main, ctx);
+    }
+
     /// Steps back through history; with none left, `ordered` moves to the
     /// previous page in Main → Settings → Pair order instead of to Main.
     fn nav_back(&mut self, ctx: &Context, ordered: bool) {
@@ -551,6 +564,15 @@ impl App {
     fn navigate_to(&mut self, screen: Screen, ctx: &Context) {
         if self.screen == screen {
             return;
+        }
+        // A transition replaced mid-slide would drop its pending cancel and
+        // leave the pairing session running; cancel it now instead.
+        if self
+            .animations
+            .screen
+            .is_some_and(|transition| transition.cancel_pairing_on_complete)
+        {
+            backend::cancel_pairing(&self.shared);
         }
 
         self.animations.screen = Some(ScreenTransition {
@@ -1355,7 +1377,7 @@ impl eframe::App for App {
             }
         };
         if self.screen == Screen::Pair && pairing_done {
-            self.navigate(Screen::Main, ctx);
+            self.return_to_main(ctx);
         }
     }
 
@@ -1709,6 +1731,7 @@ impl App {
                 };
 
                 let row = Row {
+                    key: &device.mirror_key,
                     icon: ph::DEVICE_MOBILE,
                     name: &device.name,
                     tooltip: &device.serial,
@@ -1764,6 +1787,7 @@ impl App {
                     avd.status(starting)
                 };
                 let row = Row {
+                    key: &avd.name,
                     icon: ph::ANDROID_LOGO,
                     name: &name,
                     tooltip: &name,
@@ -1915,8 +1939,9 @@ impl App {
             if self.open_at_login.is_none() && self.login_query.is_none() {
                 let (sender, receiver) = std::sync::mpsc::channel();
                 let repaint = ctx.clone();
+                let headless = self.headless;
                 std::thread::spawn(move || {
-                    let _ = sender.send(login_item::is_enabled());
+                    let _ = sender.send(!headless && login_item::is_enabled());
                     repaint.request_repaint();
                 });
                 self.login_query = Some(receiver);
@@ -1933,7 +1958,9 @@ impl App {
             let mut gradients_changed = false;
             ui.horizontal(|ui| {
                 if check_item(ui, "Open at Login", &mut open_at_login) {
-                    login_item::set_enabled(open_at_login);
+                    if !self.headless {
+                        login_item::set_enabled(open_at_login);
+                    }
                     self.open_at_login = Some(open_at_login);
                     self.login_query = None;
                 }
@@ -2094,7 +2121,7 @@ impl App {
                         )
                         .clicked()
                         {
-                            self.navigate(Screen::Main, ctx);
+                            self.return_to_main(ctx);
                         }
                     });
                 });
@@ -2529,6 +2556,9 @@ fn header_button(ui: &mut Ui, glyph: &str, active: bool) -> egui::Response {
 }
 
 struct Row<'a> {
+    /// Stable identity for widget ids: a device serial or an AVD name, since
+    /// two phones of the same model share a display name.
+    key: &'a str,
     icon: &'a str,
     name: &'a str,
     tooltip: &'a str,
@@ -2541,7 +2571,7 @@ struct Row<'a> {
 fn list_row_with(ui: &mut Ui, row: &Row<'_>, actions: &[RowAction]) -> Option<usize> {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::hover());
     let hover = ui.ctx().animate_bool_with_time(
-        ui.id().with(("row-hover", row.name)),
+        ui.id().with(("row-hover", row.key)),
         ui.is_enabled() && ui.rect_contains_pointer(rect),
         CONTROL_HOVER_TRANSITION,
     );
@@ -2603,7 +2633,7 @@ fn list_row_with(ui: &mut Ui, row: &Row<'_>, actions: &[RowAction]) -> Option<us
         right -= ROW_ACTION_SIZE + ROW_ACTION_GAP;
         let response = ui.interact(
             action_rect,
-            ui.id().with((row.name, index)),
+            ui.id().with((row.key, index)),
             if action.enabled {
                 Sense::click()
             } else {
@@ -2651,6 +2681,7 @@ fn list_row(
     actions: &[RowAction],
 ) -> Option<usize> {
     let row = Row {
+        key: name,
         icon: row_icon,
         name,
         tooltip: name,

@@ -36,7 +36,8 @@ screen, mouse or keyboard: drive the real popover headlessly.
   `cargo build --release -p awb-app --features drive`, then
   `target/release/awb-app --drive /tmp/awbd.sock &`. Keep the socket path
   short (Unix sockets cap it near 100 bytes) and end the server with
-  `awb-app drive /tmp/awbd.sock quit` when done.
+  `target/release/awb-app drive /tmp/awbd.sock quit` when done (the installed
+  `awb-app` lacks the drive feature).
 - Send commands with `target/release/awb-app drive /tmp/awbd.sock <command>`,
   or pipe one per line with `-`. Each reply is one `ok ...` line carrying the
   current `screen`, `tab`, `transition`, `theme`, `gradients` and `pairing`
@@ -46,14 +47,15 @@ screen, mouse or keyboard: drive the real popover headlessly.
   `gradients on|off`, `quit`. Coordinates are window points: 380 wide, 0 at
   the top of the beak; the header buttons sit at y 36, x 287 (Refresh), 319
   (Settings) and 351 (Pair). The full reference is in `crates/awb-app/src/drive.rs`.
-- The drive server writes settings to a temporary `XDG_CONFIG_HOME` unless
-  one is set, so it never changes the user's config.
+- The drive server always uses a throwaway config folder (seed it with
+  `AWB_DRIVE_CONFIG=<config.toml>`) and never touches the login item, so it
+  never changes the user's setup.
 - Light and dark mode: `theme day` / `theme night` / `theme auto` over the
   socket. In the running app, use the Appearance control in Settings or set
   `theme = "day"`, `"night"` or `"auto"` in `~/.config/awb/config.toml`
   (honors `XDG_CONFIG_HOME`), then restart it. Check both themes, and both
   `gradients on` and `off`, for every visual change.
-- Pairing without a phone: `AWB_MOCK_PAIRING=success` or `failure`, with an
+- Pairing without a phone (drive builds only): `AWB_MOCK_PAIRING=success` or `failure`, with an
   optional `:seconds` before the simulated scan (`success:1.5`), runs the real
   pairing screens with a simulated scan; success lists `Pixel 9 Pro (mock)`.
 - Emulators without touching real AVDs: point `ANDROID_AVD_HOME` at a folder

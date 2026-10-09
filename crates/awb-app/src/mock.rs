@@ -1,6 +1,7 @@
 //! Mock pairing, to check the pairing screens and transitions without a phone.
 //!
-//! `AWB_MOCK_PAIRING=success` or `AWB_MOCK_PAIRING=failure` swaps the mDNS and
+//! In drive builds (`--features drive`), `AWB_MOCK_PAIRING=success` or
+//! `AWB_MOCK_PAIRING=failure` swaps the mDNS and
 //! adb pairing flow for a scripted one that feeds the same pairing events to
 //! the app: a QR code, then a simulated scan after a few seconds (`:seconds`
 //! overrides the default, e.g. `success:1.5`), the pairing progress steps, and
@@ -27,7 +28,11 @@ pub const PHONE_ENDPOINT: &str = "192.168.1.42:41235";
 const DEFAULT_SCAN_AFTER: Duration = Duration::from_secs(3);
 
 /// The mock requested through `AWB_MOCK_PAIRING`, read once per process.
+/// Only drive builds honor it, so a shipped app never fakes a pairing.
 pub fn pairing() -> Option<MockPairing> {
+    if !cfg!(feature = "drive") {
+        return None;
+    }
     static MOCK: OnceLock<Option<MockPairing>> = OnceLock::new();
     *MOCK.get_or_init(|| parse(&std::env::var("AWB_MOCK_PAIRING").ok()?))
 }

@@ -610,11 +610,13 @@ pub fn delete_avd(shared: Arc<Mutex<Shared>>, ctx: Context, name: String) {
             let _adb_work = ADB_WORK_LOCK.lock().unwrap();
             let adb = Adb::resolve(None)?;
             let devices = adb.devices()?;
-            let active_names = devices
+            // A stale emulator entry that no longer answers cannot be running
+            // this AVD, so a failed lookup is skipped rather than blocking.
+            let active_names: Vec<_> = devices
                 .iter()
                 .filter(|device| is_emulator(device))
-                .map(|device| adb.emulator_avd_name(&device.serial))
-                .collect::<anyhow::Result<Vec<_>>>()?;
+                .filter_map(|device| adb.emulator_avd_name(&device.serial).ok())
+                .collect();
             anyhow::ensure!(
                 !active_names.contains(&name),
                 "AVD {name} is running; stop it before deleting"
