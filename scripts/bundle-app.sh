@@ -32,7 +32,6 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
 cp "$APP_BIN" "${APP}/Contents/MacOS/awb-app"
 
-
 # Liquid Glass icon: actool compiles the Icon Composer bundle into Assets.car
 # (light, dark, clear and tinted variants) plus AppIcon.icns for older macOS.
 # Without an actool that understands .icon files, fall back to the flat icon.
@@ -79,6 +78,10 @@ elif [ -x "${SCRCPY_DIR}/scrcpy" ]; then
 [ "$#" -eq 0 ] && exit 0
 dir="$(cd "$(dirname "$0")" && pwd)"
 if ! "${dir}/scrcpy" --version >/dev/null 2>&1; then
+  if ! command -v scrcpy >/dev/null 2>&1; then
+    echo "Android Mirror: the bundled scrcpy cannot start and no scrcpy is on PATH" >&2
+    exit 127
+  fi
   echo "Android Mirror: the bundled scrcpy cannot start; using scrcpy from PATH" >&2
   exec scrcpy "$@"
 fi

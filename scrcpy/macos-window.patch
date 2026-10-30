@@ -72,7 +72,7 @@ diff -ruN a/app/src/sys/macos/window.h b/app/src/sys/macos/window.h
 diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 --- a/app/src/sys/macos/window.m
 +++ b/app/src/sys/macos/window.m
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,440 @@
 +#include "sys/macos/window.h"
 +
 +#import <AppKit/AppKit.h>
@@ -320,6 +320,12 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +}
 +
 +- (NSEvent *)filterMouseEvent:(NSEvent *)event {
++    if (cmd_gesture && event.type != NSEventTypeLeftMouseUp
++            && !([NSEvent pressedMouseButtons] & 1)) {
++        // The window drag may consume the mouse up: end the gesture anyway
++        cmd_gesture = NO;
++    }
++
 +    if (event.window != window) {
 +        return event;
 +    }
@@ -421,6 +427,10 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +        hovered = (on_top && NSPointInRect(mouse, window.frame)) || dragging;
 +    }
 +
++    if (bar_shown && bar.level != window.level) {
++        bar.level = window.level;
++    }
++
 +    if (hovered && !bar_shown) {
 +        [self showBar];
 +    } else if (!hovered && bar_shown) {
@@ -432,6 +442,7 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +    bar_shown = YES;
 +    [self layoutBar];
 +    bar.level = window.level;
++    bar.ignoresMouseEvents = NO;
 +    [self updateLights];
 +    if (!bar.parentWindow) {
 +        [window addChildWindow:bar ordered:NSWindowAbove];
@@ -445,6 +456,8 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +
 +- (void)hideBar {
 +    bar_shown = NO;
++    // Let clicks through to the device while the bar fades out
++    bar.ignoresMouseEvents = YES;
 +    NSPanel *panel = bar;
 +    NSWindow *parent = window;
 +    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
@@ -497,6 +510,6 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +        styler = [[SCWindowStyler alloc]
 +            initWithSDLWindow:window
 +                     nsWindow:ns_window
-+                        title:[NSString stringWithUTF8String:title]];
++                        title:[NSString stringWithUTF8String:title] ?: @""];
 +    }
 +}

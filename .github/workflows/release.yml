@@ -72,6 +72,8 @@ jobs:
         # Native arm64 only: the runner is arm64 and the scrcpy build links
         # Homebrew's arm64 libraries, so the x86_64 app ships without it
         if: matrix.target == 'aarch64-apple-darwin'
+        # Without it the app ships without Android Mirror.app and uses PATH
+        continue-on-error: true
         run: |
           brew install meson ninja pkgconf ffmpeg sdl3 libusb
           scripts/build-scrcpy.sh
