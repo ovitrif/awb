@@ -72,7 +72,7 @@ diff -ruN a/app/src/sys/macos/window.h b/app/src/sys/macos/window.h
 diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 --- a/app/src/sys/macos/window.m
 +++ b/app/src/sys/macos/window.m
-@@ -0,0 +1,440 @@
+@@ -0,0 +1,458 @@
 +#include "sys/macos/window.h"
 +
 +#import <AppKit/AppKit.h>
@@ -90,6 +90,7 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +#define SC_LIGHT_MARGIN 8.0
 +
 +@interface SCTitleBarView : NSView
++@property(nonatomic, readonly) BOOL dragging;
 +@end
 +
 +@implementation SCTitleBarView {
@@ -110,8 +111,14 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +
 +- (void)mouseDown:(NSEvent *)event {
 +    (void) event;
++    _dragging = YES;
 +    drag_start_mouse = [NSEvent mouseLocation];
 +    drag_start_origin = self.window.parentWindow.frame.origin;
++}
++
++- (void)mouseUp:(NSEvent *)event {
++    (void) event;
++    _dragging = NO;
 +}
 +
 +- (void)mouseDragged:(NSEvent *)event {
@@ -142,7 +149,8 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +    NSTimer *timer;
 +    id mouse_monitor;
 +    BOOL bar_shown;
-+    BOOL cmd_gesture;
++    // Buttons pressed with Cmd, kept from the device until released
++    NSUInteger cmd_buttons;
 +}
 +
 +- (instancetype)initWithSDLWindow:(SDL_Window *)sdl
@@ -320,34 +328,44 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +}
 +
 +- (NSEvent *)filterMouseEvent:(NSEvent *)event {
-+    if (cmd_gesture && event.type != NSEventTypeLeftMouseUp
-+            && !([NSEvent pressedMouseButtons] & 1)) {
-+        // The window drag may consume the mouse up: end the gesture anyway
-+        cmd_gesture = NO;
++    NSEventType type = event.type;
++    BOOL down = type == NSEventTypeLeftMouseDown
++             || type == NSEventTypeRightMouseDown
++             || type == NSEventTypeOtherMouseDown;
++    BOOL up = type == NSEventTypeLeftMouseUp
++           || type == NSEventTypeRightMouseUp
++           || type == NSEventTypeOtherMouseUp;
++    NSUInteger button = down || up ? (NSUInteger) 1 << event.buttonNumber : 0;
++
++    // Forget buttons no longer held: the window drag may consume a mouse up,
++    // and a new press of the same button starts over
++    if (down) {
++        cmd_buttons &= ~button;
++    }
++    cmd_buttons &= [NSEvent pressedMouseButtons] | (up ? button : 0);
++
++    if (up && (cmd_buttons & button)) {
++        // The release of a press that never reached the device
++        cmd_buttons &= ~button;
++        return nil;
 +    }
 +
 +    if (event.window != window) {
 +        return event;
 +    }
 +
-+    if (cmd_gesture) {
-+        // Swallow the rest of a Cmd gesture, even once Cmd is released
-+        if (event.type == NSEventTypeLeftMouseUp) {
-+            cmd_gesture = NO;
++    BOOL cmd = (event.modifierFlags & NSEventModifierFlagCommand)
++            && ![self sdlHasButtonDown];
++    if (down && cmd) {
++        cmd_buttons |= button;
++        if (type == NSEventTypeLeftMouseDown) {
++            [window performWindowDragWithEvent:event];
 +        }
 +        return nil;
 +    }
 +
-+    if (!(event.modifierFlags & NSEventModifierFlagCommand)
-+            || [self sdlHasButtonDown]) {
-+        return event;
-+    }
-+
-+    if (event.type == NSEventTypeLeftMouseDown) {
-+        cmd_gesture = YES;
-+        [window performWindowDragWithEvent:event];
-+    }
-+    return nil;
++    // Swallow the rest of a Cmd gesture, even once Cmd is released
++    return cmd_buttons || cmd ? nil : event;
 +}
 +
 +// A gesture that started without Cmd keeps going to the device, so the phone
@@ -423,7 +441,7 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +                   || (bar_shown && top == bar.windowNumber);
 +        // Keep the bar while it drags the window
 +        BOOL dragging = bar_shown && ([NSEvent pressedMouseButtons] & 1)
-+                     && NSPointInRect(mouse, NSInsetRect(bar.frame, -40, -40));
++                     && ((SCTitleBarView *) bar.contentView).dragging;
 +        hovered = (on_top && NSPointInRect(mouse, window.frame)) || dragging;
 +    }
 +
