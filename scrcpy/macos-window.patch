@@ -72,7 +72,7 @@ diff -ruN a/app/src/sys/macos/window.h b/app/src/sys/macos/window.h
 diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 --- a/app/src/sys/macos/window.m
 +++ b/app/src/sys/macos/window.m
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,427 @@
 +#include "sys/macos/window.h"
 +
 +#import <AppKit/AppKit.h>
@@ -81,16 +81,15 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +#include "util/log.h"
 +
 +#define SC_TITLE_BAR_HEIGHT 28.0
-+#define SC_TITLE_BAR_GAP 6.0
-+#define SC_TITLE_BAR_RADIUS 10.0
 +// Close to the screen corners of current phones at this window width
 +#define SC_CORNER_RADIUS_RATIO 0.09
 +#define SC_HOVER_POLL_INTERVAL (1.0 / 30)
 +#define SC_FADE_DURATION 0.15
 +#define SC_LIGHT_SIZE 12.0
 +#define SC_LIGHT_SPACING 8.0
++#define SC_LIGHT_MARGIN 8.0
 +
-+@interface SCTitleBarView : NSVisualEffectView
++@interface SCTitleBarView : NSView
 +@end
 +
 +@implementation SCTitleBarView {
@@ -137,8 +136,13 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +    SDL_Window *sdl_window;
 +    NSWindow *window;
 +    NSPanel *bar;
++    NSVisualEffectView *bar_material;
++    NSArray<NSButton *> *lights;
++    NSTextField *title_label;
 +    NSTimer *timer;
++    id mouse_monitor;
 +    BOOL bar_shown;
++    BOOL cmd_gesture;
 +}
 +
 +- (instancetype)initWithSDLWindow:(SDL_Window *)sdl
@@ -177,8 +181,7 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +                     object:window];
 +    }
 +
-+    // Poll the pointer rather than track areas on SDL's view: SDL owns that
-+    // view, and polling also covers the bar, which sits outside the window.
++    // Poll the pointer rather than track areas on SDL's view, which SDL owns.
 +    // It runs in the common modes so it keeps firing during a drag.
 +    timer = [NSTimer timerWithTimeInterval:SC_HOVER_POLL_INTERVAL
 +                                    target:self
@@ -187,9 +190,13 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +                                   repeats:YES];
 +    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
 +
++    [self installCommandDrag];
++
 +    return self;
 +}
 +
++// QuickTime-style title bar: an overlay across the top of the screen, square
++// at the bottom, its top corners following the window's rounding
 +- (NSPanel *)makeBarWithTitle:(NSString *)title {
 +    NSRect frame = NSMakeRect(0, 0, 200, SC_TITLE_BAR_HEIGHT);
 +    NSPanel *panel = [[NSPanel alloc]
@@ -201,7 +208,7 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +    panel.releasedWhenClosed = NO;
 +    panel.opaque = NO;
 +    panel.backgroundColor = NSColor.clearColor;
-+    panel.hasShadow = YES;
++    panel.hasShadow = NO;
 +    panel.hidesOnDeactivate = NO;
 +    panel.becomesKeyOnlyIfNeeded = YES;
 +    panel.collectionBehavior = NSWindowCollectionBehaviorTransient
@@ -209,14 +216,20 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +    panel.alphaValue = 0;
 +
 +    SCTitleBarView *view = [[SCTitleBarView alloc] initWithFrame:frame];
-+    view.material = NSVisualEffectMaterialHUDWindow;
-+    view.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-+    view.state = NSVisualEffectStateActive;
 +    view.wantsLayer = YES;
-+    view.layer.cornerRadius = SC_TITLE_BAR_RADIUS;
 +    view.layer.masksToBounds = YES;
-+    view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 +    panel.contentView = view;
++
++    // As tall as the window, so its rounded top matches the window's corners
++    // exactly; the bar shows only its top strip
++    bar_material = [[NSVisualEffectView alloc] initWithFrame:frame];
++    bar_material.material = NSVisualEffectMaterialHUDWindow;
++    bar_material.blendingMode = NSVisualEffectBlendingModeBehindWindow;
++    bar_material.state = NSVisualEffectStateActive;
++    bar_material.wantsLayer = YES;
++    bar_material.layer.cornerCurve = kCACornerCurveContinuous;
++    bar_material.layer.masksToBounds = YES;
++    [view addSubview:bar_material];
 +
 +    // AppKit's standard buttons stay gray outside a real title bar, so draw
 +    // the traffic lights here
@@ -225,10 +238,10 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +        @selector(minimizeClicked:),
 +        @selector(zoomClicked:),
 +    };
-+    CGFloat x = 10;
++    NSMutableArray<NSButton *> *buttons = [NSMutableArray array];
 +    for (size_t i = 0; i < 3; ++i) {
 +        NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(
-+            x, (SC_TITLE_BAR_HEIGHT - SC_LIGHT_SIZE) / 2,
++            0, (SC_TITLE_BAR_HEIGHT - SC_LIGHT_SIZE) / 2,
 +            SC_LIGHT_SIZE, SC_LIGHT_SIZE)];
 +        button.bordered = NO;
 +        button.title = @"";
@@ -238,22 +251,103 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +        button.target = self;
 +        button.action = actions[i];
 +        [view addSubview:button];
-+        x += SC_LIGHT_SIZE + SC_LIGHT_SPACING;
++        [buttons addObject:button];
 +    }
-+    x -= SC_LIGHT_SPACING - 6;
++    lights = buttons;
 +
 +    NSTextField *label = [NSTextField labelWithString:title];
-+    label.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
++    label.font = [NSFont titleBarFontOfSize:0];
 +    label.textColor = NSColor.secondaryLabelColor;
 +    label.alignment = NSTextAlignmentCenter;
 +    label.lineBreakMode = NSLineBreakByTruncatingTail;
-+    CGFloat label_height = label.intrinsicContentSize.height;
-+    label.frame = NSMakeRect(x + 4, (SC_TITLE_BAR_HEIGHT - label_height) / 2,
-+                             frame.size.width - 2 * (x + 4), label_height);
-+    label.autoresizingMask = NSViewWidthSizable;
 +    [view addSubview:label];
++    title_label = label;
 +
 +    return panel;
++}
++
++- (CGFloat)cornerRadius {
++    return [self isFullscreen]
++        ? 0 : round(window.frame.size.width * SC_CORNER_RADIUS_RATIO);
++}
++
++// Fit the bar to the window's current width and corners
++- (void)layoutBar {
++    NSRect parent = window.frame;
++    [bar setFrame:NSMakeRect(parent.origin.x,
++                             NSMaxY(parent) - SC_TITLE_BAR_HEIGHT,
++                             parent.size.width, SC_TITLE_BAR_HEIGHT)
++          display:NO];
++
++    CGFloat radius = [self cornerRadius];
++    bar_material.frame = NSMakeRect(0, SC_TITLE_BAR_HEIGHT - parent.size.height,
++                                    parent.size.width, parent.size.height);
++    bar_material.layer.cornerRadius = radius;
++
++    // Keep the lights clear of the rounded corner at the bar's mid-height
++    CGFloat mid = SC_TITLE_BAR_HEIGHT / 2;
++    CGFloat corner = radius > mid
++        ? radius - sqrt(radius * radius - (radius - mid) * (radius - mid)) : 0;
++    CGFloat x = MAX(SC_LIGHT_MARGIN, corner + SC_LIGHT_MARGIN);
++    for (NSButton *light in lights) {
++        [light setFrameOrigin:NSMakePoint(x, light.frame.origin.y)];
++        x += SC_LIGHT_SIZE + SC_LIGHT_SPACING;
++    }
++
++    NSTextField *label = title_label;
++    CGFloat height = label.intrinsicContentSize.height;
++    CGFloat inset = x + 4;
++    label.frame = NSMakeRect(inset, (SC_TITLE_BAR_HEIGHT - height) / 2,
++                             MAX(0, parent.size.width - 2 * inset), height);
++}
++
++// Cmd + drag anywhere moves the window. While Cmd is held, no mouse event
++// reaches SDL, so nothing goes to the device; scrcpy binds no mouse action
++// to Cmd (its mouse gestures use Ctrl and Shift).
++- (void)installCommandDrag {
++    NSEventMask mask = NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged
++                     | NSEventMaskLeftMouseUp | NSEventMaskRightMouseDown
++                     | NSEventMaskRightMouseDragged | NSEventMaskRightMouseUp
++                     | NSEventMaskOtherMouseDown | NSEventMaskOtherMouseDragged
++                     | NSEventMaskOtherMouseUp | NSEventMaskScrollWheel
++                     | NSEventMaskMouseMoved;
++    __weak SCWindowStyler *weak_self = self;
++    mouse_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask
++                                                          handler:^NSEvent *(NSEvent *event) {
++        SCWindowStyler *strong_self = weak_self;
++        return strong_self ? [strong_self filterMouseEvent:event] : event;
++    }];
++}
++
++- (NSEvent *)filterMouseEvent:(NSEvent *)event {
++    if (event.window != window) {
++        return event;
++    }
++
++    if (cmd_gesture) {
++        // Swallow the rest of a Cmd gesture, even once Cmd is released
++        if (event.type == NSEventTypeLeftMouseUp) {
++            cmd_gesture = NO;
++        }
++        return nil;
++    }
++
++    if (!(event.modifierFlags & NSEventModifierFlagCommand)
++            || [self sdlHasButtonDown]) {
++        return event;
++    }
++
++    if (event.type == NSEventTypeLeftMouseDown) {
++        cmd_gesture = YES;
++        [window performWindowDragWithEvent:event];
++    }
++    return nil;
++}
++
++// A gesture that started without Cmd keeps going to the device, so the phone
++// never sees a touch down without its up
++- (BOOL)sdlHasButtonDown {
++    return SDL_GetMouseState(NULL, NULL) != 0;
 +}
 +
 +- (BOOL)isFullscreen {
@@ -261,15 +355,13 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +}
 +
 +- (void)applyStyle {
-+    BOOL fullscreen = [self isFullscreen];
 +    window.opaque = NO;
 +    window.backgroundColor = NSColor.clearColor;
 +    window.hasShadow = YES;
 +
 +    NSView *content = window.contentView;
 +    content.wantsLayer = YES;
-+    content.layer.cornerRadius = fullscreen
-+        ? 0 : round(window.frame.size.width * SC_CORNER_RADIUS_RATIO);
++    content.layer.cornerRadius = [self cornerRadius];
 +    content.layer.cornerCurve = kCACornerCurveContinuous;
 +    content.layer.masksToBounds = YES;
 +
@@ -280,6 +372,9 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +- (void)windowChanged:(NSNotification *)notification {
 +    (void) notification;
 +    [self applyStyle];
++    if (bar_shown) {
++        [self layoutBar];
++    }
 +}
 +
 +- (void)keyChanged:(NSNotification *)notification {
@@ -295,29 +390,11 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +        [NSColor colorWithSRGBRed:0.16 green:0.78 blue:0.25 alpha:1],
 +    };
 +    BOOL active = window.isKeyWindow;
-+    for (NSView *view in bar.contentView.subviews) {
-+        if ([view isKindOfClass:NSButton.class]) {
-+            NSColor *color = active ? colors[((NSButton *) view).tag]
-+                                    : [NSColor colorWithWhite:0.5 alpha:0.5];
-+            view.layer.backgroundColor = color.CGColor;
-+        }
++    for (NSButton *light in lights) {
++        NSColor *color = active ? colors[light.tag]
++                                : [NSColor colorWithWhite:0.5 alpha:0.5];
++        light.layer.backgroundColor = color.CGColor;
 +    }
-+}
-+
-+- (NSRect)barFrame {
-+    NSRect parent = window.frame;
-+    NSRect frame = NSMakeRect(parent.origin.x,
-+                              NSMaxY(parent) + SC_TITLE_BAR_GAP,
-+                              parent.size.width, SC_TITLE_BAR_HEIGHT);
-+    NSRect visible = window.screen.visibleFrame;
-+    if (!NSIsEmptyRect(visible) && NSMaxY(frame) > NSMaxY(visible)) {
-+        // No room above the window: overlay its top edge instead
-+        frame.origin.y = NSMaxY(parent) - SC_TITLE_BAR_HEIGHT
-+                       - SC_TITLE_BAR_GAP;
-+        frame.origin.x += SC_TITLE_BAR_GAP;
-+        frame.size.width -= 2 * SC_TITLE_BAR_GAP;
-+    }
-+    return frame;
 +}
 +
 +- (void)tick:(NSTimer *)t {
@@ -336,16 +413,12 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +        // Over the mirror only where no other window covers it
 +        NSInteger top = [NSWindow windowNumberAtPoint:mouse
 +                          belowWindowWithWindowNumber:0];
-+        hovered = top == window.windowNumber
-+               && NSPointInRect(mouse, window.frame);
-+        if (bar_shown) {
-+            // Keep the bar while the pointer travels to it or drags it
-+            NSRect bar_zone = NSInsetRect(bar.frame, 0, -SC_TITLE_BAR_GAP);
-+            BOOL dragging = ([NSEvent pressedMouseButtons] & 1)
-+                         && NSPointInRect(mouse,
-+                                          NSInsetRect(bar.frame, -40, -40));
-+            hovered = hovered || NSPointInRect(mouse, bar_zone) || dragging;
-+        }
++        BOOL on_top = top == window.windowNumber
++                   || (bar_shown && top == bar.windowNumber);
++        // Keep the bar while it drags the window
++        BOOL dragging = bar_shown && ([NSEvent pressedMouseButtons] & 1)
++                     && NSPointInRect(mouse, NSInsetRect(bar.frame, -40, -40));
++        hovered = (on_top && NSPointInRect(mouse, window.frame)) || dragging;
 +    }
 +
 +    if (hovered && !bar_shown) {
@@ -357,7 +430,7 @@ diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
 +
 +- (void)showBar {
 +    bar_shown = YES;
-+    [bar setFrame:[self barFrame] display:NO];
++    [self layoutBar];
 +    bar.level = window.level;
 +    [self updateLights];
 +    if (!bar.parentWindow) {
