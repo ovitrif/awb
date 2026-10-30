@@ -68,6 +68,14 @@ jobs:
           if [ -n "$xcode" ]; then sudo xcode-select -s "$xcode"; fi
           xcrun actool --version | grep -A1 short-bundle-version | tail -1
 
+      - name: Build the patched scrcpy
+        # Native arm64 only: the runner is arm64 and the scrcpy build links
+        # Homebrew's arm64 libraries, so the x86_64 app ships without it
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          brew install meson ninja pkgconf ffmpeg sdl3 libusb
+          scripts/build-scrcpy.sh
+
       - name: Package
         shell: bash
         run: |

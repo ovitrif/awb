@@ -59,7 +59,10 @@ fi
 
 # The patched scrcpy runs as its own app, so the mirror window belongs to a
 # process with a bundle id that window managers (Raycast layouts) can target
-if [ -x "${SCRCPY_DIR}/scrcpy" ]; then
+if [ -x "${SCRCPY_DIR}/scrcpy" ] \
+  && [ "$(lipo -archs "${SCRCPY_DIR}/scrcpy")" != "$(lipo -archs "$APP_BIN")" ]; then
+  echo "skipping ${SCRCPY_DIR}/scrcpy: not built for the app's architecture" >&2
+elif [ -x "${SCRCPY_DIR}/scrcpy" ]; then
   MIRROR="${APP}/Contents/Helpers/Android Mirror.app"
   mkdir -p "${MIRROR}/Contents/MacOS" "${MIRROR}/Contents/Resources"
   cp "${SCRCPY_DIR}/scrcpy" "${MIRROR}/Contents/MacOS/scrcpy"
@@ -68,14 +71,21 @@ if [ -x "${SCRCPY_DIR}/scrcpy" ]; then
   cp "${APP}/Contents/Resources/${ICON_NAME}.icns" "${MIRROR}/Contents/Resources/AppIcon.icns"
 
   # awb starts mirrors through this launcher; opened with no arguments (Finder,
-  # Raycast, Spotlight) it quits, since only awb knows which phone to mirror
+  # Raycast, Spotlight) it quits, since only awb knows which phone to mirror.
+  # The patched scrcpy links Homebrew's ffmpeg, sdl3 and libusb; when it cannot
+  # load them, the launcher falls back to the scrcpy on PATH.
   cat > "${MIRROR}/Contents/MacOS/Android Mirror" <<'LAUNCHER'
 #!/bin/sh
 [ "$#" -eq 0 ] && exit 0
-resources="$(cd "$(dirname "$0")/../Resources" && pwd)"
+dir="$(cd "$(dirname "$0")" && pwd)"
+if ! "${dir}/scrcpy" --version >/dev/null 2>&1; then
+  echo "Android Mirror: the bundled scrcpy cannot start; using scrcpy from PATH" >&2
+  exec scrcpy "$@"
+fi
+resources="$(cd "${dir}/../Resources" && pwd)"
 export SCRCPY_SERVER_PATH="${resources}/scrcpy-server"
 export SCRCPY_ICON_DIR="$resources"
-exec "$(dirname "$0")/scrcpy" "$@"
+exec "${dir}/scrcpy" "$@"
 LAUNCHER
   chmod 755 "${MIRROR}/Contents/MacOS/Android Mirror"
 
