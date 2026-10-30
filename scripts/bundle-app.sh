@@ -32,12 +32,6 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
 cp "$APP_BIN" "${APP}/Contents/MacOS/awb-app"
 
-# Outside Contents/MacOS, so scrcpy keeps its own identity (not the app's
-# bundle id) and window managers can target its path
-if [ -x "${SCRCPY_DIR}/scrcpy" ]; then
-  cp -R "$SCRCPY_DIR" "${APP}/Contents/Resources/scrcpy"
-  codesign --force --sign - "${APP}/Contents/Resources/scrcpy/scrcpy" 2>/dev/null || true
-fi
 
 # Liquid Glass icon: actool compiles the Icon Composer bundle into Assets.car
 # (light, dark, clear and tinted variants) plus AppIcon.icns for older macOS.
@@ -61,6 +55,50 @@ if ! xcrun actool "$ICON_SOURCE" --compile "${APP}/Contents/Resources" \
     "$ICON_BIN" --render-icon "${iconset}/icon_${size}x${size}@2x.png" "$((size * 2))" >/dev/null
   done
   iconutil -c icns "$iconset" -o "${APP}/Contents/Resources/awb.icns"
+fi
+
+# The patched scrcpy runs as its own app, so the mirror window belongs to a
+# process with a bundle id that window managers (Raycast layouts) can target
+if [ -x "${SCRCPY_DIR}/scrcpy" ]; then
+  MIRROR="${APP}/Contents/Helpers/Android Mirror.app"
+  mkdir -p "${MIRROR}/Contents/MacOS" "${MIRROR}/Contents/Resources"
+  cp "${SCRCPY_DIR}/scrcpy" "${MIRROR}/Contents/MacOS/scrcpy"
+  cp "${SCRCPY_DIR}/scrcpy-server" "${SCRCPY_DIR}/scrcpy.png" \
+    "${SCRCPY_DIR}/disconnected.png" "${MIRROR}/Contents/Resources/"
+  cp "${APP}/Contents/Resources/${ICON_NAME}.icns" "${MIRROR}/Contents/Resources/AppIcon.icns"
+
+  # awb starts mirrors through this launcher; opened with no arguments (Finder,
+  # Raycast, Spotlight) it quits, since only awb knows which phone to mirror
+  cat > "${MIRROR}/Contents/MacOS/Android Mirror" <<'LAUNCHER'
+#!/bin/sh
+[ "$#" -eq 0 ] && exit 0
+resources="$(cd "$(dirname "$0")/../Resources" && pwd)"
+export SCRCPY_SERVER_PATH="${resources}/scrcpy-server"
+export SCRCPY_ICON_DIR="$resources"
+exec "$(dirname "$0")/scrcpy" "$@"
+LAUNCHER
+  chmod 755 "${MIRROR}/Contents/MacOS/Android Mirror"
+
+  cat > "${MIRROR}/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>Android Mirror</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIdentifier</key><string>com.ovitrif.awb.mirror</string>
+  <key>CFBundleName</key><string>Android Mirror</string>
+  <key>CFBundleDisplayName</key><string>Android Mirror</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+  codesign --force --sign - "${MIRROR}/Contents/MacOS/scrcpy" 2>/dev/null || true
+  codesign --force --sign - "$MIRROR" 2>/dev/null || true
 fi
 
 cat > "${APP}/Contents/Info.plist" <<PLIST

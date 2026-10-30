@@ -86,8 +86,8 @@ By default scrcpy launches borderless at 480x1071 with `--stay-awake` and no aud
 `--plain-window` for scrcpy's regular decorated window. The menu bar app stores its scrcpy
 options in `~/.config/awb/config.toml`.
 
-awb prefers the scrcpy bundled in `Android Wifi Bridge.app`
-(`Contents/Resources/scrcpy/scrcpy`), a pinned release patched to draw a QuickTime-style
+awb prefers the scrcpy bundled in `Android Wifi Bridge.app` as its own app
+(`Contents/Helpers/Android Mirror.app`, bundle id `com.ovitrif.awb.mirror`), a pinned release patched to draw a QuickTime-style
 mirror window on macOS: rounded corners, and a title bar with traffic lights that shows
 above the window while the pointer is over it and moves the window when dragged. Without
 it, awb uses `scrcpy` from your PATH.

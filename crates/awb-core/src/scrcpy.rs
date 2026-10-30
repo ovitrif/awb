@@ -13,8 +13,9 @@ pub const DEFAULT_WINDOW_WIDTH: u32 = 480;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
 const RECOMMENDED_SCRCPY_VERSION: ScrcpyVersion = ScrcpyVersion::new(4, 0, 0);
 const SCRCPY_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
-/// The patched scrcpy inside Android Wifi Bridge.app (scripts/build-scrcpy.sh).
-const BUNDLED_SCRCPY: &str = "Contents/Resources/scrcpy/scrcpy";
+/// The launcher of the patched scrcpy app inside Android Wifi Bridge.app
+/// (scripts/build-scrcpy.sh, scripts/bundle-app.sh).
+const BUNDLED_SCRCPY: &str = "Contents/Helpers/Android Mirror.app/Contents/MacOS/Android Mirror";
 const APP_BUNDLE_PATH: &str = "/Applications/Android Wifi Bridge.app";
 
 #[derive(Debug, Clone)]
@@ -593,10 +594,8 @@ mod tests {
         assert_eq!(
             bundled_scrcpy_candidates(Some(exe)),
             vec![
-                PathBuf::from("/tmp/Dev Build.app/Contents/Resources/scrcpy/scrcpy"),
-                PathBuf::from(
-                    "/Applications/Android Wifi Bridge.app/Contents/Resources/scrcpy/scrcpy"
-                ),
+                PathBuf::from("/tmp/Dev Build.app").join(BUNDLED_SCRCPY),
+                Path::new(APP_BUNDLE_PATH).join(BUNDLED_SCRCPY),
             ]
         );
     }
@@ -607,9 +606,7 @@ mod tests {
 
         assert_eq!(
             bundled_scrcpy_candidates(Some(exe)),
-            vec![PathBuf::from(
-                "/Applications/Android Wifi Bridge.app/Contents/Resources/scrcpy/scrcpy"
-            )]
+            vec![Path::new(APP_BUNDLE_PATH).join(BUNDLED_SCRCPY)]
         );
     }
 
