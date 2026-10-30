@@ -7,12 +7,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::adb::Adb;
-use crate::command_path::{path_env_with_tool_dirs, resolve_program};
+use crate::command_path::{is_executable_file, path_env_with_tool_dirs, resolve_program};
 
 pub const DEFAULT_WINDOW_WIDTH: u32 = 480;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 1_071;
 const RECOMMENDED_SCRCPY_VERSION: ScrcpyVersion = ScrcpyVersion::new(4, 0, 0);
 const SCRCPY_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+/// The patched scrcpy inside Android Wifi Bridge.app (scripts/build-scrcpy.sh).
+const BUNDLED_SCRCPY: &str = "Contents/Resources/scrcpy/scrcpy";
+const APP_BUNDLE_PATH: &str = "/Applications/Android Wifi Bridge.app";
 
 #[derive(Debug, Clone)]
 pub struct Scrcpy {
@@ -69,6 +72,7 @@ impl Scrcpy {
         skip_check: bool,
         adb: Option<Adb>,
     ) -> Result<Self> {
+        let override_path = override_path.or_else(bundled_scrcpy);
         let path = if skip_check {
             override_path.unwrap_or_else(|| PathBuf::from("scrcpy"))
         } else {
@@ -107,15 +111,17 @@ impl Scrcpy {
 
         match version_line.as_deref().and_then(parse_scrcpy_version) {
             Some(version) if version < RECOMMENDED_SCRCPY_VERSION => warnings.push(format!(
-                "scrcpy {version} detected at {}. AWB works best with scrcpy {RECOMMENDED_SCRCPY_VERSION} or newer; run `brew upgrade scrcpy` if mirroring fails.",
-                self.path.display()
+                "scrcpy {version} detected at {}. AWB works best with scrcpy {RECOMMENDED_SCRCPY_VERSION} or newer; {} if mirroring fails.",
+                self.path.display(),
+                self.update_hint()
             )),
             Some(_) => {}
             None => {
                 if let Some(error) = version_error {
                     warnings.push(format!(
-                        "Could not read scrcpy version from {}: {error:#}. If mirroring fails, run `brew upgrade scrcpy` and try again.",
-                        self.path.display()
+                        "Could not read scrcpy version from {}: {error:#}. If mirroring fails, {} and try again.",
+                        self.path.display(),
+                        self.update_hint()
                     ));
                 }
             }
@@ -126,21 +132,31 @@ impl Scrcpy {
                 for flag in compatibility_flags(options) {
                     if !help.contains(flag) {
                         warnings.push(format!(
-                            "scrcpy at {} does not advertise `{flag}` in `scrcpy --help`; update it with `brew upgrade scrcpy` or disable the related AWB setting.",
-                            self.path.display()
+                            "scrcpy at {} does not advertise `{flag}` in `scrcpy --help`; {} or disable the related AWB setting.",
+                            self.path.display(),
+                            self.update_hint()
                         ));
                     }
                 }
             }
             Err(error) => warnings.push(format!(
-                "Could not inspect scrcpy options from {}: {error:#}. If mirroring fails, run `brew upgrade scrcpy` and try again.",
-                self.path.display()
+                "Could not inspect scrcpy options from {}: {error:#}. If mirroring fails, {} and try again.",
+                self.path.display(),
+                self.update_hint()
             )),
         }
 
         ScrcpyDiagnostics {
             version_line,
             warnings,
+        }
+    }
+
+    fn update_hint(&self) -> &'static str {
+        if self.path.ends_with(BUNDLED_SCRCPY) {
+            "rebuild the app's scrcpy with `scripts/build-scrcpy.sh` and rebundle it"
+        } else {
+            "run `brew upgrade scrcpy`"
         }
     }
 
@@ -313,6 +329,31 @@ impl Default for ScrcpyOptions {
             window_height: DEFAULT_WINDOW_HEIGHT,
         }
     }
+}
+
+/// The bundled scrcpy: the running app's own, else the installed app's (for
+/// the CLI), so mirrors get the patched window and a stable path for window
+/// managers.
+fn bundled_scrcpy() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    first_executable(bundled_scrcpy_candidates(exe.as_deref()))
+}
+
+fn bundled_scrcpy_candidates(exe: Option<&Path>) -> Vec<PathBuf> {
+    // The menu bar app runs from <bundle>/Contents/MacOS/awb-app
+    let running_bundle = exe
+        .and_then(|exe| exe.parent()?.parent()?.parent())
+        .filter(|bundle| bundle.extension().is_some_and(|ext| ext == "app"));
+
+    running_bundle
+        .into_iter()
+        .map(|bundle| bundle.join(BUNDLED_SCRCPY))
+        .chain([Path::new(APP_BUNDLE_PATH).join(BUNDLED_SCRCPY)])
+        .collect()
+}
+
+fn first_executable(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    candidates.into_iter().find(|path| is_executable_file(path))
 }
 
 pub fn default_args(serial: &str, options: &ScrcpyOptions) -> Vec<OsString> {
@@ -543,6 +584,60 @@ mod tests {
 
         assert_eq!(adb_env, adb_path.as_os_str());
         assert_eq!(path_dirs.first().map(PathBuf::as_path), adb_path.parent());
+    }
+
+    #[test]
+    fn bundled_scrcpy_prefers_the_running_app_bundle() {
+        let exe = Path::new("/tmp/Dev Build.app/Contents/MacOS/awb-app");
+
+        assert_eq!(
+            bundled_scrcpy_candidates(Some(exe)),
+            vec![
+                PathBuf::from("/tmp/Dev Build.app/Contents/Resources/scrcpy/scrcpy"),
+                PathBuf::from(
+                    "/Applications/Android Wifi Bridge.app/Contents/Resources/scrcpy/scrcpy"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn bundled_scrcpy_falls_back_to_the_installed_app_outside_a_bundle() {
+        let exe = Path::new("/Users/me/.local/bin/awb");
+
+        assert_eq!(
+            bundled_scrcpy_candidates(Some(exe)),
+            vec![PathBuf::from(
+                "/Applications/Android Wifi Bridge.app/Contents/Resources/scrcpy/scrcpy"
+            )]
+        );
+    }
+
+    #[test]
+    fn bundled_scrcpy_skips_missing_candidates() {
+        let missing = PathBuf::from("/nonexistent/scrcpy");
+        let present = PathBuf::from("/bin/sh");
+
+        assert_eq!(
+            first_executable(vec![missing, present.clone()]),
+            Some(present)
+        );
+        assert_eq!(first_executable(vec![]), None);
+    }
+
+    #[test]
+    fn update_hint_follows_where_scrcpy_comes_from() {
+        let bundled = Scrcpy {
+            path: Path::new(APP_BUNDLE_PATH).join(BUNDLED_SCRCPY),
+            adb: None,
+        };
+        let homebrew = Scrcpy {
+            path: PathBuf::from("/opt/homebrew/bin/scrcpy"),
+            adb: None,
+        };
+
+        assert!(bundled.update_hint().contains("build-scrcpy.sh"));
+        assert!(homebrew.update_hint().contains("brew upgrade scrcpy"));
     }
 
     #[test]

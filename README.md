@@ -86,17 +86,26 @@ By default scrcpy launches borderless at 480x1071 with `--stay-awake` and no aud
 `--plain-window` for scrcpy's regular decorated window. The menu bar app stores its scrcpy
 options in `~/.config/awb/config.toml`.
 
+awb prefers the scrcpy bundled in `Android Wifi Bridge.app`
+(`Contents/Resources/scrcpy/scrcpy`), a pinned release patched to draw a QuickTime-style
+mirror window on macOS: rounded corners, and a title bar with traffic lights that shows
+above the window while the pointer is over it and moves the window when dragged. Without
+it, awb uses `scrcpy` from your PATH.
+
 ## Build from source
 
 ```sh
 git clone https://github.com/ovitrif/awb.git
 cd awb
 cargo build --release            # target/release/awb and target/release/awb-app
-scripts/bundle-app.sh            # optional: wraps awb-app into target/bundle/Android Wifi Bridge.app
+scripts/build-scrcpy.sh          # optional: patched scrcpy into target/scrcpy (needs meson, ninja, Homebrew ffmpeg, sdl3, libusb)
+scripts/bundle-app.sh            # optional: wraps awb-app (and target/scrcpy) into target/bundle/Android Wifi Bridge.app
 ```
 
 The workspace has three crates: `awb-core` (ADB, scrcpy, QR, and Bonjour logic), `awb`
 (the CLI), and `awb-app` (the menu bar app, built from the design in `DESIGN.pen`).
+`scrcpy/macos-window.patch` holds the mirror window patch; `scripts/build-scrcpy.sh` pins the
+scrcpy version and says how to move the patch to a new release.
 
 ## License
 

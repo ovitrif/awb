@@ -1,0 +1,429 @@
+diff -ruN a/app/meson.build b/app/meson.build
+--- a/app/meson.build
++++ b/app/meson.build
+@@ -99,6 +99,10 @@
+     ]
+     if host_machine.system() == 'darwin'
+         feature_test_macros += '-D_DARWIN_C_SOURCE'
++        add_languages('objc', native: false)
++        add_project_arguments(['-D_DARWIN_C_SOURCE', '-fobjc-arc'],
++                              language: 'objc')
++        src += [ 'src/sys/macos/window.m' ]
+     endif
+ endif
+ 
+@@ -172,6 +176,11 @@
+ 
+ if usb_support
+     dependencies += dependency('libusb-1.0', static: static)
++endif
++
++if host_machine.system() == 'darwin'
++    dependencies += dependency('appleframeworks',
++                               modules: ['AppKit', 'QuartzCore'])
+ endif
+ 
+ if host_machine.system() == 'windows'
+diff -ruN a/app/src/screen.c b/app/src/screen.c
+--- a/app/src/screen.c
++++ b/app/src/screen.c
+@@ -9,6 +9,9 @@
+ #include "options.h"
+ #include "util/log.h"
+ #include "util/sdl.h"
++#ifdef __APPLE__
++# include "sys/macos/window.h"
++#endif
+ 
+ #define DISPLAY_MARGINS 96
+ 
+@@ -618,6 +621,12 @@
+         LOGE("Could not create renderer: %s", SDL_GetError());
+         goto error_destroy_window;
+     }
++
++#ifdef __APPLE__
++    if (params->window_borderless) {
++        sc_macos_window_init(screen->window, title);
++    }
++#endif
+ 
+ #ifdef SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
+     screen->gl_context = NULL;
+diff -ruN a/app/src/sys/macos/window.h b/app/src/sys/macos/window.h
+--- a/app/src/sys/macos/window.h
++++ b/app/src/sys/macos/window.h
+@@ -0,0 +1,15 @@
++#ifndef SC_MACOS_WINDOW_H
++#define SC_MACOS_WINDOW_H
++
++#include "common.h"
++
++#include <SDL3/SDL.h>
++
++// Style a borderless window like QuickTime's iPhone mirror: rounded corners,
++// a shadow, and a title bar with traffic lights that shows above the window
++// only while the pointer is over it. Dragging that bar moves the window, so
++// clicks and swipes on the device screen itself stay untouched.
++void
++sc_macos_window_init(SDL_Window *window, const char *title);
++
++#endif
+diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
+--- a/app/src/sys/macos/window.m
++++ b/app/src/sys/macos/window.m
+@@ -0,0 +1,354 @@
++#include "sys/macos/window.h"
++
++#import <AppKit/AppKit.h>
++#import <QuartzCore/QuartzCore.h>
++
++#include "util/log.h"
++
++#define SC_TITLE_BAR_HEIGHT 28.0
++#define SC_TITLE_BAR_GAP 6.0
++#define SC_TITLE_BAR_RADIUS 10.0
++// Close to the screen corners of current phones at this window width
++#define SC_CORNER_RADIUS_RATIO 0.09
++#define SC_HOVER_POLL_INTERVAL (1.0 / 30)
++#define SC_FADE_DURATION 0.15
++#define SC_LIGHT_SIZE 12.0
++#define SC_LIGHT_SPACING 8.0
++
++@interface SCTitleBarView : NSVisualEffectView
++@end
++
++@implementation SCTitleBarView {
++    NSPoint drag_start_mouse;
++    NSPoint drag_start_origin;
++}
++
++- (BOOL)acceptsFirstMouse:(NSEvent *)event {
++    (void) event;
++    return YES;
++}
++
++// Drag from anywhere but the buttons, the title label included
++- (NSView *)hitTest:(NSPoint)point {
++    NSView *hit = [super hitTest:point];
++    return [hit isKindOfClass:NSButton.class] ? hit : (hit ? self : nil);
++}
++
++- (void)mouseDown:(NSEvent *)event {
++    (void) event;
++    drag_start_mouse = [NSEvent mouseLocation];
++    drag_start_origin = self.window.parentWindow.frame.origin;
++}
++
++- (void)mouseDragged:(NSEvent *)event {
++    (void) event;
++    NSWindow *parent = self.window.parentWindow;
++    if (!parent) {
++        return;
++    }
++    // The bar is a child window, so it follows its parent
++    NSPoint mouse = [NSEvent mouseLocation];
++    [parent setFrameOrigin:NSMakePoint(
++        drag_start_origin.x + mouse.x - drag_start_mouse.x,
++        drag_start_origin.y + mouse.y - drag_start_mouse.y)];
++}
++
++@end
++
++@interface SCWindowStyler : NSObject
++@end
++
++@implementation SCWindowStyler {
++    SDL_Window *sdl_window;
++    NSWindow *window;
++    NSPanel *bar;
++    NSTimer *timer;
++    BOOL bar_shown;
++}
++
++- (instancetype)initWithSDLWindow:(SDL_Window *)sdl
++                         nsWindow:(NSWindow *)ns
++                            title:(NSString *)title {
++    self = [super init];
++    if (!self) {
++        return nil;
++    }
++
++    sdl_window = sdl;
++    window = ns;
++    bar = [self makeBarWithTitle:title];
++
++    [self applyStyle];
++
++    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
++    NSArray<NSNotificationName> *restyle = @[
++        NSWindowDidResizeNotification,
++        NSWindowDidExitFullScreenNotification,
++        NSWindowDidEnterFullScreenNotification,
++        NSWindowDidDeminiaturizeNotification,
++    ];
++    for (NSNotificationName name in restyle) {
++        [center addObserver:self
++                   selector:@selector(windowChanged:)
++                       name:name
++                     object:window];
++    }
++
++    for (NSNotificationName name in @[NSWindowDidBecomeKeyNotification,
++                                       NSWindowDidResignKeyNotification]) {
++        [center addObserver:self
++                   selector:@selector(keyChanged:)
++                       name:name
++                     object:window];
++    }
++
++    // Poll the pointer rather than track areas on SDL's view: SDL owns that
++    // view, and polling also covers the bar, which sits outside the window.
++    // It runs in the common modes so it keeps firing during a drag.
++    timer = [NSTimer timerWithTimeInterval:SC_HOVER_POLL_INTERVAL
++                                    target:self
++                                  selector:@selector(tick:)
++                                  userInfo:nil
++                                   repeats:YES];
++    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
++
++    return self;
++}
++
++- (NSPanel *)makeBarWithTitle:(NSString *)title {
++    NSRect frame = NSMakeRect(0, 0, 200, SC_TITLE_BAR_HEIGHT);
++    NSPanel *panel = [[NSPanel alloc]
++        initWithContentRect:frame
++                  styleMask:NSWindowStyleMaskBorderless
++                            | NSWindowStyleMaskNonactivatingPanel
++                    backing:NSBackingStoreBuffered
++                      defer:YES];
++    panel.releasedWhenClosed = NO;
++    panel.opaque = NO;
++    panel.backgroundColor = NSColor.clearColor;
++    panel.hasShadow = YES;
++    panel.hidesOnDeactivate = NO;
++    panel.becomesKeyOnlyIfNeeded = YES;
++    panel.collectionBehavior = NSWindowCollectionBehaviorTransient
++                             | NSWindowCollectionBehaviorIgnoresCycle;
++    panel.alphaValue = 0;
++
++    SCTitleBarView *view = [[SCTitleBarView alloc] initWithFrame:frame];
++    view.material = NSVisualEffectMaterialHUDWindow;
++    view.blendingMode = NSVisualEffectBlendingModeBehindWindow;
++    view.state = NSVisualEffectStateActive;
++    view.wantsLayer = YES;
++    view.layer.cornerRadius = SC_TITLE_BAR_RADIUS;
++    view.layer.masksToBounds = YES;
++    view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++    panel.contentView = view;
++
++    // AppKit's standard buttons stay gray outside a real title bar, so draw
++    // the traffic lights here
++    SEL actions[] = {
++        @selector(closeClicked:),
++        @selector(minimizeClicked:),
++        @selector(zoomClicked:),
++    };
++    CGFloat x = 10;
++    for (size_t i = 0; i < 3; ++i) {
++        NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(
++            x, (SC_TITLE_BAR_HEIGHT - SC_LIGHT_SIZE) / 2,
++            SC_LIGHT_SIZE, SC_LIGHT_SIZE)];
++        button.bordered = NO;
++        button.title = @"";
++        button.tag = i;
++        button.wantsLayer = YES;
++        button.layer.cornerRadius = SC_LIGHT_SIZE / 2;
++        button.target = self;
++        button.action = actions[i];
++        [view addSubview:button];
++        x += SC_LIGHT_SIZE + SC_LIGHT_SPACING;
++    }
++    x -= SC_LIGHT_SPACING - 6;
++
++    NSTextField *label = [NSTextField labelWithString:title];
++    label.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
++    label.textColor = NSColor.secondaryLabelColor;
++    label.alignment = NSTextAlignmentCenter;
++    label.lineBreakMode = NSLineBreakByTruncatingTail;
++    CGFloat label_height = label.intrinsicContentSize.height;
++    label.frame = NSMakeRect(x + 4, (SC_TITLE_BAR_HEIGHT - label_height) / 2,
++                             frame.size.width - 2 * (x + 4), label_height);
++    label.autoresizingMask = NSViewWidthSizable;
++    [view addSubview:label];
++
++    return panel;
++}
++
++- (BOOL)isFullscreen {
++    return (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
++}
++
++- (void)applyStyle {
++    BOOL fullscreen = [self isFullscreen];
++    window.opaque = NO;
++    window.backgroundColor = NSColor.clearColor;
++    window.hasShadow = YES;
++
++    NSView *content = window.contentView;
++    content.wantsLayer = YES;
++    content.layer.cornerRadius = fullscreen
++        ? 0 : round(window.frame.size.width * SC_CORNER_RADIUS_RATIO);
++    content.layer.cornerCurve = kCACornerCurveContinuous;
++    content.layer.masksToBounds = YES;
++
++    // The shadow follows the window's alpha, recompute it for the new corners
++    [window invalidateShadow];
++}
++
++- (void)windowChanged:(NSNotification *)notification {
++    (void) notification;
++    [self applyStyle];
++}
++
++- (void)keyChanged:(NSNotification *)notification {
++    (void) notification;
++    [self updateLights];
++}
++
++// Colored while the mirror window is active, gray otherwise, like AppKit's
++- (void)updateLights {
++    NSColor *colors[] = {
++        [NSColor colorWithSRGBRed:1.00 green:0.37 blue:0.34 alpha:1],
++        [NSColor colorWithSRGBRed:1.00 green:0.74 blue:0.18 alpha:1],
++        [NSColor colorWithSRGBRed:0.16 green:0.78 blue:0.25 alpha:1],
++    };
++    BOOL active = window.isKeyWindow;
++    for (NSView *view in bar.contentView.subviews) {
++        if ([view isKindOfClass:NSButton.class]) {
++            NSColor *color = active ? colors[((NSButton *) view).tag]
++                                    : [NSColor colorWithWhite:0.5 alpha:0.5];
++            view.layer.backgroundColor = color.CGColor;
++        }
++    }
++}
++
++- (NSRect)barFrame {
++    NSRect parent = window.frame;
++    NSRect frame = NSMakeRect(parent.origin.x,
++                              NSMaxY(parent) + SC_TITLE_BAR_GAP,
++                              parent.size.width, SC_TITLE_BAR_HEIGHT);
++    NSRect visible = window.screen.visibleFrame;
++    if (!NSIsEmptyRect(visible) && NSMaxY(frame) > NSMaxY(visible)) {
++        // No room above the window: overlay its top edge instead
++        frame.origin.y = NSMaxY(parent) - SC_TITLE_BAR_HEIGHT
++                       - SC_TITLE_BAR_GAP;
++        frame.origin.x += SC_TITLE_BAR_GAP;
++        frame.size.width -= 2 * SC_TITLE_BAR_GAP;
++    }
++    return frame;
++}
++
++- (void)tick:(NSTimer *)t {
++    (void) t;
++
++    if (window.opaque) {
++        // SDL resets the window background on some transitions
++        [self applyStyle];
++    }
++
++    BOOL can_show = window.visible && !window.miniaturized
++                 && ![self isFullscreen];
++    BOOL hovered = NO;
++    if (can_show) {
++        NSPoint mouse = [NSEvent mouseLocation];
++        // Over the mirror only where no other window covers it
++        NSInteger top = [NSWindow windowNumberAtPoint:mouse
++                          belowWindowWithWindowNumber:0];
++        hovered = top == window.windowNumber
++               && NSPointInRect(mouse, window.frame);
++        if (bar_shown) {
++            // Keep the bar while the pointer travels to it or drags it
++            NSRect bar_zone = NSInsetRect(bar.frame, 0, -SC_TITLE_BAR_GAP);
++            BOOL dragging = ([NSEvent pressedMouseButtons] & 1)
++                         && NSPointInRect(mouse,
++                                          NSInsetRect(bar.frame, -40, -40));
++            hovered = hovered || NSPointInRect(mouse, bar_zone) || dragging;
++        }
++    }
++
++    if (hovered && !bar_shown) {
++        [self showBar];
++    } else if (!hovered && bar_shown) {
++        [self hideBar];
++    }
++}
++
++- (void)showBar {
++    bar_shown = YES;
++    [bar setFrame:[self barFrame] display:NO];
++    bar.level = window.level;
++    [self updateLights];
++    if (!bar.parentWindow) {
++        [window addChildWindow:bar ordered:NSWindowAbove];
++    }
++    [bar orderFront:nil];
++    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
++        context.duration = SC_FADE_DURATION;
++        bar.animator.alphaValue = 1;
++    } completionHandler:nil];
++}
++
++- (void)hideBar {
++    bar_shown = NO;
++    NSPanel *panel = bar;
++    NSWindow *parent = window;
++    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
++        context.duration = SC_FADE_DURATION;
++        panel.animator.alphaValue = 0;
++    } completionHandler:^{
++        if (self->bar_shown) {
++            return;
++        }
++        // Detach the hidden bar so it takes no clicks and window managers
++        // only ever see the mirror window
++        [parent removeChildWindow:panel];
++        [panel orderOut:nil];
++    }];
++}
++
++- (void)closeClicked:(id)sender {
++    (void) sender;
++    SDL_Event event = {.type = SDL_EVENT_QUIT};
++    SDL_PushEvent(&event);
++}
++
++- (void)minimizeClicked:(id)sender {
++    (void) sender;
++    SDL_MinimizeWindow(sdl_window);
++}
++
++- (void)zoomClicked:(id)sender {
++    (void) sender;
++    bool fullscreen = SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_FULLSCREEN;
++    SDL_SetWindowFullscreen(sdl_window, !fullscreen);
++}
++
++@end
++
++// Lives as long as the process: scrcpy has a single window
++static SCWindowStyler *styler;
++
++void
++sc_macos_window_init(SDL_Window *window, const char *title) {
++    SDL_PropertiesID props = SDL_GetWindowProperties(window);
++    NSWindow *ns_window = (__bridge NSWindow *) SDL_GetPointerProperty(
++        props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
++    if (!ns_window) {
++        LOGW("Could not get the Cocoa window, keeping the default style");
++        return;
++    }
++
++    @autoreleasepool {
++        styler = [[SCWindowStyler alloc]
++            initWithSDLWindow:window
++                     nsWindow:ns_window
++                        title:[NSString stringWithUTF8String:title]];
++    }
++}

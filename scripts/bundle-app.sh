@@ -2,6 +2,9 @@
 # Wraps the awb-app binary into Android Wifi Bridge.app (menu bar agent, no Dock icon).
 # Usage: scripts/bundle-app.sh [app-binary] [output-dir] [icon-renderer]
 #
+# Bundles the patched scrcpy from scripts/build-scrcpy.sh when it has been
+# built (target/scrcpy, or $SCRCPY_DIR); otherwise awb uses scrcpy from PATH.
+#
 # icon-renderer defaults to app-binary, but can be a host-architecture build so
 # a cross-compiled release binary is never executed on the packaging runner.
 set -eu
@@ -9,6 +12,7 @@ set -eu
 APP_BIN="${1:-target/release/awb-app}"
 OUT_DIR="${2:-target/bundle}"
 ICON_BIN="${3:-$APP_BIN}"
+SCRCPY_DIR="${SCRCPY_DIR:-target/scrcpy}"
 VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 
 if [ ! -x "$APP_BIN" ]; then
@@ -27,6 +31,13 @@ rm -rf "$APP" "$LEGACY_APP"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
 cp "$APP_BIN" "${APP}/Contents/MacOS/awb-app"
+
+# Outside Contents/MacOS, so scrcpy keeps its own identity (not the app's
+# bundle id) and window managers can target its path
+if [ -x "${SCRCPY_DIR}/scrcpy" ]; then
+  cp -R "$SCRCPY_DIR" "${APP}/Contents/Resources/scrcpy"
+  codesign --force --sign - "${APP}/Contents/Resources/scrcpy/scrcpy" 2>/dev/null || true
+fi
 
 # Liquid Glass icon: actool compiles the Icon Composer bundle into Assets.car
 # (light, dark, clear and tinted variants) plus AppIcon.icns for older macOS.
