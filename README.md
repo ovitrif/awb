@@ -22,7 +22,7 @@ Pin a release or choose the install directory:
 
 ```sh
 curl -fsSL https://github.com/ovitrif/awb/releases/latest/download/install.sh | \
-  AWB_INSTALL_TAG=v2.0.5 AWB_INSTALL_DIR="$HOME/.local/bin" sh
+  AWB_INSTALL_TAG=v2.1.0 AWB_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 Requirements: `adb` on your PATH (Android SDK platform-tools). `scrcpy` is optional and
@@ -86,17 +86,29 @@ By default scrcpy launches borderless at 480x1071 with `--stay-awake` and no aud
 `--plain-window` for scrcpy's regular decorated window. The menu bar app stores its scrcpy
 options in `~/.config/awb/config.toml`.
 
+On Apple silicon, awb prefers the scrcpy bundled in `Android Wifi Bridge.app` (move it from
+the release archive to `/Applications`; `install.sh` installs only the binaries), which runs
+as its own app,
+`Contents/Helpers/Android Mirror.app` (`com.ovitrif.awb.mirror`). It is a pinned scrcpy release
+patched to draw a QuickTime-style mirror window: rounded corners, a title bar with traffic
+lights over the top of the screen while the pointer is over it, and ⌘ + drag anywhere to move
+the window. It needs Homebrew's scrcpy dependencies; without them, or without the app, awb
+uses `scrcpy` from your PATH.
+
 ## Build from source
 
 ```sh
 git clone https://github.com/ovitrif/awb.git
 cd awb
 cargo build --release            # target/release/awb and target/release/awb-app
-scripts/bundle-app.sh            # optional: wraps awb-app into target/bundle/Android Wifi Bridge.app
+scripts/build-scrcpy.sh          # optional: patched scrcpy into target/scrcpy (needs meson, ninja, Homebrew ffmpeg, sdl3, libusb)
+scripts/bundle-app.sh            # optional: wraps awb-app (and target/scrcpy) into target/bundle/Android Wifi Bridge.app
 ```
 
 The workspace has three crates: `awb-core` (ADB, scrcpy, QR, and Bonjour logic), `awb`
 (the CLI), and `awb-app` (the menu bar app, built from the design in `DESIGN.pen`).
+`scrcpy/macos-window.patch` holds the mirror window patch; `scripts/build-scrcpy.sh` pins the
+scrcpy version and says how to move the patch to a new release.
 
 ## License
 

@@ -100,7 +100,7 @@ fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
     }
 }
 
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }

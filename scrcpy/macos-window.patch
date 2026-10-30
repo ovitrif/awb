@@ -1,0 +1,533 @@
+diff -ruN a/app/meson.build b/app/meson.build
+--- a/app/meson.build
++++ b/app/meson.build
+@@ -99,6 +99,10 @@
+     ]
+     if host_machine.system() == 'darwin'
+         feature_test_macros += '-D_DARWIN_C_SOURCE'
++        add_languages('objc', native: false)
++        add_project_arguments(['-D_DARWIN_C_SOURCE', '-fobjc-arc'],
++                              language: 'objc')
++        src += [ 'src/sys/macos/window.m' ]
+     endif
+ endif
+ 
+@@ -172,6 +176,11 @@
+ 
+ if usb_support
+     dependencies += dependency('libusb-1.0', static: static)
++endif
++
++if host_machine.system() == 'darwin'
++    dependencies += dependency('appleframeworks',
++                               modules: ['AppKit', 'QuartzCore'])
+ endif
+ 
+ if host_machine.system() == 'windows'
+diff -ruN a/app/src/screen.c b/app/src/screen.c
+--- a/app/src/screen.c
++++ b/app/src/screen.c
+@@ -9,6 +9,9 @@
+ #include "options.h"
+ #include "util/log.h"
+ #include "util/sdl.h"
++#ifdef __APPLE__
++# include "sys/macos/window.h"
++#endif
+ 
+ #define DISPLAY_MARGINS 96
+ 
+@@ -618,6 +621,12 @@
+         LOGE("Could not create renderer: %s", SDL_GetError());
+         goto error_destroy_window;
+     }
++
++#ifdef __APPLE__
++    if (params->window_borderless) {
++        sc_macos_window_init(screen->window, title);
++    }
++#endif
+ 
+ #ifdef SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
+     screen->gl_context = NULL;
+diff -ruN a/app/src/sys/macos/window.h b/app/src/sys/macos/window.h
+--- a/app/src/sys/macos/window.h
++++ b/app/src/sys/macos/window.h
+@@ -0,0 +1,15 @@
++#ifndef SC_MACOS_WINDOW_H
++#define SC_MACOS_WINDOW_H
++
++#include "common.h"
++
++#include <SDL3/SDL.h>
++
++// Style a borderless window like QuickTime's iPhone mirror: rounded corners,
++// a shadow, and a title bar with traffic lights over the top of the screen
++// while the pointer is over the window. Dragging that bar, or Cmd + dragging
++// anywhere, moves the window; with Cmd held, no mouse event reaches the device.
++void
++sc_macos_window_init(SDL_Window *window, const char *title);
++
++#endif
+diff -ruN a/app/src/sys/macos/window.m b/app/src/sys/macos/window.m
+--- a/app/src/sys/macos/window.m
++++ b/app/src/sys/macos/window.m
+@@ -0,0 +1,458 @@
++#include "sys/macos/window.h"
++
++#import <AppKit/AppKit.h>
++#import <QuartzCore/QuartzCore.h>
++
++#include "util/log.h"
++
++#define SC_TITLE_BAR_HEIGHT 28.0
++// Close to the screen corners of current phones at this window width
++#define SC_CORNER_RADIUS_RATIO 0.09
++#define SC_HOVER_POLL_INTERVAL (1.0 / 30)
++#define SC_FADE_DURATION 0.15
++#define SC_LIGHT_SIZE 12.0
++#define SC_LIGHT_SPACING 8.0
++#define SC_LIGHT_MARGIN 8.0
++
++@interface SCTitleBarView : NSView
++@property(nonatomic, readonly) BOOL dragging;
++@end
++
++@implementation SCTitleBarView {
++    NSPoint drag_start_mouse;
++    NSPoint drag_start_origin;
++}
++
++- (BOOL)acceptsFirstMouse:(NSEvent *)event {
++    (void) event;
++    return YES;
++}
++
++// Drag from anywhere but the buttons, the title label included
++- (NSView *)hitTest:(NSPoint)point {
++    NSView *hit = [super hitTest:point];
++    return [hit isKindOfClass:NSButton.class] ? hit : (hit ? self : nil);
++}
++
++- (void)mouseDown:(NSEvent *)event {
++    (void) event;
++    _dragging = YES;
++    drag_start_mouse = [NSEvent mouseLocation];
++    drag_start_origin = self.window.parentWindow.frame.origin;
++}
++
++- (void)mouseUp:(NSEvent *)event {
++    (void) event;
++    _dragging = NO;
++}
++
++- (void)mouseDragged:(NSEvent *)event {
++    (void) event;
++    NSWindow *parent = self.window.parentWindow;
++    if (!parent) {
++        return;
++    }
++    // The bar is a child window, so it follows its parent
++    NSPoint mouse = [NSEvent mouseLocation];
++    [parent setFrameOrigin:NSMakePoint(
++        drag_start_origin.x + mouse.x - drag_start_mouse.x,
++        drag_start_origin.y + mouse.y - drag_start_mouse.y)];
++}
++
++@end
++
++@interface SCWindowStyler : NSObject
++@end
++
++@implementation SCWindowStyler {
++    SDL_Window *sdl_window;
++    NSWindow *window;
++    NSPanel *bar;
++    NSVisualEffectView *bar_material;
++    NSArray<NSButton *> *lights;
++    NSTextField *title_label;
++    NSTimer *timer;
++    id mouse_monitor;
++    BOOL bar_shown;
++    // Buttons pressed with Cmd, kept from the device until released
++    NSUInteger cmd_buttons;
++}
++
++- (instancetype)initWithSDLWindow:(SDL_Window *)sdl
++                         nsWindow:(NSWindow *)ns
++                            title:(NSString *)title {
++    self = [super init];
++    if (!self) {
++        return nil;
++    }
++
++    sdl_window = sdl;
++    window = ns;
++    bar = [self makeBarWithTitle:title];
++
++    [self applyStyle];
++
++    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
++    NSArray<NSNotificationName> *restyle = @[
++        NSWindowDidResizeNotification,
++        NSWindowDidExitFullScreenNotification,
++        NSWindowDidEnterFullScreenNotification,
++        NSWindowDidDeminiaturizeNotification,
++    ];
++    for (NSNotificationName name in restyle) {
++        [center addObserver:self
++                   selector:@selector(windowChanged:)
++                       name:name
++                     object:window];
++    }
++
++    for (NSNotificationName name in @[NSWindowDidBecomeKeyNotification,
++                                       NSWindowDidResignKeyNotification]) {
++        [center addObserver:self
++                   selector:@selector(keyChanged:)
++                       name:name
++                     object:window];
++    }
++
++    // Poll the pointer rather than track areas on SDL's view, which SDL owns.
++    // It runs in the common modes so it keeps firing during a drag.
++    timer = [NSTimer timerWithTimeInterval:SC_HOVER_POLL_INTERVAL
++                                    target:self
++                                  selector:@selector(tick:)
++                                  userInfo:nil
++                                   repeats:YES];
++    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
++
++    [self installCommandDrag];
++
++    return self;
++}
++
++// QuickTime-style title bar: an overlay across the top of the screen, square
++// at the bottom, its top corners following the window's rounding
++- (NSPanel *)makeBarWithTitle:(NSString *)title {
++    NSRect frame = NSMakeRect(0, 0, 200, SC_TITLE_BAR_HEIGHT);
++    NSPanel *panel = [[NSPanel alloc]
++        initWithContentRect:frame
++                  styleMask:NSWindowStyleMaskBorderless
++                            | NSWindowStyleMaskNonactivatingPanel
++                    backing:NSBackingStoreBuffered
++                      defer:YES];
++    panel.releasedWhenClosed = NO;
++    panel.opaque = NO;
++    panel.backgroundColor = NSColor.clearColor;
++    panel.hasShadow = NO;
++    panel.hidesOnDeactivate = NO;
++    panel.becomesKeyOnlyIfNeeded = YES;
++    panel.collectionBehavior = NSWindowCollectionBehaviorTransient
++                             | NSWindowCollectionBehaviorIgnoresCycle;
++    panel.alphaValue = 0;
++
++    SCTitleBarView *view = [[SCTitleBarView alloc] initWithFrame:frame];
++    view.wantsLayer = YES;
++    view.layer.masksToBounds = YES;
++    panel.contentView = view;
++
++    // As tall as the window, so its rounded top matches the window's corners
++    // exactly; the bar shows only its top strip
++    bar_material = [[NSVisualEffectView alloc] initWithFrame:frame];
++    bar_material.material = NSVisualEffectMaterialHUDWindow;
++    bar_material.blendingMode = NSVisualEffectBlendingModeBehindWindow;
++    bar_material.state = NSVisualEffectStateActive;
++    bar_material.wantsLayer = YES;
++    bar_material.layer.cornerCurve = kCACornerCurveContinuous;
++    bar_material.layer.masksToBounds = YES;
++    [view addSubview:bar_material];
++
++    // AppKit's standard buttons stay gray outside a real title bar, so draw
++    // the traffic lights here
++    SEL actions[] = {
++        @selector(closeClicked:),
++        @selector(minimizeClicked:),
++        @selector(zoomClicked:),
++    };
++    NSMutableArray<NSButton *> *buttons = [NSMutableArray array];
++    for (size_t i = 0; i < 3; ++i) {
++        NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(
++            0, (SC_TITLE_BAR_HEIGHT - SC_LIGHT_SIZE) / 2,
++            SC_LIGHT_SIZE, SC_LIGHT_SIZE)];
++        button.bordered = NO;
++        button.title = @"";
++        button.tag = i;
++        button.wantsLayer = YES;
++        button.layer.cornerRadius = SC_LIGHT_SIZE / 2;
++        button.target = self;
++        button.action = actions[i];
++        [view addSubview:button];
++        [buttons addObject:button];
++    }
++    lights = buttons;
++
++    NSTextField *label = [NSTextField labelWithString:title];
++    label.font = [NSFont titleBarFontOfSize:0];
++    label.textColor = NSColor.secondaryLabelColor;
++    label.alignment = NSTextAlignmentCenter;
++    label.lineBreakMode = NSLineBreakByTruncatingTail;
++    [view addSubview:label];
++    title_label = label;
++
++    return panel;
++}
++
++- (CGFloat)cornerRadius {
++    return [self isFullscreen]
++        ? 0 : round(window.frame.size.width * SC_CORNER_RADIUS_RATIO);
++}
++
++// Fit the bar to the window's current width and corners
++- (void)layoutBar {
++    NSRect parent = window.frame;
++    [bar setFrame:NSMakeRect(parent.origin.x,
++                             NSMaxY(parent) - SC_TITLE_BAR_HEIGHT,
++                             parent.size.width, SC_TITLE_BAR_HEIGHT)
++          display:NO];
++
++    CGFloat radius = [self cornerRadius];
++    bar_material.frame = NSMakeRect(0, SC_TITLE_BAR_HEIGHT - parent.size.height,
++                                    parent.size.width, parent.size.height);
++    bar_material.layer.cornerRadius = radius;
++
++    // Keep the lights clear of the rounded corner at the bar's mid-height
++    CGFloat mid = SC_TITLE_BAR_HEIGHT / 2;
++    CGFloat corner = radius > mid
++        ? radius - sqrt(radius * radius - (radius - mid) * (radius - mid)) : 0;
++    CGFloat x = MAX(SC_LIGHT_MARGIN, corner + SC_LIGHT_MARGIN);
++    for (NSButton *light in lights) {
++        [light setFrameOrigin:NSMakePoint(x, light.frame.origin.y)];
++        x += SC_LIGHT_SIZE + SC_LIGHT_SPACING;
++    }
++
++    NSTextField *label = title_label;
++    CGFloat height = label.intrinsicContentSize.height;
++    CGFloat inset = x + 4;
++    label.frame = NSMakeRect(inset, (SC_TITLE_BAR_HEIGHT - height) / 2,
++                             MAX(0, parent.size.width - 2 * inset), height);
++}
++
++// Cmd + drag anywhere moves the window. While Cmd is held, no mouse event
++// reaches SDL, so nothing goes to the device; scrcpy binds no mouse action
++// to Cmd (its mouse gestures use Ctrl and Shift).
++- (void)installCommandDrag {
++    NSEventMask mask = NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged
++                     | NSEventMaskLeftMouseUp | NSEventMaskRightMouseDown
++                     | NSEventMaskRightMouseDragged | NSEventMaskRightMouseUp
++                     | NSEventMaskOtherMouseDown | NSEventMaskOtherMouseDragged
++                     | NSEventMaskOtherMouseUp | NSEventMaskScrollWheel
++                     | NSEventMaskMouseMoved;
++    __weak SCWindowStyler *weak_self = self;
++    mouse_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask
++                                                          handler:^NSEvent *(NSEvent *event) {
++        SCWindowStyler *strong_self = weak_self;
++        return strong_self ? [strong_self filterMouseEvent:event] : event;
++    }];
++}
++
++- (NSEvent *)filterMouseEvent:(NSEvent *)event {
++    NSEventType type = event.type;
++    BOOL down = type == NSEventTypeLeftMouseDown
++             || type == NSEventTypeRightMouseDown
++             || type == NSEventTypeOtherMouseDown;
++    BOOL up = type == NSEventTypeLeftMouseUp
++           || type == NSEventTypeRightMouseUp
++           || type == NSEventTypeOtherMouseUp;
++    NSUInteger button = down || up ? (NSUInteger) 1 << event.buttonNumber : 0;
++
++    // Forget buttons no longer held: the window drag may consume a mouse up,
++    // and a new press of the same button starts over
++    if (down) {
++        cmd_buttons &= ~button;
++    }
++    cmd_buttons &= [NSEvent pressedMouseButtons] | (up ? button : 0);
++
++    if (up && (cmd_buttons & button)) {
++        // The release of a press that never reached the device
++        cmd_buttons &= ~button;
++        return nil;
++    }
++
++    if (event.window != window) {
++        return event;
++    }
++
++    BOOL cmd = (event.modifierFlags & NSEventModifierFlagCommand)
++            && ![self sdlHasButtonDown];
++    if (down && cmd) {
++        cmd_buttons |= button;
++        if (type == NSEventTypeLeftMouseDown) {
++            [window performWindowDragWithEvent:event];
++        }
++        return nil;
++    }
++
++    // Swallow the rest of a Cmd gesture, even once Cmd is released
++    return cmd_buttons || cmd ? nil : event;
++}
++
++// A gesture that started without Cmd keeps going to the device, so the phone
++// never sees a touch down without its up
++- (BOOL)sdlHasButtonDown {
++    return SDL_GetMouseState(NULL, NULL) != 0;
++}
++
++- (BOOL)isFullscreen {
++    return (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
++}
++
++- (void)applyStyle {
++    window.opaque = NO;
++    window.backgroundColor = NSColor.clearColor;
++    window.hasShadow = YES;
++
++    NSView *content = window.contentView;
++    content.wantsLayer = YES;
++    content.layer.cornerRadius = [self cornerRadius];
++    content.layer.cornerCurve = kCACornerCurveContinuous;
++    content.layer.masksToBounds = YES;
++
++    // The shadow follows the window's alpha, recompute it for the new corners
++    [window invalidateShadow];
++}
++
++- (void)windowChanged:(NSNotification *)notification {
++    (void) notification;
++    [self applyStyle];
++    if (bar_shown) {
++        [self layoutBar];
++    }
++}
++
++- (void)keyChanged:(NSNotification *)notification {
++    (void) notification;
++    [self updateLights];
++}
++
++// Colored while the mirror window is active, gray otherwise, like AppKit's
++- (void)updateLights {
++    NSColor *colors[] = {
++        [NSColor colorWithSRGBRed:1.00 green:0.37 blue:0.34 alpha:1],
++        [NSColor colorWithSRGBRed:1.00 green:0.74 blue:0.18 alpha:1],
++        [NSColor colorWithSRGBRed:0.16 green:0.78 blue:0.25 alpha:1],
++    };
++    BOOL active = window.isKeyWindow;
++    for (NSButton *light in lights) {
++        NSColor *color = active ? colors[light.tag]
++                                : [NSColor colorWithWhite:0.5 alpha:0.5];
++        light.layer.backgroundColor = color.CGColor;
++    }
++}
++
++- (void)tick:(NSTimer *)t {
++    (void) t;
++
++    if (window.opaque) {
++        // SDL resets the window background on some transitions
++        [self applyStyle];
++    }
++
++    BOOL can_show = window.visible && !window.miniaturized
++                 && ![self isFullscreen];
++    BOOL hovered = NO;
++    if (can_show) {
++        NSPoint mouse = [NSEvent mouseLocation];
++        // Over the mirror only where no other window covers it
++        NSInteger top = [NSWindow windowNumberAtPoint:mouse
++                          belowWindowWithWindowNumber:0];
++        BOOL on_top = top == window.windowNumber
++                   || (bar_shown && top == bar.windowNumber);
++        // Keep the bar while it drags the window
++        BOOL dragging = bar_shown && ([NSEvent pressedMouseButtons] & 1)
++                     && ((SCTitleBarView *) bar.contentView).dragging;
++        hovered = (on_top && NSPointInRect(mouse, window.frame)) || dragging;
++    }
++
++    if (bar_shown && bar.level != window.level) {
++        bar.level = window.level;
++    }
++
++    if (hovered && !bar_shown) {
++        [self showBar];
++    } else if (!hovered && bar_shown) {
++        [self hideBar];
++    }
++}
++
++- (void)showBar {
++    bar_shown = YES;
++    [self layoutBar];
++    bar.level = window.level;
++    bar.ignoresMouseEvents = NO;
++    [self updateLights];
++    if (!bar.parentWindow) {
++        [window addChildWindow:bar ordered:NSWindowAbove];
++    }
++    [bar orderFront:nil];
++    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
++        context.duration = SC_FADE_DURATION;
++        bar.animator.alphaValue = 1;
++    } completionHandler:nil];
++}
++
++- (void)hideBar {
++    bar_shown = NO;
++    // Let clicks through to the device while the bar fades out
++    bar.ignoresMouseEvents = YES;
++    NSPanel *panel = bar;
++    NSWindow *parent = window;
++    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
++        context.duration = SC_FADE_DURATION;
++        panel.animator.alphaValue = 0;
++    } completionHandler:^{
++        if (self->bar_shown) {
++            return;
++        }
++        // Detach the hidden bar so it takes no clicks and window managers
++        // only ever see the mirror window
++        [parent removeChildWindow:panel];
++        [panel orderOut:nil];
++    }];
++}
++
++- (void)closeClicked:(id)sender {
++    (void) sender;
++    SDL_Event event = {.type = SDL_EVENT_QUIT};
++    SDL_PushEvent(&event);
++}
++
++- (void)minimizeClicked:(id)sender {
++    (void) sender;
++    SDL_MinimizeWindow(sdl_window);
++}
++
++- (void)zoomClicked:(id)sender {
++    (void) sender;
++    bool fullscreen = SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_FULLSCREEN;
++    SDL_SetWindowFullscreen(sdl_window, !fullscreen);
++}
++
++@end
++
++// Lives as long as the process: scrcpy has a single window
++static SCWindowStyler *styler;
++
++void
++sc_macos_window_init(SDL_Window *window, const char *title) {
++    SDL_PropertiesID props = SDL_GetWindowProperties(window);
++    NSWindow *ns_window = (__bridge NSWindow *) SDL_GetPointerProperty(
++        props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
++    if (!ns_window) {
++        LOGW("Could not get the Cocoa window, keeping the default style");
++        return;
++    }
++
++    @autoreleasepool {
++        styler = [[SCWindowStyler alloc]
++            initWithSDLWindow:window
++                     nsWindow:ns_window
++                        title:[NSString stringWithUTF8String:title] ?: @""];
++    }
++}
