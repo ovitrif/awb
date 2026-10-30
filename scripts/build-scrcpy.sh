@@ -7,6 +7,7 @@
 #   brew install meson ninja pkgconf ffmpeg sdl3 libusb
 # The binary links those Homebrew libraries, so it runs where they are
 # installed. scripts/bundle-app.sh copies the output into the app when present.
+# The build is scrcpy (Apache-2.0) modified by scrcpy/macos-window.patch.
 #
 # To move to a new scrcpy release: bump the version and both sha256 values,
 # run this script and fix any rejected hunk in the extracted source, then
@@ -76,6 +77,8 @@ mkdir -p "$OUT_DIR"
 cp "${WORK}/build/app/scrcpy" "${OUT_DIR}/scrcpy"
 cp "${WORK}/scrcpy-server-v${VERSION}" "${OUT_DIR}/scrcpy-server"
 cp "${SRC}/app/data/scrcpy.png" "${SRC}/app/data/disconnected.png" "$OUT_DIR"
+# Apache-2.0: ship scrcpy's license with the modified build
+cp "${SRC}/LICENSE" "${OUT_DIR}/LICENSE"
 codesign --force --sign - "${OUT_DIR}/scrcpy" 2>/dev/null || true
 
 echo "Built patched scrcpy ${VERSION} in ${OUT_DIR}"

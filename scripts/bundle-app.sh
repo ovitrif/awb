@@ -66,7 +66,8 @@ elif [ -x "${SCRCPY_DIR}/scrcpy" ]; then
   mkdir -p "${MIRROR}/Contents/MacOS" "${MIRROR}/Contents/Resources"
   cp "${SCRCPY_DIR}/scrcpy" "${MIRROR}/Contents/MacOS/scrcpy"
   cp "${SCRCPY_DIR}/scrcpy-server" "${SCRCPY_DIR}/scrcpy.png" \
-    "${SCRCPY_DIR}/disconnected.png" "${MIRROR}/Contents/Resources/"
+    "${SCRCPY_DIR}/disconnected.png" "${SCRCPY_DIR}/LICENSE" \
+    "${MIRROR}/Contents/Resources/"
   cp "${APP}/Contents/Resources/${ICON_NAME}.icns" "${MIRROR}/Contents/Resources/AppIcon.icns"
 
   # awb starts mirrors through this launcher; opened with no arguments (Finder,

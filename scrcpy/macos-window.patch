@@ -62,9 +62,9 @@ diff -ruN a/app/src/sys/macos/window.h b/app/src/sys/macos/window.h
 +#include <SDL3/SDL.h>
 +
 +// Style a borderless window like QuickTime's iPhone mirror: rounded corners,
-+// a shadow, and a title bar with traffic lights that shows above the window
-+// only while the pointer is over it. Dragging that bar moves the window, so
-+// clicks and swipes on the device screen itself stay untouched.
++// a shadow, and a title bar with traffic lights over the top of the screen
++// while the pointer is over the window. Dragging that bar, or Cmd + dragging
++// anywhere, moves the window; with Cmd held, no mouse event reaches the device.
 +void
 +sc_macos_window_init(SDL_Window *window, const char *title);
 +
